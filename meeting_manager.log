@@ -1,0 +1,301 @@
+2026-01-27 15:12:23,815 - __main__ - INFO - Initialisiere Microsoft Graph API Verbindung...
+2026-01-27 15:12:23,816 - __main__ - INFO - Initialisiere LLM (anthropic/claude-sonnet-4-5)...
+2026-01-27 15:12:23,816 - __main__ - INFO - Meeting Manager erfolgreich initialisiert
+2026-01-27 15:12:23,816 - __main__ - INFO - Starte Ordnerüberwachung: transcripts/incoming
+2026-01-27 15:12:23,816 - __main__ - INFO - Verarbeite vorhandene Dateien in transcripts/incoming...
+2026-01-27 15:12:23,817 - __main__ - INFO - Gefunden: 1 Datei(en)
+2026-01-27 15:12:23,817 - __main__ - INFO - Verarbeite Transkript: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 15:12:23,817 - __main__ - INFO - Extrahiere Text aus PDF: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 15:12:27,557 - __main__ - INFO - ✓ 76123 Zeichen aus 35 Seite(n) extrahiert
+2026-01-27 15:12:27,558 - __main__ - INFO - ✓ Datum/Zeit aus Inhalt extrahiert: 2026-01-26 10:03:15
+2026-01-27 15:12:27,558 - __main__ - INFO - Datum/Zeit-Quelle: content
+2026-01-27 15:12:27,559 - __main__ - INFO - Suche Meeting um 2026-01-26 10:03:15 (±15 Minuten)...
+2026-01-27 15:12:28,027 - __main__ - INFO - Meeting gefunden: 1:1 KNE / SH
+2026-01-27 15:12:28,027 - __main__ - INFO - Nutze Meeting-Titel: 11_KNE_SH
+2026-01-27 15:12:28,027 - __main__ - INFO - ✓ Datei verschoben: 2026-01-26_11_KNE_SH.pdf
+2026-01-27 15:12:29,036 - __main__ - INFO - ✓ Ordnerüberwachung aktiv. Drücke Ctrl+C zum Beenden.
+2026-01-27 17:44:52,642 - __main__ - INFO - Neue Datei erkannt: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 17:44:54,643 - __main__ - INFO - Verarbeite Transkript: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 17:44:54,644 - __main__ - INFO - Extrahiere Text aus PDF: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 17:44:57,611 - __main__ - INFO - ✓ 76123 Zeichen aus 35 Seite(n) extrahiert
+2026-01-27 17:44:57,612 - __main__ - INFO - ✓ Datum/Zeit aus Inhalt extrahiert: 2026-01-26 10:03:15
+2026-01-27 17:44:57,612 - __main__ - INFO - Datum/Zeit-Quelle: content
+2026-01-27 17:44:57,613 - __main__ - INFO - Suche Meeting um 2026-01-26 10:03:15 (±15 Minuten)...
+2026-01-27 17:44:58,433 - __main__ - WARNING - Keine Events am 2026-01-26 gefunden
+2026-01-27 17:44:58,434 - __main__ - INFO - Kein Meeting gefunden, generiere Titel mit LLM...
+2026-01-27 17:44:58,435 - __main__ - INFO - Extrahiere Text aus PDF: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 17:45:01,935 - __main__ - INFO - ✓ 76123 Zeichen aus 35 Seite(n) extrahiert
+2026-01-27 17:45:01,936 - __main__ - INFO - Generiere Titel für 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt mit LLM...
+2026-01-27 17:45:04,299 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-27 17:45:04,339 - __main__ - INFO - Generierter Titel: Einfuehrung_agile_Arbeitsweise_OKRs
+2026-01-27 17:45:04,340 - __main__ - INFO - ✓ Datei verschoben: 2026-01-26_Einfuehrung_agile_Arbeitsweise_OKRs.pdf
+2026-01-27 17:45:04,342 - __main__ - INFO - Neue Datei erkannt: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt
+2026-01-27 17:45:06,342 - __main__ - INFO - Verarbeite Transkript: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt
+2026-01-27 17:45:06,343 - __main__ - WARNING - Fehler beim Extrahieren von Datum/Zeit aus Inhalt: [Errno 2] No such file or directory: 'transcripts/incoming/01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt'
+2026-01-27 17:45:06,343 - __main__ - ERROR - Fehler bei Verarbeitung von 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt: [Errno 2] No such file or directory: 'transcripts/incoming/01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt'
+2026-01-27 18:08:38,679 - __main__ - INFO - Neue Datei erkannt: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 18:08:40,699 - __main__ - INFO - Verarbeite Transkript: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 18:08:40,700 - __main__ - INFO - Extrahiere Text aus PDF: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 18:08:46,227 - __main__ - INFO - ✓ 76123 Zeichen aus 35 Seite(n) extrahiert
+2026-01-27 18:08:46,227 - __main__ - INFO - ✓ Datum/Zeit aus Inhalt extrahiert: 2026-01-26 10:03:15
+2026-01-27 18:08:46,227 - __main__ - INFO - Datum/Zeit-Quelle: content
+2026-01-27 18:08:46,228 - __main__ - INFO - Suche Meeting um 2026-01-26 10:03:15 (±15 Minuten)...
+2026-01-27 18:08:46,440 - __main__ - WARNING - Keine Events am 2026-01-26 gefunden
+2026-01-27 18:08:46,441 - __main__ - INFO - Kein Meeting gefunden, generiere Titel mit LLM...
+2026-01-27 18:08:46,462 - __main__ - INFO - Extrahiere Text aus PDF: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 18:08:49,900 - __main__ - INFO - ✓ 76123 Zeichen aus 35 Seite(n) extrahiert
+2026-01-27 18:08:49,901 - __main__ - INFO - Generiere Titel für 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt mit LLM...
+2026-01-27 18:08:51,652 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-27 18:08:51,654 - __main__ - INFO - Generierter Titel: Einfuehrung_agiler_Arbeitsweise_OKRs
+2026-01-27 18:08:51,673 - __main__ - ERROR - Fehler bei Verarbeitung von 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf: [Errno 2] No such file or directory: 'transcripts/incoming/01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf'
+2026-01-27 18:08:51,674 - __main__ - INFO - Neue Datei erkannt: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt
+2026-01-27 18:08:53,674 - __main__ - INFO - Verarbeite Transkript: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt
+2026-01-27 18:08:53,675 - __main__ - WARNING - Fehler beim Extrahieren von Datum/Zeit aus Inhalt: [Errno 2] No such file or directory: 'transcripts/incoming/01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt'
+2026-01-27 18:08:53,675 - __main__ - ERROR - Fehler bei Verarbeitung von 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt: [Errno 2] No such file or directory: 'transcripts/incoming/01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt'
+2026-01-27 18:22:01,112 - __main__ - INFO - Neue Datei erkannt: 01-27 KI-Revolution und Personalmanagement_ Disruptive Transformation von Geschäftsprozessen und kaufmännischen Berufsbildern in technischen Unternehmen-transcript.pdf
+2026-01-27 18:22:03,114 - __main__ - INFO - Verarbeite Transkript: 01-27 KI-Revolution und Personalmanagement_ Disruptive Transformation von Geschäftsprozessen und kaufmännischen Berufsbildern in technischen Unternehmen-transcript.pdf
+2026-01-27 18:22:03,114 - __main__ - INFO - Extrahiere Text aus PDF: 01-27 KI-Revolution und Personalmanagement_ Disruptive Transformation von Geschäftsprozessen und kaufmännischen Berufsbildern in technischen Unternehmen-transcript.pdf
+2026-01-27 18:22:05,095 - __main__ - INFO - ✓ 39586 Zeichen aus 19 Seite(n) extrahiert
+2026-01-27 18:22:05,095 - __main__ - INFO - ✓ Datum/Zeit aus Inhalt extrahiert: 2026-01-27 15:30:18
+2026-01-27 18:22:05,095 - __main__ - INFO - Datum/Zeit-Quelle: content
+2026-01-27 18:22:05,095 - __main__ - INFO - Suche Meeting um 2026-01-27 15:30:18 (±15 Minuten)...
+2026-01-27 18:22:05,226 - __main__ - WARNING - Keine Events am 2026-01-27 gefunden
+2026-01-27 18:22:05,226 - __main__ - INFO - Kein Meeting gefunden, generiere Titel mit LLM...
+2026-01-27 18:22:05,226 - __main__ - INFO - Extrahiere Text aus PDF: 01-27 KI-Revolution und Personalmanagement_ Disruptive Transformation von Geschäftsprozessen und kaufmännischen Berufsbildern in technischen Unternehmen-transcript.pdf
+2026-01-27 18:22:06,932 - __main__ - INFO - ✓ 39586 Zeichen aus 19 Seite(n) extrahiert
+2026-01-27 18:22:06,954 - __main__ - INFO - Generiere Titel für 01-27 KI-Revolution und Personalmanagement_ Disruptive Transformation von Geschäftsprozessen und kaufmännischen Berufsbildern in technischen Unternehmen-transcript.tmp.txt mit LLM...
+2026-01-27 18:22:08,719 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-27 18:22:08,722 - __main__ - INFO - Generierter Titel: KI-Agenten_Bueroautomatisierung
+2026-01-27 18:22:08,723 - __main__ - INFO - ✓ Datei verschoben: 2026-01-27_KI-Agenten_Bueroautomatisierung.pdf
+2026-01-27 18:22:08,724 - __main__ - INFO - Neue Datei erkannt: 01-27 KI-Revolution und Personalmanagement_ Disruptive Transformation von Geschäftsprozessen und kaufmännischen Berufsbildern in technischen Unternehmen-transcript.tmp.txt
+2026-01-27 18:22:10,724 - __main__ - INFO - Verarbeite Transkript: 01-27 KI-Revolution und Personalmanagement_ Disruptive Transformation von Geschäftsprozessen und kaufmännischen Berufsbildern in technischen Unternehmen-transcript.tmp.txt
+2026-01-27 18:22:10,725 - __main__ - WARNING - Fehler beim Extrahieren von Datum/Zeit aus Inhalt: [Errno 2] No such file or directory: 'transcripts/incoming/01-27 KI-Revolution und Personalmanagement_ Disruptive Transformation von Geschäftsprozessen und kaufmännischen Berufsbildern in technischen Unternehmen-transcript.tmp.txt'
+2026-01-27 18:22:10,725 - __main__ - ERROR - Fehler bei Verarbeitung von 01-27 KI-Revolution und Personalmanagement_ Disruptive Transformation von Geschäftsprozessen und kaufmännischen Berufsbildern in technischen Unternehmen-transcript.tmp.txt: [Errno 2] No such file or directory: 'transcripts/incoming/01-27 KI-Revolution und Personalmanagement_ Disruptive Transformation von Geschäftsprozessen und kaufmännischen Berufsbildern in technischen Unternehmen-transcript.tmp.txt'
+2026-01-27 18:39:11,953 - __main__ - INFO - Neue Datei erkannt: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 18:39:13,955 - __main__ - INFO - Verarbeite Transkript: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 18:39:13,956 - __main__ - INFO - Extrahiere Text aus PDF: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 18:39:17,075 - __main__ - INFO - ✓ 76123 Zeichen aus 35 Seite(n) extrahiert
+2026-01-27 18:39:17,075 - __main__ - INFO - ✓ Datum/Zeit aus Inhalt extrahiert: 2026-01-26 10:03:15
+2026-01-27 18:39:17,076 - __main__ - INFO - Datum/Zeit-Quelle: content
+2026-01-27 18:39:17,076 - __main__ - INFO - Suche Meeting um 2026-01-26 10:03:15 (±15 Minuten)...
+2026-01-27 18:39:17,211 - __main__ - WARNING - Keine Events am 2026-01-26 gefunden
+2026-01-27 18:39:17,211 - __main__ - INFO - Kein Meeting gefunden, generiere Titel mit LLM...
+2026-01-27 18:39:17,211 - __main__ - INFO - Extrahiere Text aus PDF: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 18:39:17,211 - __main__ - ERROR - Fehler beim Lesen der PDF: File path transcripts/incoming/temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf is not a valid file or url
+2026-01-27 18:39:17,211 - __main__ - INFO - Generiere Titel für temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt mit LLM...
+2026-01-27 18:39:20,222 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-27 18:39:20,225 - __main__ - INFO - Generierter Titel: Allgemeines_Meeting---Hinweis_Das_Transkript_schei
+2026-01-27 18:39:20,227 - __main__ - ERROR - Fehler bei Verarbeitung von temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf'
+2026-01-27 18:39:20,227 - __main__ - INFO - Neue Datei erkannt: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt
+2026-01-27 18:39:22,228 - __main__ - INFO - Verarbeite Transkript: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt
+2026-01-27 18:39:22,229 - __main__ - WARNING - Fehler beim Extrahieren von Datum/Zeit aus Inhalt: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt'
+2026-01-27 18:39:22,229 - __main__ - ERROR - Fehler bei Verarbeitung von temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt'
+2026-01-27 19:21:09,557 - __main__ - INFO - Neue Datei erkannt: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 19:21:11,558 - __main__ - INFO - Verarbeite Transkript: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 19:21:11,559 - __main__ - INFO - Extrahiere Text aus PDF: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 19:21:14,268 - __main__ - INFO - ✓ 76123 Zeichen aus 35 Seite(n) extrahiert
+2026-01-27 19:21:14,268 - __main__ - INFO - ✓ Datum/Zeit aus Inhalt extrahiert: 2026-01-26 10:03:15
+2026-01-27 19:21:14,269 - __main__ - INFO - Datum/Zeit-Quelle: content
+2026-01-27 19:21:14,269 - __main__ - INFO - Suche Meeting um 2026-01-26 10:03:15 (±15 Minuten)...
+2026-01-27 19:21:14,494 - __main__ - WARNING - Keine Events am 2026-01-26 gefunden
+2026-01-27 19:21:14,495 - __main__ - INFO - Kein Meeting gefunden, generiere Titel mit LLM...
+2026-01-27 19:21:14,495 - __main__ - INFO - Extrahiere Text aus PDF: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf
+2026-01-27 19:21:18,580 - __main__ - INFO - ✓ 76123 Zeichen aus 35 Seite(n) extrahiert
+2026-01-27 19:21:18,583 - __main__ - INFO - Generiere Titel für 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt mit LLM...
+2026-01-27 19:21:20,360 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-27 19:21:20,362 - __main__ - INFO - Generierter Titel: Agile_Arbeitsweise_und_Zielerreichung
+2026-01-27 19:21:20,363 - __main__ - ERROR - Fehler bei Verarbeitung von 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.pdf: [Errno 2] No such file or directory: 'transcripts/incoming/01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt'
+2026-01-27 19:21:20,363 - __main__ - INFO - Neue Datei erkannt: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt
+2026-01-27 19:21:22,364 - __main__ - INFO - Verarbeite Transkript: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt
+2026-01-27 19:21:22,365 - __main__ - WARNING - Fehler beim Extrahieren von Datum/Zeit aus Inhalt: [Errno 2] No such file or directory: 'transcripts/incoming/01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt'
+2026-01-27 19:21:22,365 - __main__ - ERROR - Fehler bei Verarbeitung von 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt: [Errno 2] No such file or directory: 'transcripts/incoming/01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript.tmp.txt'
+2026-01-27 20:47:58,139 - __main__ - INFO - Neue Datei erkannt: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 20:48:00,144 - __main__ - INFO - Verarbeite Transkript: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 20:48:00,145 - __main__ - INFO - Extrahiere Text aus PDF: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 20:48:02,193 - __main__ - INFO - ✓ 76830 Zeichen aus 35 Seite(n) extrahiert
+2026-01-27 20:48:02,193 - __main__ - INFO - ✓ Datum/Zeit aus Inhalt extrahiert: 2026-01-26 10:03:15
+2026-01-27 20:48:02,193 - __main__ - INFO - Datum/Zeit-Quelle: content
+2026-01-27 20:48:02,193 - __main__ - INFO - Suche Meeting um 2026-01-26 10:03:15 (±15 Minuten)...
+2026-01-27 20:48:02,308 - __main__ - WARNING - Keine Events am 2026-01-26 gefunden
+2026-01-27 20:48:02,308 - __main__ - INFO - Kein Meeting gefunden, generiere Titel mit LLM...
+2026-01-27 20:48:02,309 - __main__ - INFO - Extrahiere Text aus PDF: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 20:48:02,309 - __main__ - ERROR - Fehler beim Lesen der PDF: File path transcripts/incoming/temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf is not a valid file or url
+2026-01-27 20:48:02,310 - __main__ - INFO - Generiere Titel für temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt mit LLM...
+2026-01-27 20:48:04,412 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-27 20:48:04,417 - __main__ - INFO - Generierter Titel: Meeting_Transkript_Ohne_Inhalt
+2026-01-27 20:48:04,419 - __main__ - ERROR - Fehler bei Verarbeitung von temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf'
+2026-01-27 20:48:04,419 - __main__ - INFO - Neue Datei erkannt: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt
+2026-01-27 20:48:06,420 - __main__ - INFO - Verarbeite Transkript: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt
+2026-01-27 20:48:06,420 - __main__ - WARNING - Fehler beim Extrahieren von Datum/Zeit aus Inhalt: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt'
+2026-01-27 20:48:06,420 - __main__ - ERROR - Fehler bei Verarbeitung von temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt'
+2026-01-27 20:48:44,335 - __main__ - INFO - Neue Datei erkannt: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 20:48:46,336 - __main__ - INFO - Verarbeite Transkript: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 20:48:46,336 - __main__ - INFO - Extrahiere Text aus PDF: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 20:48:47,834 - __main__ - INFO - ✓ 76830 Zeichen aus 35 Seite(n) extrahiert
+2026-01-27 20:48:47,835 - __main__ - INFO - ✓ Datum/Zeit aus Inhalt extrahiert: 2026-01-26 10:03:15
+2026-01-27 20:48:47,835 - __main__ - INFO - Datum/Zeit-Quelle: content
+2026-01-27 20:48:47,835 - __main__ - INFO - Suche Meeting um 2026-01-26 10:03:15 (±15 Minuten)...
+2026-01-27 20:48:47,985 - __main__ - WARNING - Keine Events am 2026-01-26 gefunden
+2026-01-27 20:48:47,986 - __main__ - INFO - Kein Meeting gefunden, generiere Titel mit LLM...
+2026-01-27 20:48:47,986 - __main__ - INFO - Extrahiere Text aus PDF: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 20:48:47,986 - __main__ - ERROR - Fehler beim Lesen der PDF: File path transcripts/incoming/01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf is not a valid file or url
+2026-01-27 20:48:47,987 - __main__ - INFO - Generiere Titel für 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt mit LLM...
+2026-01-27 20:48:50,408 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-27 20:48:50,410 - __main__ - INFO - Generierter Titel: Meeting_ohne_Inhalt
+2026-01-27 20:48:50,411 - __main__ - ERROR - Fehler bei Verarbeitung von 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf: [Errno 2] No such file or directory: 'transcripts/incoming/01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf'
+2026-01-27 20:48:50,412 - __main__ - INFO - Neue Datei erkannt: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt
+2026-01-27 20:48:52,412 - __main__ - INFO - Verarbeite Transkript: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt
+2026-01-27 20:48:52,412 - __main__ - WARNING - Fehler beim Extrahieren von Datum/Zeit aus Inhalt: [Errno 2] No such file or directory: 'transcripts/incoming/01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt'
+2026-01-27 20:48:52,413 - __main__ - ERROR - Fehler bei Verarbeitung von 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt: [Errno 2] No such file or directory: 'transcripts/incoming/01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt'
+2026-01-27 21:33:31,735 - __main__ - INFO - Neue Datei erkannt: temp_01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.pdf
+2026-01-27 21:33:33,739 - __main__ - INFO - Verarbeite Transkript: temp_01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.pdf
+2026-01-27 21:33:33,740 - __main__ - INFO - Extrahiere Text aus PDF: temp_01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.pdf
+2026-01-27 21:33:34,992 - __main__ - INFO - ✓ 38226 Zeichen aus 17 Seite(n) extrahiert
+2026-01-27 21:33:34,992 - __main__ - INFO - ✓ Datum/Zeit aus Inhalt extrahiert: 2026-01-26 12:30:55
+2026-01-27 21:33:34,992 - __main__ - INFO - Datum/Zeit-Quelle: content
+2026-01-27 21:33:34,992 - __main__ - INFO - Suche Meeting um 2026-01-26 12:30:55 (±15 Minuten)...
+2026-01-27 21:33:35,096 - __main__ - WARNING - Keine Events am 2026-01-26 gefunden
+2026-01-27 21:33:35,097 - __main__ - INFO - Kein Meeting gefunden, generiere Titel mit LLM...
+2026-01-27 21:33:35,097 - __main__ - INFO - Extrahiere Text aus PDF: temp_01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.pdf
+2026-01-27 21:33:35,097 - __main__ - ERROR - Fehler beim Lesen der PDF: File path transcripts/incoming/temp_01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.pdf is not a valid file or url
+2026-01-27 21:33:35,098 - __main__ - INFO - Generiere Titel für temp_01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.tmp.txt mit LLM...
+2026-01-27 21:33:37,975 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-27 21:33:37,979 - __main__ - INFO - Generierter Titel: Meeting_Ohne_Inhalt---Hinweis_Das_Transkript_schei
+2026-01-27 21:33:37,981 - __main__ - ERROR - Fehler bei Verarbeitung von temp_01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.pdf: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.pdf'
+2026-01-27 21:33:37,981 - __main__ - INFO - Neue Datei erkannt: temp_01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.tmp.txt
+2026-01-27 21:33:39,982 - __main__ - INFO - Verarbeite Transkript: temp_01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.tmp.txt
+2026-01-27 21:33:39,982 - __main__ - WARNING - Fehler beim Extrahieren von Datum/Zeit aus Inhalt: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.tmp.txt'
+2026-01-27 21:33:39,982 - __main__ - ERROR - Fehler bei Verarbeitung von temp_01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.tmp.txt: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.tmp.txt'
+2026-01-27 21:35:06,901 - __main__ - INFO - Neue Datei erkannt: 01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.pdf
+2026-01-27 21:35:08,902 - __main__ - INFO - Verarbeite Transkript: 01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.pdf
+2026-01-27 21:35:08,902 - __main__ - INFO - Extrahiere Text aus PDF: 01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.pdf
+2026-01-27 21:35:09,670 - __main__ - INFO - ✓ 38226 Zeichen aus 17 Seite(n) extrahiert
+2026-01-27 21:35:09,670 - __main__ - INFO - ✓ Datum/Zeit aus Inhalt extrahiert: 2026-01-26 12:30:55
+2026-01-27 21:35:09,670 - __main__ - INFO - Datum/Zeit-Quelle: content
+2026-01-27 21:35:09,670 - __main__ - INFO - Suche Meeting um 2026-01-26 12:30:55 (±15 Minuten)...
+2026-01-27 21:35:09,761 - __main__ - WARNING - Keine Events am 2026-01-26 gefunden
+2026-01-27 21:35:09,762 - __main__ - INFO - Kein Meeting gefunden, generiere Titel mit LLM...
+2026-01-27 21:35:09,762 - __main__ - INFO - Extrahiere Text aus PDF: 01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.pdf
+2026-01-27 21:35:09,762 - __main__ - ERROR - Fehler beim Lesen der PDF: File path transcripts/incoming/01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.pdf is not a valid file or url
+2026-01-27 21:35:09,763 - __main__ - INFO - Generiere Titel für 01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.tmp.txt mit LLM...
+2026-01-27 21:35:13,568 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-27 21:35:13,569 - __main__ - INFO - Generierter Titel: Ich_kann_keinen_Titel_generieren,_da_kein_Transkri
+2026-01-27 21:35:13,571 - __main__ - ERROR - Fehler bei Verarbeitung von 01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.pdf: [Errno 2] No such file or directory: 'transcripts/incoming/01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.pdf'
+2026-01-27 21:35:13,572 - __main__ - INFO - Neue Datei erkannt: 01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.tmp.txt
+2026-01-27 21:35:15,572 - __main__ - INFO - Verarbeite Transkript: 01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.tmp.txt
+2026-01-27 21:35:15,572 - __main__ - WARNING - Fehler beim Extrahieren von Datum/Zeit aus Inhalt: [Errno 2] No such file or directory: 'transcripts/incoming/01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.tmp.txt'
+2026-01-27 21:35:15,572 - __main__ - ERROR - Fehler bei Verarbeitung von 01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.tmp.txt: [Errno 2] No such file or directory: 'transcripts/incoming/01-26 Strategie zur Optimierung von Reporting- und Angebotsprozessen-transcript.tmp.txt'
+2026-01-27 21:53:47,461 - __main__ - INFO - Neue Datei erkannt: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 21:53:52,626 - __main__ - INFO - Verarbeite Transkript: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 21:53:52,626 - __main__ - INFO - Extrahiere Text aus PDF: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 21:53:54,302 - __main__ - INFO - ✓ 76830 Zeichen aus 35 Seite(n) extrahiert
+2026-01-27 21:53:54,302 - __main__ - INFO - ✓ Datum/Zeit aus Inhalt extrahiert: 2026-01-26 10:03:15
+2026-01-27 21:53:54,302 - __main__ - INFO - Datum/Zeit-Quelle: content
+2026-01-27 21:53:54,302 - __main__ - INFO - Suche Meeting um 2026-01-26 10:03:15 (±15 Minuten)...
+2026-01-27 21:53:54,409 - __main__ - WARNING - Keine Events am 2026-01-26 gefunden
+2026-01-27 21:53:54,409 - __main__ - INFO - Kein Meeting gefunden, generiere Titel mit LLM...
+2026-01-27 21:53:54,409 - __main__ - INFO - Extrahiere Text aus PDF: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 21:53:54,410 - __main__ - ERROR - Fehler beim Lesen der PDF: File path transcripts/incoming/temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf is not a valid file or url
+2026-01-27 21:53:54,410 - __main__ - INFO - Generiere Titel für temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt mit LLM...
+2026-01-27 21:53:57,303 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-27 21:53:57,305 - __main__ - INFO - Generierter Titel: Da_kein_Transkript-Inhalt_bereitgestellt_wurde,_ka
+2026-01-27 21:53:57,306 - __main__ - ERROR - Fehler bei Verarbeitung von temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf'
+2026-01-27 21:53:57,307 - __main__ - INFO - Neue Datei erkannt: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt
+2026-01-27 21:53:59,307 - __main__ - INFO - Verarbeite Transkript: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt
+2026-01-27 21:53:59,308 - __main__ - WARNING - Fehler beim Extrahieren von Datum/Zeit aus Inhalt: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt'
+2026-01-27 21:53:59,308 - __main__ - ERROR - Fehler bei Verarbeitung von temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt'
+2026-01-27 22:00:38,697 - __main__ - INFO - Neue Datei erkannt: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 22:00:40,698 - __main__ - INFO - Verarbeite Transkript: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 22:00:40,698 - __main__ - INFO - Extrahiere Text aus PDF: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 22:00:42,351 - __main__ - INFO - ✓ 76830 Zeichen aus 35 Seite(n) extrahiert
+2026-01-27 22:00:42,351 - __main__ - INFO - ✓ Datum/Zeit aus Inhalt extrahiert: 2026-01-26 10:03:15
+2026-01-27 22:00:42,351 - __main__ - INFO - Datum/Zeit-Quelle: content
+2026-01-27 22:00:42,352 - __main__ - INFO - Suche Meeting um 2026-01-26 10:03:15 (±15 Minuten)...
+2026-01-27 22:00:42,465 - __main__ - WARNING - Keine Events am 2026-01-26 gefunden
+2026-01-27 22:00:42,466 - __main__ - INFO - Kein Meeting gefunden, generiere Titel mit LLM...
+2026-01-27 22:00:42,466 - __main__ - INFO - Extrahiere Text aus PDF: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 22:00:42,466 - __main__ - ERROR - Fehler beim Lesen der PDF: File path transcripts/incoming/temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf is not a valid file or url
+2026-01-27 22:00:42,467 - __main__ - INFO - Generiere Titel für temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt mit LLM...
+2026-01-27 22:00:45,621 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-27 22:00:45,623 - __main__ - INFO - Generierter Titel: Da_kein_Transkript-Inhalt_bereitgestellt_wurde,_ka
+2026-01-27 22:00:45,624 - __main__ - ERROR - Fehler bei Verarbeitung von temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf'
+2026-01-27 22:00:45,624 - __main__ - INFO - Neue Datei erkannt: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt
+2026-01-27 22:00:47,625 - __main__ - INFO - Verarbeite Transkript: temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt
+2026-01-27 22:00:47,625 - __main__ - WARNING - Fehler beim Extrahieren von Datum/Zeit aus Inhalt: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt'
+2026-01-27 22:00:47,626 - __main__ - ERROR - Fehler bei Verarbeitung von temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt'
+2026-01-27 22:01:28,199 - __main__ - INFO - Neue Datei erkannt: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 22:01:33,165 - __main__ - INFO - Verarbeite Transkript: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 22:01:33,166 - __main__ - INFO - Extrahiere Text aus PDF: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 22:01:34,693 - __main__ - INFO - ✓ 76830 Zeichen aus 35 Seite(n) extrahiert
+2026-01-27 22:01:34,693 - __main__ - INFO - ✓ Datum/Zeit aus Inhalt extrahiert: 2026-01-26 10:03:15
+2026-01-27 22:01:34,693 - __main__ - INFO - Datum/Zeit-Quelle: content
+2026-01-27 22:01:34,693 - __main__ - INFO - Suche Meeting um 2026-01-26 10:03:15 (±15 Minuten)...
+2026-01-27 22:01:34,790 - __main__ - WARNING - Keine Events am 2026-01-26 gefunden
+2026-01-27 22:01:34,791 - __main__ - INFO - Kein Meeting gefunden, generiere Titel mit LLM...
+2026-01-27 22:01:34,791 - __main__ - INFO - Extrahiere Text aus PDF: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf
+2026-01-27 22:01:34,792 - __main__ - ERROR - Fehler beim Lesen der PDF: File path transcripts/incoming/01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf is not a valid file or url
+2026-01-27 22:01:34,793 - __main__ - INFO - Generiere Titel für 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt mit LLM...
+2026-01-27 22:01:37,531 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-27 22:01:37,533 - __main__ - INFO - Generierter Titel: Meeting_ohne_Inhalt---Hinweis_Das_Transkript_enthä
+2026-01-27 22:01:37,534 - __main__ - ERROR - Fehler bei Verarbeitung von 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf: [Errno 2] No such file or directory: 'transcripts/incoming/01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).pdf'
+2026-01-27 22:01:37,535 - __main__ - INFO - Neue Datei erkannt: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt
+2026-01-27 22:01:39,536 - __main__ - INFO - Verarbeite Transkript: 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt
+2026-01-27 22:01:39,536 - __main__ - WARNING - Fehler beim Extrahieren von Datum/Zeit aus Inhalt: [Errno 2] No such file or directory: 'transcripts/incoming/01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt'
+2026-01-27 22:01:39,536 - __main__ - ERROR - Fehler bei Verarbeitung von 01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt: [Errno 2] No such file or directory: 'transcripts/incoming/01-26 Einführung einer agilen Arbeitsweise zur verbesserten Zielerreichung und Transparenz-transcript (1).tmp.txt'
+2026-01-27 22:18:08,356 - __main__ - INFO - Neue Datei erkannt: temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf
+2026-01-27 22:18:10,356 - __main__ - INFO - Verarbeite Transkript: temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf
+2026-01-27 22:18:10,357 - __main__ - INFO - Extrahiere Text aus PDF: temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf
+2026-01-27 22:18:11,116 - __main__ - INFO - ✓ 38777 Zeichen aus 20 Seite(n) extrahiert
+2026-01-27 22:18:11,116 - __main__ - INFO - ✓ Datum/Zeit aus Inhalt extrahiert: 2026-01-12 14:01:39
+2026-01-27 22:18:11,116 - __main__ - INFO - Datum/Zeit-Quelle: content
+2026-01-27 22:18:11,116 - __main__ - INFO - Suche Meeting um 2026-01-12 14:01:39 (±15 Minuten)...
+2026-01-27 22:18:11,229 - __main__ - WARNING - Keine Events am 2026-01-12 gefunden
+2026-01-27 22:18:11,229 - __main__ - INFO - Kein Meeting gefunden, generiere Titel mit LLM...
+2026-01-27 22:18:11,229 - __main__ - INFO - Extrahiere Text aus PDF: temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf
+2026-01-27 22:18:11,984 - __main__ - INFO - ✓ 38777 Zeichen aus 20 Seite(n) extrahiert
+2026-01-27 22:18:11,985 - __main__ - INFO - Generiere Titel für temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt mit LLM...
+2026-01-27 22:18:13,414 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-27 22:18:13,415 - __main__ - INFO - Generierter Titel: Zeiterfassungs-App_Entwicklung
+2026-01-27 22:18:13,416 - __main__ - INFO - ✓ Datei verschoben: 2026-01-12_Zeiterfassungs-App_Entwicklung.pdf
+2026-01-27 22:18:13,421 - __main__ - INFO - Neue Datei erkannt: temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt
+2026-01-27 22:18:15,422 - __main__ - INFO - Verarbeite Transkript: temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt
+2026-01-27 22:18:15,422 - __main__ - WARNING - Fehler beim Extrahieren von Datum/Zeit aus Inhalt: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt'
+2026-01-27 22:18:15,423 - __main__ - ERROR - Fehler bei Verarbeitung von temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt'
+2026-01-27 22:23:21,909 - __main__ - INFO - Neue Datei erkannt: temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf
+2026-01-27 22:23:23,909 - __main__ - INFO - Verarbeite Transkript: temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf
+2026-01-27 22:23:23,910 - __main__ - INFO - Extrahiere Text aus PDF: temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf
+2026-01-27 22:23:24,665 - __main__ - INFO - ✓ 38777 Zeichen aus 20 Seite(n) extrahiert
+2026-01-27 22:23:24,665 - __main__ - INFO - ✓ Datum/Zeit aus Inhalt extrahiert: 2026-01-12 14:01:39
+2026-01-27 22:23:24,665 - __main__ - INFO - Datum/Zeit-Quelle: content
+2026-01-27 22:23:24,665 - __main__ - INFO - Suche Meeting um 2026-01-12 14:01:39 (±15 Minuten)...
+2026-01-27 22:23:24,778 - __main__ - WARNING - Keine Events am 2026-01-12 gefunden
+2026-01-27 22:23:24,778 - __main__ - INFO - Kein Meeting gefunden, generiere Titel mit LLM...
+2026-01-27 22:23:24,778 - __main__ - INFO - Extrahiere Text aus PDF: temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf
+2026-01-27 22:23:24,778 - __main__ - ERROR - Fehler beim Lesen der PDF: File path transcripts/incoming/temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf is not a valid file or url
+2026-01-27 22:23:24,779 - __main__ - INFO - Generiere Titel für temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt mit LLM...
+2026-01-27 22:23:27,973 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-27 22:23:27,975 - __main__ - INFO - Generierter Titel: Meeting_ohne_Inhalt---Hinweis_Das_Transkript_enthä
+2026-01-27 22:23:27,977 - __main__ - ERROR - Fehler bei Verarbeitung von temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf'
+2026-01-27 22:23:27,978 - __main__ - INFO - Neue Datei erkannt: temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt
+2026-01-27 22:23:29,978 - __main__ - INFO - Verarbeite Transkript: temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt
+2026-01-27 22:23:29,979 - __main__ - WARNING - Fehler beim Extrahieren von Datum/Zeit aus Inhalt: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt'
+2026-01-27 22:23:29,979 - __main__ - ERROR - Fehler bei Verarbeitung von temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt: [Errno 2] No such file or directory: 'transcripts/incoming/temp_01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt'
+2026-01-27 22:24:34,059 - __main__ - INFO - Neue Datei erkannt: 01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf
+2026-01-27 22:24:36,060 - __main__ - INFO - Verarbeite Transkript: 01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf
+2026-01-27 22:24:36,060 - __main__ - INFO - Extrahiere Text aus PDF: 01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf
+2026-01-27 22:24:36,848 - __main__ - INFO - ✓ 38777 Zeichen aus 20 Seite(n) extrahiert
+2026-01-27 22:24:36,848 - __main__ - INFO - ✓ Datum/Zeit aus Inhalt extrahiert: 2026-01-12 14:01:39
+2026-01-27 22:24:36,848 - __main__ - INFO - Datum/Zeit-Quelle: content
+2026-01-27 22:24:36,848 - __main__ - INFO - Suche Meeting um 2026-01-12 14:01:39 (±15 Minuten)...
+2026-01-27 22:24:36,966 - __main__ - WARNING - Keine Events am 2026-01-12 gefunden
+2026-01-27 22:24:36,967 - __main__ - INFO - Kein Meeting gefunden, generiere Titel mit LLM...
+2026-01-27 22:24:36,967 - __main__ - INFO - Extrahiere Text aus PDF: 01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf
+2026-01-27 22:24:36,967 - __main__ - ERROR - Fehler beim Lesen der PDF: File path transcripts/incoming/01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf is not a valid file or url
+2026-01-27 22:24:36,968 - __main__ - INFO - Generiere Titel für 01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt mit LLM...
+2026-01-27 22:24:38,523 - httpx - INFO - HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-01-27 22:24:38,524 - __main__ - INFO - Generierter Titel: Meeting_Transkript
+2026-01-27 22:24:38,525 - __main__ - ERROR - Fehler bei Verarbeitung von 01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf: [Errno 2] No such file or directory: 'transcripts/incoming/01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.pdf'
+2026-01-27 22:24:38,525 - __main__ - INFO - Neue Datei erkannt: 01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt
+2026-01-27 22:24:40,525 - __main__ - INFO - Verarbeite Transkript: 01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt
+2026-01-27 22:24:40,526 - __main__ - WARNING - Fehler beim Extrahieren von Datum/Zeit aus Inhalt: [Errno 2] No such file or directory: 'transcripts/incoming/01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt'
+2026-01-27 22:24:40,526 - __main__ - ERROR - Fehler bei Verarbeitung von 01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt: [Errno 2] No such file or directory: 'transcripts/incoming/01-12 Meeting_ Zeiterfassungs-App Entwicklung und Fehlerbehebung-transcript.tmp.txt'

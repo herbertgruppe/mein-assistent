@@ -1,0 +1,35 @@
+# LangChain Core
+langchain
+langchain-core
+langchain-community
+
+# LLM Providers
+langchain-anthropic
+langchain-openai
+
+# Document Loaders
+pypdf
+docx2txt
+pandas
+openpyxl
+
+# Web Search
+tavily-python
+
+# Utilities
+python-dotenv
+watchdog
+
+# Web Interface
+streamlit
+
+# Task Management
+asana
+
+# Microsoft Graph API
+msal
+requests
+
+# Background Worker
+apscheduler>=3.10.0
+beautifulsoup4

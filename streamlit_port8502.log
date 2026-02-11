@@ -1,0 +1,309 @@
+
+  You can now view your Streamlit app in your browser.
+
+  Local URL: http://localhost:8502
+  Network URL: http://172.17.51.194:8502
+  External URL: http://79.205.44.140:8502
+
+/home/sherbert/mein-assistent/agents/research_agent.py:90: LangChainDeprecationWarning: The class `TavilySearchResults` was deprecated in LangChain 0.3.25 and will be removed in 1.0. An updated version of the class exists in the `langchain-tavily package and should be used instead. To use it run `pip install -U `langchain-tavily` and import as `from `langchain_tavily import TavilySearch``.
+  return TavilySearchResults(
+
+[DEBUG] ========== MAIN START @ 1770589126.795759 ==========
+
+[INIT] Initialisiere Orchestrator mit Provider: anthropic
+[INIT] API-Key vorhanden: Ja
+[AsanaAgent] 🔄 Verbinde mit Asana API...
+[AsanaAgent] ✅ ERFOLGREICH VERBUNDEN mit Workspace: 'Herbert Gruppe'
+[AsanaAgent] Workspace GID: 167564955249967
+[AsanaTool] ✓ Asana Tool initialisiert und verbunden
+[AsanaAgent] 🔄 Verbinde mit Asana API...
+[AsanaAgent] ✅ ERFOLGREICH VERBUNDEN mit Workspace: 'Herbert Gruppe'
+[AsanaAgent] Workspace GID: 167564955249967
+[OutlookGraphTool] ✓ Konfiguration gefunden
+[OutlookGraphTool]   Client ID: 309938fb...
+[OutlookGraphTool]   Tenant ID: 1aced7e6...
+[OutlookGraphTool] ✓ Token aus Datei geladen
+DEBUG: Tavily Key vorhanden: True
+DEBUG: Tavily Key beginnt mit: tvly-dev-K...
+DEBUG: 1 Dokument(e) in input_docs/ gefunden
+DEBUG: Tavily Tool initialisiert: True
+DEBUG: Document Tool initialisiert: True
+DEBUG: Email-Tool konfiguriert für: Nicht konfiguriert
+DEBUG: Email Tool initialisiert: True
+DEBUG: CalendarEmailAgent initialisiert
+DEBUG: Email Tool: True
+DEBUG: Outlook Tool: True
+[INIT] Task Agent LLM initialisiert: profile={'max_input_tokens': 200000, 'max_output_tokens': 64000, 'image_inputs': True, 'audio_inputs': False, 'video_inputs': False, 'image_outputs': False, 'audio_outputs': False, 'video_outputs': False, 'reasoning_output': True, 'tool_calling': True, 'image_url_inputs': True, 'pdf_inputs': True, 'pdf_tool_message': True, 'image_tool_message': True, 'structured_output': True} model='claude-sonnet-4-5' max_tokens=64000 temperature=0.7 anthropic_api_url='https://api.anthropic.com' anthropic_api_key=SecretStr('**********') model_kwargs={}
+[DEBUG] initialize_session_state took 3485.86ms
+[Cache] Initiale .env-Konfiguration gespeichert
+[DEBUG] check_and_reset_cache took 0.05ms
+[DEBUG] render_sidebar took 12.13ms
+[DEBUG] render_chat_tab took 0.58ms
+[AsanaAgent] 🔄 Lade alle Projekte aus Workspace...
+[AsanaAgent] ✓ 310 aktive Projekte geladen
+[DEBUG] render_dashboard_tab took 2821.79ms
+[DEBUG] render_inbox_tab START @ 1770589133.1169457
+[DEBUG] EmailDB init took 0.60ms
+[DEBUG] Rendering cards took 127.94ms
+[DEBUG] render_inbox_tab TOTAL took 144.82ms
+[DEBUG] render_inbox_tab (from main) took 144.88ms
+[DEBUG] render_transcripts_tab took 1.20ms
+[DEBUG] render_documents_tab took 7.80ms
+[DEBUG] render_archive_tab took 181.08ms
+[DEBUG] ========== MAIN TOTAL took 6656.17ms ==========
+
+[DEBUG] ========== MAIN START @ 1770589142.9515996 ==========
+[DEBUG] initialize_session_state took 0.04ms
+[DEBUG] check_and_reset_cache took 0.02ms
+[DEBUG] render_sidebar took 12.46ms
+[DEBUG] render_chat_tab took 0.60ms
+[DEBUG] render_dashboard_tab took 119.58ms
+[DEBUG] render_inbox_tab START @ 1770589143.0852692
+[DEBUG] EmailDB init took 3.86ms
+[DEBUG] Rendering cards took 132.95ms
+[DEBUG] render_inbox_tab TOTAL took 145.79ms
+[DEBUG] render_inbox_tab (from main) took 145.84ms
+
+[DEBUG] ========== MAIN START @ 1770589143.3017766 ==========
+[DEBUG] initialize_session_state took 0.04ms
+[DEBUG] check_and_reset_cache took 0.02ms
+[DEBUG] render_sidebar took 45.41ms
+[DEBUG] render_chat_tab took 0.66ms
+[DEBUG] render_dashboard_tab took 113.74ms
+[DEBUG] render_inbox_tab START @ 1770589143.4625354
+[DEBUG] EmailDB init took 1.88ms
+[DEBUG] Rendering cards took 166.68ms
+[DEBUG] render_inbox_tab TOTAL took 175.34ms
+[DEBUG] render_inbox_tab (from main) took 175.39ms
+[DEBUG] render_transcripts_tab took 8.67ms
+[DEBUG] render_documents_tab took 19.96ms
+[DEBUG] render_archive_tab took 105.05ms
+[DEBUG] ========== MAIN TOTAL took 469.87ms ==========
+
+[DEBUG] ========== MAIN START @ 1770589145.771428 ==========
+[DEBUG] initialize_session_state took 0.04ms
+[DEBUG] check_and_reset_cache took 0.02ms
+[DEBUG] render_sidebar took 10.32ms
+[DEBUG] render_chat_tab took 0.48ms
+[DEBUG] render_dashboard_tab took 110.84ms
+[DEBUG] render_inbox_tab START @ 1770589145.8939865
+[DEBUG] EmailDB init took 2.35ms
+[DEBUG] Rendering cards took 125.85ms
+[DEBUG] render_inbox_tab TOTAL took 134.80ms
+[DEBUG] render_inbox_tab (from main) took 134.84ms
+
+[DEBUG] ========== MAIN START @ 1770589146.095754 ==========
+[DEBUG] initialize_session_state took 0.04ms
+[DEBUG] check_and_reset_cache took 0.02ms
+[DEBUG] render_sidebar took 15.78ms
+[DEBUG] render_chat_tab took 0.87ms
+[DEBUG] render_dashboard_tab took 112.87ms
+[DEBUG] render_inbox_tab START @ 1770589146.226491
+[DEBUG] EmailDB init took 1.99ms
+[DEBUG] Rendering cards took 116.89ms
+[DEBUG] render_inbox_tab TOTAL took 123.19ms
+[DEBUG] render_inbox_tab (from main) took 123.24ms
+[DEBUG] render_transcripts_tab took 6.32ms
+[DEBUG] render_documents_tab took 14.05ms
+[DEBUG] render_archive_tab took 126.98ms
+[DEBUG] ========== MAIN TOTAL took 401.35ms ==========
+
+[DEBUG] ========== MAIN START @ 1770589152.9467373 ==========
+[DEBUG] initialize_session_state took 0.05ms
+[DEBUG] check_and_reset_cache took 0.02ms
+[DEBUG] render_sidebar took 16.97ms
+[DEBUG] render_chat_tab took 0.59ms
+[DEBUG] render_dashboard_tab took 111.12ms
+[DEBUG] render_inbox_tab START @ 1770589153.0767932
+[DEBUG] EmailDB init took 1.99ms
+[DEBUG] Rendering cards took 140.35ms
+[DEBUG] render_inbox_tab TOTAL took 148.49ms
+[DEBUG] render_inbox_tab (from main) took 148.55ms
+[DEBUG] render_transcripts_tab took 7.58ms
+[DEBUG] render_documents_tab took 27.84ms
+[DEBUG] render_archive_tab took 106.38ms
+[DEBUG] ========== MAIN TOTAL took 420.44ms ==========
+
+[DEBUG] ========== MAIN START @ 1770589156.681661 ==========
+[DEBUG] initialize_session_state took 0.04ms
+[DEBUG] check_and_reset_cache took 0.02ms
+[DEBUG] render_sidebar took 11.69ms
+[DEBUG] render_chat_tab took 0.59ms
+[DEBUG] render_dashboard_tab took 113.92ms
+[DEBUG] render_inbox_tab START @ 1770589156.8088915
+[DEBUG] EmailDB init took 2.53ms
+[DEBUG] Rendering cards took 128.49ms
+[DEBUG] render_inbox_tab TOTAL took 138.43ms
+[DEBUG] render_inbox_tab (from main) took 138.48ms
+
+[DEBUG] ========== MAIN START @ 1770589157.022205 ==========
+[DEBUG] initialize_session_state took 0.04ms
+[DEBUG] check_and_reset_cache took 0.01ms
+[DEBUG] render_sidebar took 30.45ms
+[DEBUG] render_chat_tab took 0.65ms
+[DEBUG] render_dashboard_tab took 113.30ms
+[DEBUG] render_inbox_tab START @ 1770589157.167466
+[DEBUG] EmailDB init took 1.65ms
+[DEBUG] Rendering cards took 137.48ms
+[DEBUG] render_inbox_tab TOTAL took 143.75ms
+[DEBUG] render_inbox_tab (from main) took 143.80ms
+[OutlookGraphTool] ✓ 4 Termin(e) gefunden
+[DEBUG] render_transcripts_tab took 312.35ms
+[DEBUG] render_documents_tab took 6.24ms
+[DEBUG] render_archive_tab took 89.75ms
+[DEBUG] ========== MAIN TOTAL took 697.43ms ==========
+
+[DEBUG] ========== MAIN START @ 1770589160.6648011 ==========
+[DEBUG] initialize_session_state took 0.05ms
+[DEBUG] check_and_reset_cache took 0.02ms
+[DEBUG] render_sidebar took 9.51ms
+[DEBUG] render_chat_tab took 0.52ms
+[DEBUG] render_dashboard_tab took 112.75ms
+[DEBUG] render_inbox_tab START @ 1770589160.7885437
+[DEBUG] EmailDB init took 2.35ms
+[DEBUG] Rendering cards took 133.73ms
+[DEBUG] render_inbox_tab TOTAL took 141.17ms
+[DEBUG] render_inbox_tab (from main) took 141.22ms
+[OutlookGraphTool] ✓ 4 Termin(e) gefunden
+[DEBUG] render_transcripts_tab took 304.88ms
+[DEBUG] render_documents_tab took 11.07ms
+[DEBUG] render_archive_tab took 94.26ms
+[DEBUG] ========== MAIN TOTAL took 675.21ms ==========
+
+[DEBUG] ========== MAIN START @ 1770589163.9925292 ==========
+[DEBUG] initialize_session_state took 0.03ms
+[DEBUG] check_and_reset_cache took 0.02ms
+[DEBUG] render_sidebar took 16.51ms
+[DEBUG] render_chat_tab took 0.51ms
+[DEBUG] render_dashboard_tab took 114.59ms
+[DEBUG] render_inbox_tab START @ 1770589164.125173
+[DEBUG] EmailDB init took 1.92ms
+[DEBUG] Rendering cards took 158.01ms
+[DEBUG] render_inbox_tab TOTAL took 165.93ms
+[DEBUG] render_inbox_tab (from main) took 166.00ms
+[OutlookGraphTool] ✓ 4 Termin(e) gefunden
+
+[DEBUG] ========== MAIN START @ 1770589164.6250231 ==========
+[DEBUG] initialize_session_state took 0.04ms
+[DEBUG] check_and_reset_cache took 0.01ms
+[DEBUG] render_sidebar took 10.70ms
+[DEBUG] render_chat_tab took 0.49ms
+[DEBUG] render_dashboard_tab took 113.19ms
+[DEBUG] render_inbox_tab START @ 1770589164.7502968
+[DEBUG] EmailDB init took 2.08ms
+[DEBUG] Rendering cards took 134.69ms
+[DEBUG] render_inbox_tab TOTAL took 150.05ms
+[DEBUG] render_inbox_tab (from main) took 150.12ms
+[DEBUG] render_transcripts_tab took 9.09ms
+[DEBUG] render_documents_tab took 40.68ms
+[DEBUG] render_archive_tab took 100.57ms
+[DEBUG] ========== MAIN TOTAL took 425.77ms ==========
+
+[DEBUG] ========== MAIN START @ 1770589167.0305219 ==========
+[DEBUG] initialize_session_state took 0.06ms
+[DEBUG] check_and_reset_cache took 0.02ms
+[DEBUG] render_sidebar took 11.62ms
+[DEBUG] render_chat_tab took 0.51ms
+[DEBUG] render_dashboard_tab took 112.11ms
+[DEBUG] render_inbox_tab START @ 1770589167.155732
+[DEBUG] EmailDB init took 2.08ms
+[DEBUG] Rendering cards took 136.45ms
+[DEBUG] render_inbox_tab TOTAL took 143.82ms
+[DEBUG] render_inbox_tab (from main) took 143.87ms
+
+[DEBUG] ========== MAIN START @ 1770589168.395376 ==========
+[DEBUG] initialize_session_state took 0.04ms
+[DEBUG] check_and_reset_cache took 0.02ms
+[DEBUG] render_sidebar took 11.16ms
+[DEBUG] render_chat_tab took 0.49ms
+[DEBUG] render_dashboard_tab took 110.01ms
+[DEBUG] render_inbox_tab START @ 1770589168.5179574
+[DEBUG] EmailDB init took 3.10ms
+[DEBUG] Rendering cards took 122.70ms
+[DEBUG] render_inbox_tab TOTAL took 135.89ms
+[DEBUG] render_inbox_tab (from main) took 135.95ms
+
+[DEBUG] ========== MAIN START @ 1770589168.7146063 ==========
+[DEBUG] initialize_session_state took 0.03ms
+[DEBUG] check_and_reset_cache took 0.01ms
+[DEBUG] render_sidebar took 10.90ms
+[DEBUG] render_chat_tab took 0.49ms
+[DEBUG] render_dashboard_tab took 111.88ms
+[DEBUG] render_inbox_tab START @ 1770589168.8385925
+[DEBUG] EmailDB init took 1.58ms
+[DEBUG] Rendering cards took 121.55ms
+[DEBUG] render_inbox_tab TOTAL took 128.60ms
+[DEBUG] render_inbox_tab (from main) took 128.65ms
+[DEBUG] render_transcripts_tab took 8.09ms
+[DEBUG] render_documents_tab took 38.32ms
+[DEBUG] render_archive_tab took 91.55ms
+[DEBUG] ========== MAIN TOTAL took 390.62ms ==========
+
+[DEBUG] ========== MAIN START @ 1770589220.6032293 ==========
+[DEBUG] initialize_session_state took 0.04ms
+[DEBUG] check_and_reset_cache took 0.02ms
+[DEBUG] render_sidebar took 31.98ms
+[DEBUG] render_chat_tab took 2.83ms
+[DEBUG] render_dashboard_tab took 130.21ms
+[DEBUG] render_inbox_tab START @ 1770589220.77177
+[DEBUG] EmailDB init took 6.26ms
+[DEBUG] Rendering cards took 194.74ms
+[DEBUG] render_inbox_tab TOTAL took 219.42ms
+[DEBUG] render_inbox_tab (from main) took 219.50ms
+
+[DEBUG] ========== MAIN START @ 1770589221.0702052 ==========
+[DEBUG] initialize_session_state took 0.04ms
+[DEBUG] check_and_reset_cache took 0.02ms
+[DEBUG] render_sidebar took 16.60ms
+[DEBUG] render_chat_tab took 0.64ms
+[DEBUG] render_dashboard_tab took 121.76ms
+[DEBUG] render_inbox_tab START @ 1770589221.2101383
+[DEBUG] EmailDB init took 2.13ms
+[DEBUG] Rendering cards took 138.41ms
+[DEBUG] render_inbox_tab TOTAL took 157.80ms
+[DEBUG] render_inbox_tab (from main) took 157.89ms
+
+[DEBUG] ========== MAIN START @ 1770589341.1271484 ==========
+[DEBUG] initialize_session_state took 0.04ms
+[DEBUG] check_and_reset_cache took 0.02ms
+[DEBUG] render_sidebar took 9.34ms
+[DEBUG] render_chat_tab took 0.64ms
+[DEBUG] render_dashboard_tab took 112.86ms
+[DEBUG] render_inbox_tab START @ 1770589341.2508855
+[DEBUG] EmailDB init took 1.25ms
+[DEBUG] Rendering cards took 116.46ms
+[DEBUG] render_inbox_tab TOTAL took 124.98ms
+[DEBUG] render_inbox_tab (from main) took 125.02ms
+[DEBUG] render_transcripts_tab took 10.50ms
+[DEBUG] render_documents_tab took 7.30ms
+[DEBUG] render_archive_tab took 74.92ms
+[DEBUG] ========== MAIN TOTAL took 341.52ms ==========
+
+[DEBUG] ========== MAIN START @ 1770589348.7133005 ==========
+[DEBUG] initialize_session_state took 0.04ms
+[DEBUG] check_and_reset_cache took 0.02ms
+[DEBUG] render_sidebar took 11.59ms
+[DEBUG] render_chat_tab took 0.90ms
+[DEBUG] render_dashboard_tab took 113.98ms
+[DEBUG] render_inbox_tab START @ 1770589348.8405716
+[DEBUG] EmailDB init took 1.49ms
+[DEBUG] Rendering cards took 178.62ms
+[DEBUG] render_inbox_tab TOTAL took 186.22ms
+[DEBUG] render_inbox_tab (from main) took 186.28ms
+
+[DEBUG] ========== MAIN START @ 1770589349.1062012 ==========
+[DEBUG] initialize_session_state took 0.04ms
+[DEBUG] check_and_reset_cache took 0.02ms
+[DEBUG] render_sidebar took 38.48ms
+[DEBUG] render_chat_tab took 0.91ms
+[DEBUG] render_dashboard_tab took 112.95ms
+[DEBUG] render_inbox_tab START @ 1770589349.2598228
+[DEBUG] EmailDB init took 2.96ms
+[DEBUG] Rendering cards took 129.61ms
+[DEBUG] render_inbox_tab TOTAL took 138.81ms
+[DEBUG] render_inbox_tab (from main) took 138.88ms
+[DEBUG] render_transcripts_tab took 10.70ms
+[DEBUG] render_documents_tab took 40.41ms
+[DEBUG] render_archive_tab took 110.81ms
+[DEBUG] ========== MAIN TOTAL took 454.46ms ==========
+  Stopping...

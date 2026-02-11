@@ -1,0 +1,21 @@
+[Unit]
+Description=Email Background Worker für Mein Assistent
+After=network.target
+
+[Service]
+Type=simple
+User=sherbert
+WorkingDirectory=/home/sherbert/mein-assistent
+Environment="PATH=/home/sherbert/mein-assistent/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/sherbert/mein-assistent/venv/bin/python3 /home/sherbert/mein-assistent/email_worker.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/sherbert/mein-assistent/email_worker.log
+StandardError=append:/home/sherbert/mein-assistent/email_worker.log
+
+# Sicherheitseinstellungen
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

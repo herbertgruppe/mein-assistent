@@ -1,0 +1,94 @@
+
+  You can now view your Streamlit app in your browser.
+
+  Local URL: http://localhost:8502
+  Network URL: http://172.17.51.194:8502
+  External URL: http://79.205.44.140:8502
+
+/home/sherbert/mein-assistent/agents/research_agent.py:90: LangChainDeprecationWarning: The class `TavilySearchResults` was deprecated in LangChain 0.3.25 and will be removed in 1.0. An updated version of the class exists in the `langchain-tavily package and should be used instead. To use it run `pip install -U `langchain-tavily` and import as `from `langchain_tavily import TavilySearch``.
+  return TavilySearchResults(
+
+[DEBUG] ========== MAIN START @ 1770589922.2618515 ==========
+
+[INIT] Initialisiere Orchestrator mit Provider: anthropic
+[INIT] API-Key vorhanden: Ja
+[AsanaAgent] 🔄 Verbinde mit Asana API...
+[AsanaAgent] ✅ ERFOLGREICH VERBUNDEN mit Workspace: 'Herbert Gruppe'
+[AsanaAgent] Workspace GID: 167564955249967
+[AsanaTool] ✓ Asana Tool initialisiert und verbunden
+[AsanaAgent] 🔄 Verbinde mit Asana API...
+[AsanaAgent] ✅ ERFOLGREICH VERBUNDEN mit Workspace: 'Herbert Gruppe'
+[AsanaAgent] Workspace GID: 167564955249967
+[OutlookGraphTool] ✓ Konfiguration gefunden
+[OutlookGraphTool]   Client ID: 309938fb...
+[OutlookGraphTool]   Tenant ID: 1aced7e6...
+[OutlookGraphTool] ✓ Token aus Datei geladen
+DEBUG: Tavily Key vorhanden: True
+DEBUG: Tavily Key beginnt mit: tvly-dev-K...
+DEBUG: 1 Dokument(e) in input_docs/ gefunden
+DEBUG: Tavily Tool initialisiert: True
+DEBUG: Document Tool initialisiert: True
+DEBUG: Email-Tool konfiguriert für: Nicht konfiguriert
+DEBUG: Email Tool initialisiert: True
+DEBUG: CalendarEmailAgent initialisiert
+DEBUG: Email Tool: True
+DEBUG: Outlook Tool: True
+[INIT] Task Agent LLM initialisiert: profile={'max_input_tokens': 200000, 'max_output_tokens': 64000, 'image_inputs': True, 'audio_inputs': False, 'video_inputs': False, 'image_outputs': False, 'audio_outputs': False, 'video_outputs': False, 'reasoning_output': True, 'tool_calling': True, 'image_url_inputs': True, 'pdf_inputs': True, 'pdf_tool_message': True, 'image_tool_message': True, 'structured_output': True} model='claude-sonnet-4-5' max_tokens=64000 temperature=0.7 anthropic_api_url='https://api.anthropic.com' anthropic_api_key=SecretStr('**********') model_kwargs={}
+[DEBUG] initialize_session_state took 4536.83ms
+[Cache] Initiale .env-Konfiguration gespeichert
+[DEBUG] check_and_reset_cache took 0.05ms
+[DEBUG] render_sidebar took 26.88ms
+[DEBUG] render_chat_tab took 1.81ms
+[AsanaAgent] 🔄 Lade alle Projekte aus Workspace...
+[AsanaAgent] ✓ 310 aktive Projekte geladen
+[DEBUG] render_dashboard_tab took 2647.12ms
+[DEBUG] render_inbox_tab START @ 1770589929.478925
+[DEBUG] EmailDB init took 2.04ms
+[DEBUG] Rendering cards took 374.94ms
+[DEBUG] render_inbox_tab TOTAL took 416.58ms
+[DEBUG] render_inbox_tab (from main) took 416.65ms
+[DEBUG] render_transcripts_tab took 1.82ms
+[DEBUG] render_documents_tab took 32.68ms
+[DEBUG] render_archive_tab took 199.98ms
+[DEBUG] ========== MAIN TOTAL took 7868.26ms ==========
+
+[DEBUG] ========== MAIN START @ 1770589950.0033941 ==========
+[DEBUG] initialize_session_state took 0.06ms
+[DEBUG] check_and_reset_cache took 0.03ms
+[DEBUG] render_sidebar took 22.64ms
+[DEBUG] render_chat_tab took 0.88ms
+[DEBUG] render_dashboard_tab took 128.86ms
+[DEBUG] render_inbox_tab START @ 1770589950.157843
+[DEBUG] EmailDB init took 6.64ms
+[DEBUG] Rendering cards took 345.63ms
+[DEBUG] render_inbox_tab TOTAL took 387.08ms
+[DEBUG] render_inbox_tab (from main) took 387.23ms
+
+[DEBUG] ========== MAIN START @ 1770589950.6425326 ==========
+[DEBUG] initialize_session_state took 0.10ms
+[DEBUG] check_and_reset_cache took 0.03ms
+[DEBUG] render_sidebar took 24.47ms
+[DEBUG] render_chat_tab took 1.44ms
+[DEBUG] render_dashboard_tab took 123.83ms
+[DEBUG] render_inbox_tab START @ 1770589950.7987876
+[DEBUG] EmailDB init took 4.19ms
+[DEBUG] Rendering cards took 262.78ms
+[DEBUG] render_inbox_tab TOTAL took 278.11ms
+[DEBUG] render_inbox_tab (from main) took 278.23ms
+
+[DEBUG] ========== MAIN START @ 1770589951.163591 ==========
+[DEBUG] initialize_session_state took 0.04ms
+[DEBUG] check_and_reset_cache took 0.02ms
+[DEBUG] render_sidebar took 19.08ms
+[DEBUG] render_chat_tab took 1.03ms
+[DEBUG] render_dashboard_tab took 129.17ms
+[DEBUG] render_inbox_tab START @ 1770589951.3140564
+[DEBUG] EmailDB init took 7.18ms
+[DEBUG] Rendering cards took 338.25ms
+[DEBUG] render_inbox_tab TOTAL took 373.35ms
+[DEBUG] render_inbox_tab (from main) took 373.46ms
+[DEBUG] render_transcripts_tab took 13.91ms
+[DEBUG] render_documents_tab took 18.80ms
+[DEBUG] render_archive_tab took 293.46ms
+[DEBUG] ========== MAIN TOTAL took 850.17ms ==========
+  Stopping...
