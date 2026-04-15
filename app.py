@@ -8025,13 +8025,11 @@ def render_transcripts_tab():
                 # Speichere persistent
                 save_wip_item(new_item, wip_dir)
 
-        if newly_uploaded or updated_files:
-            if newly_uploaded:
-                st.success(f"✅ {len(newly_uploaded)} neue Transkript(e) hochgeladen!")
-            if updated_files:
-                st.info(f"🔄 {len(updated_files)} bestehende(s) Transkript(e) aktualisiert: {', '.join(updated_files)}")
-
+        if newly_uploaded:
+            st.success(f"✅ {len(newly_uploaded)} neue Transkript(e) hochgeladen!")
             st.rerun()
+        elif updated_files:
+            st.info(f"🔄 {len(updated_files)} bestehende(s) Transkript(e) aktualisiert: {', '.join(updated_files)}")
 
     # ========================================================================
     # BACKGROUND-PROTOKOLL-GENERIERUNG (Thread-basiert, blockiert UI nicht)
