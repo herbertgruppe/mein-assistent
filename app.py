@@ -8088,27 +8088,14 @@ def render_transcripts_tab():
                 save_wip_item(st.session_state['transcript_queue'][i], wip_dir)
                 break
 
-    # 3. Background-Job Status Banner (KEIN run_every mehr – verhinderte Button-Klicks)
+    # 3. Background-Job Status Banner (KEIN Fragment/run_every – stört Button-Interaktionen)
     with _bg_jobs_lock:
         _running_jobs = [(k, v) for k, v in _bg_protocol_jobs.items() if v['status'] == 'running']
-        _has_finished = any(v['status'] in ('done', 'error') for v in _bg_protocol_jobs.values())
 
     if _running_jobs:
         for _, job in _running_jobs:
             st.info(f"⏳ Protokoll wird erstellt: **{job['filename'][:60]}** ({job['chunks']} Tokens) – du kannst währenddessen weiterarbeiten.")
-        # Sanfter Auto-Refresh: Fragment mit längerer Pause, KEIN st.rerun() mehr
-        @st.fragment(run_every=5)
-        def _bg_poll():
-            """Prüft ob Jobs fertig sind, ohne die Hauptseite zu stören"""
-            with _bg_jobs_lock:
-                finished = [k for k, v in _bg_protocol_jobs.items() if v['status'] in ('done', 'error')]
-            if finished:
-                st.toast("✅ Protokoll-Generierung abgeschlossen! Seite wird aktualisiert...", icon="🎉")
-                st.rerun()
-        _bg_poll()
-    elif _has_finished:
-        # Fertige Jobs sofort verarbeiten (wird oben im done_ids Block erledigt)
-        st.success("✅ Protokoll-Generierung abgeschlossen!")
+        st.caption("💡 Die Ergebnisse werden beim nächsten Klick automatisch übernommen.")
 
     st.markdown("---")
 
@@ -8490,30 +8477,17 @@ def render_inline_termin_assignment(idx: int):
                     event_options.append(option_label)
                     event_dict[option_label] = event
 
-                # Event-Dict im Session State speichern für on_change Callback
+                # Event-Dict dauerhaft im Session State für Zugriff bei jedem Rerun
                 st.session_state[f'_event_dict_{idx}'] = event_dict
-
-                def _on_termin_change():
-                    """Callback: speichert Termin sofort bei Dropdown-Auswahl"""
-                    sel = st.session_state.get(f"event_select_{idx}", "— Bitte wählen —")
-                    ev_dict = st.session_state.get(f'_event_dict_{idx}', {})
-                    if sel != "— Bitte wählen —" and sel in ev_dict:
-                        st.session_state['transcript_queue'][idx]['selected_event'] = ev_dict[sel]
-                        save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
 
                 selected_option = st.selectbox(
                     "Termin:",
                     options=event_options,
-                    key=f"event_select_{idx}",
-                    on_change=_on_termin_change
+                    key=f"event_select_{idx}"
                 )
 
-                if selected_option != "— Bitte wählen —":
+                if selected_option != "— Bitte wählen —" and selected_option in event_dict:
                     selected_event = event_dict[selected_option]
-
-                    # Auch auf dem aktuellen Render sicherstellen
-                    st.session_state['transcript_queue'][idx]['selected_event'] = selected_event
-                    save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
 
                     # Zeige Details
                     with st.expander("📋 Details", expanded=False):
@@ -8522,19 +8496,24 @@ def render_inline_termin_assignment(idx: int):
                         if selected_event.get('attendees'):
                             st.write(f"**Teilnehmer:** {len(selected_event['attendees'])}")
 
-                    # Zuordnen-Button: schließt Panel + startet Background-Generierung
+                    # Zuordnen-Button: speichert + startet Protokoll + schließt Panel
                     if st.button("✅ Zuordnen & Protokoll starten", type="primary", key=f"confirm_assign_{idx}", use_container_width=True):
-                        # Background-Protokoll starten (Fehler abfangen, damit rerun nicht blockiert wird)
+                        # 1. EXPLIZIT speichern (wichtigster Schritt!)
+                        st.session_state['transcript_queue'][idx]['selected_event'] = selected_event
+                        save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
+                        print(f"[Termin-Zuordnung] ✅ Event '{selected_event.get('title')}' gespeichert für Item {item.get('id')} (idx={idx})")
+
+                        # 2. Background-Protokoll starten
                         try:
                             _start_bg_protocol_for_item(idx, selected_event)
                         except Exception as e:
                             print(f"[BG-Protocol] Fehler beim Starten: {e}")
 
-                        # UI schließen
+                        # 3. UI schließen
                         st.session_state['assign_termin_idx'] = None
                         st.rerun()
 
-                    st.success(f"✅ **{selected_event.get('title', 'Termin')}** wurde zugeordnet!")
+                    st.info(f"👆 Klicke **'Zuordnen & Protokoll starten'** um **{selected_event.get('title', 'den Termin')}** zuzuordnen.")
             else:
                 st.info(f"📭 Keine Termine am {meeting_date.strftime('%d.%m.%Y')} gefunden")
         else:
