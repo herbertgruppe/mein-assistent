@@ -8666,6 +8666,30 @@ def render_step_create_protocol(idx: int):
 
     st.markdown("---")
 
+    wip_dir = Path("transcripts/wip")
+
+    # === ÄNDERUNG 1: Background-Job und Disk-Cache konsultieren ===
+    # Direkt prüfen ob ein fertiger Background-Job vorliegt
+    if not item.get('protocol'):
+        with _bg_jobs_lock:
+            bg_job = _bg_protocol_jobs.get(item['id'])
+            if bg_job and bg_job['status'] == 'done':
+                item['protocol'] = bg_job['protocol']
+                _bg_protocol_jobs.pop(item['id'], None)
+                st.session_state['transcript_queue'][idx] = item
+                save_wip_item(item, wip_dir)
+                st.toast("✅ Hintergrund-Protokoll übernommen!")
+
+    # Falls immer noch kein Protokoll: Cache auf Disk prüfen
+    if not item.get('protocol'):
+        cache_dir = Path("transcripts/protocol_cache")
+        cache_file = cache_dir / f"{file_path.stem}_protocol.md"
+        if cache_file.exists():
+            item['protocol'] = cache_file.read_text(encoding='utf-8')
+            st.session_state['transcript_queue'][idx] = item
+            save_wip_item(item, wip_dir)
+            st.toast("✅ Protokoll aus Cache geladen!")
+
     # Prüfe ob Quelldatei noch existiert (nur wenn noch kein Protokoll erstellt wurde)
     if not item.get('protocol') and not file_path.exists():
         st.error(f"❌ Quelldatei nicht gefunden: `{file_path.name}`")
@@ -8677,14 +8701,18 @@ def render_step_create_protocol(idx: int):
 
     # Button zum Starten
     if not item.get('protocol'):
-        # Prüfe ob Background-Job für dieses Item läuft
+        # === ÄNDERUNG 2: Auto-Refresh wenn Background-Job läuft ===
         with _bg_jobs_lock:
             bg_job = _bg_protocol_jobs.get(item['id'])
 
         if bg_job and bg_job['status'] == 'running':
-            st.info(f"⏳ Protokoll wird im Hintergrund erstellt ({bg_job['chunks']} Tokens) – wird automatisch angezeigt wenn fertig.")
-            st.caption("Du kannst währenddessen andere Transkripte bearbeiten und dann hierher zurückkehren.")
-            return  # _bg_status_banner (run_every=2) triggert rerun wenn fertig
+            st.info(f"⏳ Protokoll wird im Hintergrund erstellt ({bg_job['chunks']} Tokens)...")
+            st.progress(min(0.95, bg_job['chunks'] * 0.005), text=f"✨ {bg_job['chunks']} Tokens generiert")
+            st.caption("Die Seite aktualisiert sich automatisch wenn das Protokoll fertig ist.")
+            # Auto-Refresh alle 3 Sekunden um Fortschritt zu zeigen
+            time.sleep(3)
+            st.rerun()
+            return
 
         if st.button("🚀 Protokoll jetzt erstellen", type="primary", use_container_width=True):
             st.session_state[f'start_protocol_{idx}'] = True
@@ -8832,7 +8860,6 @@ def render_step_create_protocol(idx: int):
             st.session_state[f'start_protocol_{idx}'] = False
 
             # Persistiere zu Disk
-            wip_dir = Path("transcripts/wip")
             save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
 
             st.success("✅ Protokoll erstellt!")
