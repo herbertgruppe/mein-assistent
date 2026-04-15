@@ -8636,17 +8636,26 @@ def render_step_rename(idx: int):
     meeting_title = selected_event.get('title', 'Ohne_Titel')
     sanitized_title = sanitize_filename(meeting_title, max_length=100)
     file_extension = file_path.suffix
-    new_filename = f"{date_str}_Protokoll_{sanitized_title}{file_extension}"
+    suggested_name = f"{date_str}_Protokoll_{sanitized_title}"
 
-    # Zeige Vorschau
-    st.markdown("#### 📝 Neuer Dateiname:")
-    col1, col2 = st.columns([1, 4])
-    with col1:
-        st.caption("Alt:")
-        st.caption("Neu:")
-    with col2:
-        st.code(file_path.name)
-        st.code(new_filename)
+    # Zeige alten Namen
+    st.markdown("#### 📝 Datei umbenennen")
+    st.caption(f"Aktueller Name: `{file_path.name}`")
+
+    # Editierbares Feld für neuen Namen (ohne Dateiendung)
+    new_name_stem = st.text_input(
+        "Neuer Dateiname (ohne Endung):",
+        value=suggested_name,
+        key=f"rename_input_{idx}",
+        help=f"Dateiendung '{file_extension}' wird automatisch angehängt"
+    )
+
+    # Bereinige manuelle Eingabe
+    new_name_stem = sanitize_filename(new_name_stem, max_length=150)
+    new_filename = f"{new_name_stem}{file_extension}"
+
+    # Vorschau des endgültigen Namens
+    st.code(new_filename)
 
     # Umbenennen-Button
     col_rename, col_skip = st.columns(2)
@@ -8659,7 +8668,7 @@ def render_step_rename(idx: int):
                 # Duplikat-Check
                 counter = 1
                 while new_file_path.exists():
-                    new_filename = f"{date_str}_Protokoll_{sanitized_title}_{counter}{file_extension}"
+                    new_filename = f"{new_name_stem}_{counter}{file_extension}"
                     new_file_path = processed_dir / new_filename
                     counter += 1
 
