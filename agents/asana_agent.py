@@ -533,7 +533,8 @@ class AsanaAgent(BaseAgent):
         return False
 
     def create_task(self, name: str, notes: str = "", due_on: Optional[str] = None,
-                   project_gid: Optional[str] = None, assignee_gid: Optional[str] = None) -> Dict[str, Any]:
+                   project_gid: Optional[str] = None, assignee_gid: Optional[str] = None,
+                   section_gid: Optional[str] = None) -> Dict[str, Any]:
         """
         Erstellt eine neue Aufgabe in Asana
 
@@ -543,6 +544,7 @@ class AsanaAgent(BaseAgent):
             due_on: Fälligkeitsdatum (Format: YYYY-MM-DD)
             project_gid: ID des Projekts (optional)
             assignee_gid: GID des Verantwortlichen (optional, "me" für aktuellen Nutzer)
+            section_gid: GID des Ziel-Abschnitts (optional, platziert Task direkt in Section)
 
         Returns:
             Dictionary mit Aufgaben-Informationen oder Fehler
@@ -574,12 +576,13 @@ class AsanaAgent(BaseAgent):
                 print(f"[{self.name}]   ✓ Setze due_on: {due_on}")
                 task_data['due_on'] = due_on
 
-            if project_gid:
-                print(f"[{self.name}]   ✓ Setze project: {project_gid}")
-                task_data['projects'] = [project_gid]
-            elif self.default_project_gid:
-                print(f"[{self.name}]   ✓ Verwende Default-Projekt: {self.default_project_gid}")
-                task_data['projects'] = [self.default_project_gid]
+            effective_project_gid = project_gid or self.default_project_gid
+            if effective_project_gid and section_gid:
+                print(f"[{self.name}]   ✓ Setze memberships (project: {effective_project_gid}, section: {section_gid})")
+                task_data['memberships'] = [{'project': effective_project_gid, 'section': section_gid}]
+            elif effective_project_gid:
+                print(f"[{self.name}]   ✓ Setze project: {effective_project_gid}")
+                task_data['projects'] = [effective_project_gid]
             else:
                 print(f"[{self.name}]   ⚠️  WARNUNG: Kein Projekt angegeben!")
 
@@ -1054,6 +1057,16 @@ class AsanaAgent(BaseAgent):
         try:
             from pathlib import Path
 
+            # Debug: Prüfe Typ von file_path
+            print(f"[{self.name}] DEBUG: file_path type = {type(file_path)}, value = {file_path}")
+
+            # Stelle sicher, dass file_path ein String/Path ist, kein Tupel
+            if isinstance(file_path, tuple):
+                return {
+                    "success": False,
+                    "error": f"file_path ist ein Tupel statt String: {file_path}"
+                }
+
             file_path_obj = Path(file_path)
             if not file_path_obj.exists():
                 return {
@@ -1065,26 +1078,25 @@ class AsanaAgent(BaseAgent):
             if not file_name:
                 file_name = file_path_obj.name
 
-            # Öffne die Datei und erstelle Attachment
-            with open(file_path_obj, 'rb') as file:
-                # Asana API erwartet ein Tuple: (filename, file_handle, content_type)
-                opts = {
-                    'parent': task_gid,
-                    'file': (file_name, file, 'application/pdf'),
-                    'opt_pretty': True
-                }
+            # Asana SDK v5: 'file' erwartet den Dateipfad als String (SDK öffnet die Datei selbst)
+            opts = {
+                'parent': task_gid,
+                'file': str(file_path_obj),
+                'name': file_name,
+            }
 
-                result = self.attachments_api.create_attachment_for_object(opts)
+            print(f"[{self.name}] Uploading attachment: {file_name} to task {task_gid}")
+            result = self.attachments_api.create_attachment_for_object(opts)
 
-                print(f"[{self.name}] ✓ Datei angehängt: {file_name} an Task {task_gid}")
+            print(f"[{self.name}] ✓ Datei angehängt: {file_name} an Task {task_gid}")
 
-                return {
-                    "success": True,
-                    "attachment_gid": result.get('gid'),
-                    "file_name": file_name,
-                    "task_gid": task_gid,
-                    "download_url": result.get('download_url', '')
-                }
+            return {
+                "success": True,
+                "attachment_gid": result.get('gid'),
+                "file_name": file_name,
+                "task_gid": task_gid,
+                "download_url": result.get('download_url', '')
+            }
 
         except Exception as e:
             print(f"[{self.name}] ✗ Fehler beim Anhängen der Datei: {e}")

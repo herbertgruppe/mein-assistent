@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import signal
 import time
+import threading
 import streamlit as st
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -21,6 +22,74 @@ load_dotenv()
 from agents import ResearchAgent, TaskAgent, CommunicationAgent, AsanaAgent, CalendarEmailAgent
 from utils import MemoryManager
 from tools import DocumentTool, AsanaTool, OutlookGraphTool
+
+
+# ============================================================================
+# BACKGROUND PROTOCOL GENERATION (Thread-basiert)
+# ============================================================================
+# Modul-Level: wird von Background-Threads und Streamlit-Thread geteilt
+_bg_protocol_jobs: Dict[str, Any] = {}   # {item_id: {status, protocol, chunks, filename, error}}
+_bg_jobs_lock = threading.Lock()
+
+
+def _run_protocol_generation_bg(item_id: str, file_path_str: str, meeting_title: str, llm,
+                                 attendees=None, meeting_date=None, agenda_text=None):
+    """Läuft in einem Background-Thread. Erzeugt das Protokoll ohne den UI-Thread zu blockieren."""
+    try:
+        file_path = Path(file_path_str)
+
+        if file_path.suffix.lower() == '.pdf':
+            from langchain_community.document_loaders import PyPDFLoader
+            loader = PyPDFLoader(str(file_path))
+            pages = loader.load()
+            transcript_text = "\n\n".join([p.page_content for p in pages])
+        else:
+            transcript_text = file_path.read_text(encoding='utf-8')
+
+        protocol_parts = []
+        for chunk in extract_protocol_from_transcript_streaming(
+            transcript_text, meeting_title, llm,
+            attendees=attendees, meeting_date=meeting_date, agenda_text=agenda_text
+        ):
+            protocol_parts.append(chunk)
+            with _bg_jobs_lock:
+                _bg_protocol_jobs[item_id]['chunks'] = len(protocol_parts)
+
+        protocol = ''.join(protocol_parts)
+
+        # Cache auf Disk schreiben
+        cache_dir = Path("transcripts/protocol_cache")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / f"{file_path.stem}_protocol.md").write_text(protocol, encoding='utf-8')
+
+        with _bg_jobs_lock:
+            _bg_protocol_jobs[item_id]['status'] = 'done'
+            _bg_protocol_jobs[item_id]['protocol'] = protocol
+
+    except Exception as e:
+        with _bg_jobs_lock:
+            _bg_protocol_jobs[item_id]['status'] = 'error'
+            _bg_protocol_jobs[item_id]['error'] = str(e)
+
+
+def start_bg_protocol_generation(item_id: str, file_path_str: str, meeting_title: str, llm, filename: str,
+                                   attendees=None, meeting_date=None, agenda_text=None):
+    """Startet die Protokoll-Erstellung in einem Background-Thread."""
+    with _bg_jobs_lock:
+        _bg_protocol_jobs[item_id] = {
+            'status': 'running',
+            'protocol': '',
+            'chunks': 0,
+            'filename': filename,
+            'error': ''
+        }
+    t = threading.Thread(
+        target=_run_protocol_generation_bg,
+        args=(item_id, file_path_str, meeting_title, llm),
+        kwargs={'attendees': attendees, 'meeting_date': meeting_date, 'agenda_text': agenda_text},
+        daemon=True
+    )
+    t.start()
 
 
 # ============================================================================
@@ -1769,8 +1838,15 @@ def render_dashboard_tab():
 
     st.markdown("---")
 
+    # Prüfe ob zur Dashboard-Ansicht zurückgekehrt werden soll
+    should_return_to_dashboard = st.session_state.get('return_to_dashboard', False)
+    if should_return_to_dashboard:
+        # Lösche den Flag für den nächsten Durchlauf
+        del st.session_state['return_to_dashboard']
+
     # Prüfe ob Meeting-Vorbereitung aktiv ist
-    if 'preparing_event' in st.session_state:
+    # Zeige Meeting-Prep NICHT wenn explizit zur Dashboard zurückgekehrt werden soll
+    if 'preparing_event' in st.session_state and not should_return_to_dashboard:
         # Meeting-Vorbereitung Modus
         render_meeting_preparation_view()
     else:
@@ -2190,6 +2266,9 @@ def render_meeting_preparation_view():
     if 'agenda_preview_data' not in st.session_state:
         st.session_state['agenda_preview_data'] = {}
 
+    # WICHTIG: Der folgende Code muss IMMER ausgeführt werden, nicht nur beim ersten Mal!
+    # Daher verwenden wir "if True:" als Workaround, um die Einrückung beizubehalten
+    if True:
         # ====================================================================
         # TEMPLATE-VERWALTUNG
         # ====================================================================
@@ -2234,6 +2313,9 @@ def render_meeting_preparation_view():
                     st.info("📭 Noch keine Vorlagen vorhanden. Erstellen Sie Ihre erste Vorlage im Tab 'Neue Vorlage'!")
 
             with tab_create:
+                # Import datetime für Template-Erstellung
+                from datetime import datetime
+
                 # Prüfe ob wir im Edit-Modus sind
                 editing_mode = 'editing_template_idx' in st.session_state
                 if editing_mode:
@@ -2803,26 +2885,26 @@ def render_meeting_preparation_view():
                                 time.sleep(1)
                                 st.rerun()
 
-                # Zeige bearbeitbare Agenda wenn generiert
-                if st.session_state['agenda_generated_content']:
-                    st.markdown("**📄 Generierte Agenda** (vollständig bearbeitbar):")
-                    st.info("💡 **Tipp:** Sie können den Text direkt im Feld unten bearbeiten. Änderungen werden automatisch gespeichert.")
+            # Zeige bearbeitbare Agenda wenn generiert (außerhalb des if/else-Blocks!)
+            if st.session_state['agenda_generated_content']:
+                st.markdown("**📄 Generierte Agenda** (vollständig bearbeitbar):")
+                st.info("💡 **Tipp:** Sie können den Text direkt im Feld unten bearbeiten. Änderungen werden automatisch gespeichert.")
 
-                    edited_content = st.text_area(
-                        "Agenda bearbeiten",
-                        value=st.session_state['agenda_generated_content'],
-                        height=500,
-                        key="agenda_editor",
-                        label_visibility="collapsed",
-                        help="Bearbeiten Sie die Agenda nach Bedarf. Änderungen werden automatisch übernommen."
-                    )
+                edited_content = st.text_area(
+                    "Agenda bearbeiten",
+                    value=st.session_state['agenda_generated_content'],
+                    height=500,
+                    key="agenda_editor",
+                    label_visibility="collapsed",
+                    help="Bearbeiten Sie die Agenda nach Bedarf. Änderungen werden automatisch übernommen."
+                )
 
-                    # Speichere Änderungen
-                    st.session_state['agenda_generated_content'] = edited_content
+                # Speichere Änderungen
+                st.session_state['agenda_generated_content'] = edited_content
 
-                    # Zeichenzähler
-                    char_count = len(edited_content)
-                    st.caption(f"📊 {char_count:,} Zeichen | ✏️ Änderungen werden automatisch gespeichert")
+                # Zeichenzähler
+                char_count = len(edited_content)
+                st.caption(f"📊 {char_count:,} Zeichen | ✏️ Änderungen werden automatisch gespeichert")
 
         # ====================================================================
         # SCHRITT 3: Speichern & Anhängen
@@ -2908,11 +2990,18 @@ def render_meeting_preparation_view():
                                         st.success(f"✅ Agenda erfolgreich erstellt und angehängt!")
                                         st.info(f"📁 Gespeichert in: `data/agendas/{agenda_filename}`")
 
-                                        # Reset Workflow
-                                        st.session_state['agenda_workflow_step'] = 1
-                                        st.session_state['agenda_sections_loaded'] = False
-                                        st.session_state['agenda_generated_content'] = ""
-                                        st.session_state['agenda_preview_data'] = {}
+                                        # Automatisch zur Terminübersicht zurückkehren
+                                        st.info("🔄 Kehre automatisch zur Terminübersicht zurück...")
+                                        time.sleep(2)
+
+                                        # Cleanup - lösche alle Meeting-Prep Variablen
+                                        for key in ['preparing_event', 'preparing_event_idx', 'preparation_messages',
+                                                   'agenda_sections_loaded', 'agenda_preview_data', 'agenda_workflow_step',
+                                                   'agenda_generated_content', 'last_preparing_event_id']:
+                                            if key in st.session_state:
+                                                del st.session_state[key]
+
+                                        st.rerun()
                                     else:
                                         st.error(f"❌ Fehler beim Anhängen: {result.get('error')}")
                                 else:
@@ -4603,7 +4692,8 @@ Gib die Aufgaben im folgenden JSON-Format zurück (ein Array von Objekten):
     "title": "Kurzer Aufgabentitel (max 80 Zeichen)",
     "assignee": "Name der zuständigen Person oder [?] falls unklar",
     "description": "Detaillierte Beschreibung mit Kontext aus dem Meeting",
-    "due_date": "YYYY-MM-DD oder null falls kein Datum genannt"
+    "due_date": "YYYY-MM-DD oder null falls kein Datum genannt",
+    "top": "Name des Tagesordnungspunkts oder Abschnitts, unter dem diese Aufgabe steht (z.B. 'TOP 3: Personalplanung' oder 'Weitere Schritte')"
   }
 ]
 
@@ -4614,7 +4704,8 @@ Regeln:
 - Assignee: Extrahiere den Namen der zuständigen Person (Format: "**Name**:" oder "Name übernimmt" oder ähnlich)
 - Beschreibung sollte genug Kontext für Asana enthalten
 - Falls ein Datum oder Frist erwähnt wird, berechne das due_date
-- Falls kein Datum erwähnt wird, setze due_date auf null"""
+- Falls kein Datum erwähnt wird, setze due_date auf null
+- top: Der Tagesordnungspunkt oder Abschnitt des Protokolls, unter dem die Aufgabe steht. Falls nicht eindeutig, setze auf null"""
 
     user_prompt = f"""Text ({text_words} Wörter, {text_length} Zeichen):
 
@@ -4636,19 +4727,46 @@ Achte besonders auf "Weitere Schritte" oder "Action Items" Abschnitte."""
         # Extrahiere JSON aus der Antwort
         content = response.content
 
-        # Suche nach JSON-Array
-        json_match = re.search(r'\[[\s\S]*\]', content)
+        # Suche nach JSON-Array mit Klammer-Balancierung.
+        # WICHTIG: Kein greedy-Regex (\[[\s\S]*\]) – der würde bei [?]-Platzhaltern
+        # im LLM-Text vom ersten [ bis zum letzten ] matchen und ungültiges JSON liefern.
+        tasks_json = None
+        start_match = re.search(r'\[\s*[\{\]]', content)  # Findet [ gefolgt von { oder ] (leeres Array)
+        if start_match:
+            start = start_match.start()
+            depth = 0
+            in_string = False
+            escape_next = False
+            for i in range(start, len(content)):
+                c = content[i]
+                if escape_next:
+                    escape_next = False
+                    continue
+                if c == '\\' and in_string:
+                    escape_next = True
+                    continue
+                if c == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if c == '[':
+                    depth += 1
+                elif c == ']':
+                    depth -= 1
+                    if depth == 0:
+                        tasks_json = content[start:i + 1]
+                        break
 
-        if json_match:
-            tasks_json = json_match.group(0)
+        if tasks_json:
             tasks = json.loads(tasks_json)
             return tasks
         else:
             return []
 
     except Exception as e:
-        st.error(f"Fehler bei LLM-Analyse: {e}")
-        return []
+        # Exception propagieren, damit der Aufrufer sie dauerhaft anzeigen kann
+        raise RuntimeError(f"Fehler bei LLM-Analyse: {e}") from e
 
 
 def count_placeholders_in_protocol(protocol_text: str) -> int:
@@ -4795,18 +4913,44 @@ Extrahiere alle Aufgaben aus den "Weitere Schritte" Abschnitten im JSON-Format."
 
         # Extrahiere JSON aus der Antwort
         content = response.content
-        json_match = re.search(r'\[[\s\S]*\]', content)
 
-        if json_match:
-            tasks_json = json_match.group(0)
+        # Suche nach JSON-Array mit Klammer-Balancierung (kein greedy-Regex).
+        tasks_json = None
+        start_match = re.search(r'\[\s*[\{\]]', content)
+        if start_match:
+            start = start_match.start()
+            depth = 0
+            in_string = False
+            escape_next = False
+            for i in range(start, len(content)):
+                c = content[i]
+                if escape_next:
+                    escape_next = False
+                    continue
+                if c == '\\' and in_string:
+                    escape_next = True
+                    continue
+                if c == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if c == '[':
+                    depth += 1
+                elif c == ']':
+                    depth -= 1
+                    if depth == 0:
+                        tasks_json = content[start:i + 1]
+                        break
+
+        if tasks_json:
             tasks = json.loads(tasks_json)
             return tasks
         else:
             return []
 
     except Exception as e:
-        st.error(f"Fehler beim Extrahieren der Tasks aus Protokoll: {e}")
-        return []
+        raise RuntimeError(f"Fehler beim Extrahieren der Tasks aus Protokoll: {e}") from e
 
 
 # ============================================================================
@@ -5221,11 +5365,14 @@ def create_protocol_task_in_asana(
     meeting_title: str,
     protocol_text: str,
     protocol_file_path: Optional[Path] = None,
-    pdf_file_path: Optional[Path] = None
+    pdf_file_path: Optional[Path] = None,
+    outlook_event_id: Optional[str] = None,
+    outlook_tool = None
 ) -> Dict[str, Any]:
     """
     Erstellt eine zentrale Protokoll-Aufgabe in Asana mit optionalem PDF-Anhang
     und verschiebt sie automatisch in den "Protokolle"-Section.
+    Setzt optional die Kategorie "Protokoll" im Outlook-Termin.
 
     Args:
         asana_agent: AsanaAgent-Instanz
@@ -5234,6 +5381,8 @@ def create_protocol_task_in_asana(
         protocol_text: Vollständiger Protokoll-Text
         protocol_file_path: Optional - Pfad zur .md Datei
         pdf_file_path: Optional - Pfad zur PDF-Datei zum Anhängen
+        outlook_event_id: Optional - Outlook Event-ID für Kategorie-Zuweisung
+        outlook_tool: Optional - OutlookGraphTool-Instanz
 
     Returns:
         Result-Dict mit success, task_gid, permalink_url und ggf. error
@@ -5280,6 +5429,29 @@ def create_protocol_task_in_asana(
 
             if not attachment_result.get('success'):
                 print(f"[create_protocol_task_in_asana] ⚠️ PDF-Anhang fehlgeschlagen: {attachment_result.get('error')}")
+
+        # Füge "Protokoll"-Kategorie + Betreff-Prefix zum Outlook-Termin hinzu (falls angegeben)
+        if outlook_event_id and outlook_tool:
+            try:
+                category_result = outlook_tool.add_category_to_event(
+                    event_id=outlook_event_id,
+                    category="Protokoll"
+                )
+                if category_result.get('success'):
+                    print(f"[create_protocol_task_in_asana] ✓ Kategorie 'Protokoll' zum Termin hinzugefügt")
+                else:
+                    print(f"[create_protocol_task_in_asana] ⚠️ Kategorie-Zuweisung fehlgeschlagen: {category_result.get('error')}")
+            except Exception as e:
+                print(f"[create_protocol_task_in_asana] ⚠️ Fehler beim Setzen der Kategorie: {e}")
+
+            try:
+                prefix_result = outlook_tool.add_protocol_subject_prefix(event_id=outlook_event_id)
+                if prefix_result.get('success'):
+                    print(f"[create_protocol_task_in_asana] ✓ Betreff-Prefix '📄 ' gesetzt")
+                else:
+                    print(f"[create_protocol_task_in_asana] ⚠️ Betreff-Prefix fehlgeschlagen: {prefix_result.get('error')}")
+            except Exception as e:
+                print(f"[create_protocol_task_in_asana] ⚠️ Fehler beim Setzen des Betreff-Prefix: {e}")
 
         return {
             'success': True,
@@ -7698,17 +7870,21 @@ def save_wip_item(item: Dict[str, Any], wip_dir: Path):
 
 
 def delete_wip_item(item: Dict[str, Any], wip_dir: Path):
-    """Löscht ein WIP-Item nach Abschluss"""
+    """Löscht ein WIP-Item von Disk"""
     try:
         item_id = item.get('id', 'unknown')
         wip_file = wip_dir / f"item_{item_id}.json"
 
         if wip_file.exists():
             wip_file.unlink()
-            print(f"WIP-Item gelöscht: {item_id}")
+            print(f"[delete_wip_item] ✓ WIP-Item gelöscht: {item_id}")
+        else:
+            print(f"[delete_wip_item] ⚠️ WIP-Datei nicht gefunden: {wip_file}")
 
     except Exception as e:
-        print(f"Fehler beim Löschen von WIP-Item: {e}")
+        print(f"[delete_wip_item] ✗ Fehler beim Löschen: {e}")
+
+
 
 
 def render_transcripts_tab():
@@ -7789,13 +7965,50 @@ def render_transcripts_tab():
     # Verarbeite hochgeladene Files
     if uploaded_files:
         newly_uploaded = []
+        updated_files = []
+
         for uploaded_file in uploaded_files:
             # Speichere Datei
             file_path = processed_dir / uploaded_file.name
 
-            # Prüfe ob bereits in Queue
-            existing_files = [item['filename'] for item in st.session_state['transcript_queue']]
-            if uploaded_file.name not in existing_files:
+            # Prüfe auf Duplikate (gleicher Dateiname)
+            existing_idx = None
+            for idx, item in enumerate(st.session_state['transcript_queue']):
+                if item['filename'] == uploaded_file.name:
+                    existing_idx = idx
+                    break
+
+            if existing_idx is not None:
+                # Duplikat gefunden - aktualisiere bestehendes Item
+                old_item = st.session_state['transcript_queue'][existing_idx]
+                old_id = old_item.get('id')
+
+                # Überschreibe Datei
+                with open(file_path, 'wb') as f:
+                    f.write(uploaded_file.getbuffer())
+
+                # Erstelle aktualisiertes Item (behalte ID, setze zurück auf 'new')
+                updated_item = {
+                    'id': old_id,
+                    'filename': uploaded_file.name,
+                    'path': str(file_path),
+                    'status': 'new',
+                    'selected_event': None,
+                    'protocol': None,
+                    'tasks': None,
+                    'error': None,
+                    'uploaded_at': datetime.now().isoformat(),
+                    'workflow_step': 0
+                }
+
+                # Ersetze altes Item
+                st.session_state['transcript_queue'][existing_idx] = updated_item
+                updated_files.append(uploaded_file.name)
+
+                # Speichere persistent (überschreibt alte WIP-Datei)
+                save_wip_item(updated_item, wip_dir)
+            else:
+                # Neu - erstelle neues Item
                 with open(file_path, 'wb') as f:
                     f.write(uploaded_file.getbuffer())
 
@@ -7808,13 +8021,13 @@ def render_transcripts_tab():
                     'id': item_id,
                     'filename': uploaded_file.name,
                     'path': str(file_path),
-                    'status': 'new',  # new, processing, completed, error
+                    'status': 'new',
                     'selected_event': None,
                     'protocol': None,
                     'tasks': None,
                     'error': None,
                     'uploaded_at': datetime.now().isoformat(),
-                    'workflow_step': 0  # 0=neu, 1=termin, 2=umbenennen, 3=protokoll, 4=tasks, 5=fertig
+                    'workflow_step': 0
                 }
                 st.session_state['transcript_queue'].append(new_item)
                 newly_uploaded.append(uploaded_file.name)
@@ -7822,99 +8035,64 @@ def render_transcripts_tab():
                 # Speichere persistent
                 save_wip_item(new_item, wip_dir)
 
-        if newly_uploaded:
-            st.success(f"✅ {len(newly_uploaded)} Transkript(e) hochgeladen!")
-
-            # Starte Background-Protokoll-Generierung
-            if st.checkbox("🚀 Protokolle im Hintergrund erstellen", value=True, key="bg_generate"):
-                st.session_state['start_background_generation'] = True
+        if newly_uploaded or updated_files:
+            if newly_uploaded:
+                st.success(f"✅ {len(newly_uploaded)} neue Transkript(e) hochgeladen!")
+            if updated_files:
+                st.info(f"🔄 {len(updated_files)} bestehende(s) Transkript(e) aktualisiert: {', '.join(updated_files)}")
 
             st.rerun()
 
     # ========================================================================
-    # BACKGROUND-PROTOKOLL-GENERIERUNG
+    # BACKGROUND-PROTOKOLL-GENERIERUNG (Thread-basiert, blockiert UI nicht)
     # ========================================================================
-    if st.session_state.get('start_background_generation', False):
-        st.session_state['start_background_generation'] = False  # Reset flag
 
-        # Finde alle neuen Transkripte ohne Protokoll
-        items_to_process = [
-            (idx, item) for idx, item in enumerate(st.session_state['transcript_queue'])
-            if item['status'] == 'new' and not item.get('protocol')
-        ]
+    # Fertige Jobs in Session State übertragen
+    with _bg_jobs_lock:
+        done_ids = [k for k, v in _bg_protocol_jobs.items() if v['status'] == 'done']
+        error_ids = [k for k, v in _bg_protocol_jobs.items() if v['status'] == 'error']
 
-        if items_to_process:
-            st.info(f"🔄 Generiere {len(items_to_process)} Protokolle im Hintergrund...")
+    for item_id in done_ids:
+        with _bg_jobs_lock:
+            job = _bg_protocol_jobs.pop(item_id)
+        for i, item in enumerate(st.session_state['transcript_queue']):
+            if item['id'] == item_id:
+                # Nur setzen wenn noch kein Protokoll vorhanden (kein manuell erstelltes überschreiben)
+                if not st.session_state['transcript_queue'][i].get('protocol'):
+                    st.session_state['transcript_queue'][i]['protocol'] = job['protocol']
+                st.session_state['transcript_queue'][i]['status'] = 'processing'
+                # workflow_step NICHT zurücksetzen – Benutzer soll an seiner aktuellen Stelle bleiben
+                save_wip_item(st.session_state['transcript_queue'][i], wip_dir)
+                break
 
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+    for item_id in error_ids:
+        with _bg_jobs_lock:
+            job = _bg_protocol_jobs.pop(item_id)
+        for i, item in enumerate(st.session_state['transcript_queue']):
+            if item['id'] == item_id:
+                st.session_state['transcript_queue'][i]['error'] = job['error']
+                st.session_state['transcript_queue'][i]['status'] = 'error'
+                save_wip_item(st.session_state['transcript_queue'][i], wip_dir)
+                break
 
-            orch = st.session_state.get('orchestrator')
-            if orch and orch.research_agent:
-                for processed_idx, (idx, item) in enumerate(items_to_process, 1):
-                    try:
-                        status_text.text(f"📝 Erstelle Protokoll {processed_idx}/{len(items_to_process)}: {item['filename'][:40]}...")
-                        progress_bar.progress(processed_idx / len(items_to_process))
+    # 3. Auto-Refresh-Fragment: NUR aktiv wenn Background-Jobs laufen
+    # (Ohne diese Bedingung würde run_every=2 die UI alle 2s ausgrauen, auch ohne Jobs)
+    with _bg_jobs_lock:
+        _has_running_jobs = any(v['status'] == 'running' for v in _bg_protocol_jobs.values())
 
-                        # Lade Transkript
-                        file_path = Path(item['path'])
+    if _has_running_jobs:
+        @st.fragment(run_every=2)
+        def _bg_status_banner():
+            with _bg_jobs_lock:
+                running = [(k, v) for k, v in _bg_protocol_jobs.items() if v['status'] == 'running']
+                finished = [k for k, v in _bg_protocol_jobs.items() if v['status'] in ('done', 'error')]
+            if running:
+                for _, job in running:
+                    st.info(f"⏳ Protokoll wird erstellt: **{job['filename'][:60]}** ({job['chunks']} Tokens) – du kannst währenddessen weiterarbeiten.")
+            if finished:
+                st.rerun()  # Ergebnisse in den Session State übertragen
 
-                        if file_path.suffix.lower() == '.pdf':
-                            from langchain_community.document_loaders import PyPDFLoader
-                            loader = PyPDFLoader(str(file_path))
-                            pages = loader.load()
-                            transcript_text = "\n\n".join([page.page_content for page in pages])
-                        else:
-                            with open(file_path, 'r', encoding='utf-8') as f:
-                                transcript_text = f.read()
-
-                        # Generiere Protokoll mit Streaming (sammle alle Chunks)
-                        from app import extract_protocol_from_transcript_streaming
-
-                        meeting_title = file_path.stem.split('_', 2)[-1] if '_' in file_path.stem else file_path.stem
-
-                        protocol_parts = []
-                        for chunk in extract_protocol_from_transcript_streaming(
-                            transcript_text,
-                            meeting_title,
-                            orch.research_agent.llm,
-                            attendees=None,
-                            meeting_date=None,
-                            agenda_text=None
-                        ):
-                            protocol_parts.append(chunk)
-
-                        protocol = ''.join(protocol_parts)
-
-                        # Speichere Protokoll
-                        st.session_state['transcript_queue'][idx]['protocol'] = protocol
-                        st.session_state['transcript_queue'][idx]['status'] = 'processing'
-                        st.session_state['transcript_queue'][idx]['workflow_step'] = 0  # Starte bei Schritt 1 (Termin zuordnen)
-
-                        # Persistiere zu Disk
-                        wip_dir = Path("transcripts/wip")
-                        save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
-
-                        # Speichere auch lokal als Cache
-                        cache_dir = Path("transcripts/protocol_cache")
-                        cache_dir.mkdir(parents=True, exist_ok=True)
-                        cache_file = cache_dir / f"{file_path.stem}_protocol.md"
-                        with open(cache_file, 'w', encoding='utf-8') as f:
-                            f.write(protocol)
-
-                    except Exception as e:
-                        st.session_state['transcript_queue'][idx]['error'] = str(e)
-                        st.session_state['transcript_queue'][idx]['status'] = 'error'
-
-                        # Persistiere auch Fehler zu Disk
-                        wip_dir = Path("transcripts/wip")
-                        save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
-
-            progress_bar.empty()
-            status_text.empty()
-            st.success(f"✅ {len(items_to_process)} Protokolle erstellt!")
-            st.balloons()
-            st.rerun()
+        _bg_status_banner()
 
     st.markdown("---")
 
@@ -7982,29 +8160,53 @@ def render_transcripts_tab():
     if new_items:
         st.markdown("#### 🟡 Neue Transkripte")
         for idx, item in new_items:
-            col_name, col_action = st.columns([4, 1])
+            col_name, col_edit, col_delete = st.columns([3, 1, 1])
             with col_name:
                 st.write(f"📄 **{item['filename']}**")
                 st.caption(f"Hochgeladen: {datetime.fromisoformat(item['uploaded_at']).strftime('%d.%m.%Y %H:%M')}")
-            with col_action:
+            with col_edit:
                 if st.button("▶️ Bearbeiten", key=f"edit_new_{idx}", use_container_width=True):
                     st.session_state['selected_transcript_idx'] = idx
                     st.session_state['transcript_queue'][idx]['status'] = 'processing'
+                    st.rerun()
+            with col_delete:
+                if st.button("🗑️", key=f"delete_new_{idx}", use_container_width=True, help="Löschen"):
+                    # Lösche aus Queue
+                    deleted_item = st.session_state['transcript_queue'].pop(idx)
+                    # Lösche WIP-Datei
+                    wip_dir = Path("transcripts/wip")
+                    delete_wip_item(deleted_item, wip_dir)
+                    # Reset selected_idx falls nötig
+                    if st.session_state.get('selected_transcript_idx') == idx:
+                        st.session_state['selected_transcript_idx'] = None
+                    st.success(f"✅ '{deleted_item['filename']}' gelöscht")
                     st.rerun()
 
     # IN BEARBEITUNG
     if processing_items:
         st.markdown("#### 🟠 In Bearbeitung")
         for idx, item in processing_items:
-            col_name, col_action = st.columns([4, 1])
+            col_name, col_edit, col_delete = st.columns([3, 1, 1])
             with col_name:
                 st.write(f"📄 **{item['filename']}**")
                 workflow_steps = ["Neu", "Termin zuordnen", "Umbenennen", "Protokoll erstellen", "Tasks extrahieren", "Fertig"]
                 current_step = item.get('workflow_step', 0)
                 st.caption(f"Schritt {current_step}/5: {workflow_steps[min(current_step, 5)]}")
-            with col_action:
+            with col_edit:
                 if st.button("📝 Fortsetzen", key=f"edit_proc_{idx}", use_container_width=True):
                     st.session_state['selected_transcript_idx'] = idx
+                    st.rerun()
+            with col_delete:
+                if st.button("🗑️", key=f"delete_proc_{idx}", use_container_width=True, help="Löschen"):
+                    # Lösche aus Queue
+                    deleted_item = st.session_state['transcript_queue'].pop(idx)
+                    # Lösche WIP-Datei
+                    wip_dir = Path("transcripts/wip")
+                    delete_wip_item(deleted_item, wip_dir)
+                    # Reset selected_idx falls nötig
+                    if st.session_state.get('selected_transcript_idx') == idx:
+                        st.session_state['selected_transcript_idx'] = None
+                    st.success(f"✅ '{deleted_item['filename']}' gelöscht")
                     st.rerun()
 
     # FERTIG (Archiv - optional ausblendbat)
@@ -8014,21 +8216,29 @@ def render_transcripts_tab():
             with st.expander(f"✅ {item['filename']}", expanded=False):
                 st.caption(f"Abgeschlossen: {datetime.fromisoformat(item['uploaded_at']).strftime('%d.%m.%Y %H:%M')}")
 
-                col_view, col_export, col_reopen = st.columns(3)
+                col_view, col_reopen, col_delete = st.columns(3)
                 with col_view:
                     if st.button("👁️ Ansehen", key=f"view_{idx}"):
                         st.session_state['selected_transcript_idx'] = idx
                         st.rerun()
 
-                with col_export:
-                    if st.button("📥 Export", key=f"export_{idx}"):
-                        # TODO: Export Funktion
-                        st.info("Export-Funktion folgt...")
-
                 with col_reopen:
                     if st.button("🔄 Wieder öffnen", key=f"reopen_{idx}"):
                         st.session_state['transcript_queue'][idx]['status'] = 'processing'
                         st.session_state['selected_transcript_idx'] = idx
+                        st.rerun()
+
+                with col_delete:
+                    if st.button("🗑️ Löschen", key=f"delete_completed_{idx}"):
+                        # Lösche aus Queue
+                        deleted_item = st.session_state['transcript_queue'].pop(idx)
+                        # Lösche WIP-Datei
+                        wip_dir = Path("transcripts/wip")
+                        delete_wip_item(deleted_item, wip_dir)
+                        # Reset selected_idx falls nötig
+                        if st.session_state.get('selected_transcript_idx') == idx:
+                            st.session_state['selected_transcript_idx'] = None
+                        st.success(f"✅ '{deleted_item['filename']}' gelöscht")
                         st.rerun()
 
     # FEHLER
@@ -8037,10 +8247,26 @@ def render_transcripts_tab():
         for idx, item in error_items:
             with st.expander(f"❌ {item['filename']}", expanded=False):
                 st.error(f"Fehler: {item.get('error', 'Unbekannter Fehler')}")
-                if st.button("🔄 Erneut versuchen", key=f"retry_{idx}"):
-                    st.session_state['transcript_queue'][idx]['status'] = 'new'
-                    st.session_state['transcript_queue'][idx]['error'] = None
-                    st.rerun()
+
+                col_retry, col_delete = st.columns(2)
+                with col_retry:
+                    if st.button("🔄 Erneut versuchen", key=f"retry_{idx}"):
+                        st.session_state['transcript_queue'][idx]['status'] = 'new'
+                        st.session_state['transcript_queue'][idx]['error'] = None
+                        st.rerun()
+
+                with col_delete:
+                    if st.button("🗑️ Löschen", key=f"delete_error_{idx}"):
+                        # Lösche aus Queue
+                        deleted_item = st.session_state['transcript_queue'].pop(idx)
+                        # Lösche WIP-Datei
+                        wip_dir = Path("transcripts/wip")
+                        delete_wip_item(deleted_item, wip_dir)
+                        # Reset selected_idx falls nötig
+                        if st.session_state.get('selected_transcript_idx') == idx:
+                            st.session_state['selected_transcript_idx'] = None
+                        st.success(f"✅ '{deleted_item['filename']}' gelöscht")
+                        st.rerun()
 
     st.markdown("---")
 
@@ -8225,6 +8451,58 @@ def render_step_assign_meeting(idx: int):
                         if st.button("✅ Termin zugeordnet - Weiter →", type="primary", use_container_width=True):
                             st.session_state['transcript_queue'][idx]['workflow_step'] = 1
 
+                            # Starte Background-Protokoll-Generierung mit vollem Event-Kontext
+                            orch = st.session_state.get('orchestrator')
+                            if orch and orch.research_agent and not item.get('protocol'):
+                                with _bg_jobs_lock:
+                                    already_running = item['id'] in _bg_protocol_jobs
+                                if not already_running:
+                                    # Teilnehmer extrahieren
+                                    bg_attendees = []
+                                    for att in selected_event.get('attendees', []):
+                                        if isinstance(att, dict):
+                                            bg_attendees.append(att.get('name', att.get('email', '')))
+                                        elif isinstance(att, str):
+                                            bg_attendees.append(att)
+                                    # Datum extrahieren
+                                    bg_date = None
+                                    ev_start = selected_event.get('start')
+                                    if isinstance(ev_start, str):
+                                        try:
+                                            ev_dt = datetime.fromisoformat(ev_start.replace('Z', '+00:00'))
+                                            ev_dt = convert_to_berlin_time(ev_dt)
+                                            bg_date = ev_dt.strftime('%d.%m.%Y %H:%M')
+                                        except Exception:
+                                            pass
+                                    # Agenda laden (falls vorhanden)
+                                    bg_agenda = None
+                                    agenda_dir = Path("data/agendas")
+                                    if agenda_dir.exists() and bg_date:
+                                        date_str_short = bg_date[:10]
+                                        ev_title = selected_event.get('title', '')
+                                        for af in agenda_dir.glob("Agenda_*.pdf"):
+                                            if date_str_short in af.stem and any(
+                                                w.lower() in af.stem.lower() for w in ev_title.split() if len(w) > 3
+                                            ):
+                                                try:
+                                                    from langchain_community.document_loaders import PyPDFLoader
+                                                    bg_agenda = "\n\n".join(
+                                                        p.page_content for p in PyPDFLoader(str(af)).load()
+                                                    )
+                                                except Exception:
+                                                    pass
+                                                break
+                                    fp = Path(item['path'])
+                                    title = fp.stem.split('_', 2)[-1] if '_' in fp.stem else fp.stem
+                                    start_bg_protocol_generation(
+                                        item['id'], item['path'], title,
+                                        orch.research_agent.llm, item['filename'],
+                                        attendees=bg_attendees or None,
+                                        meeting_date=bg_date,
+                                        agenda_text=bg_agenda
+                                    )
+                                    st.toast("⏳ Protokoll wird im Hintergrund erstellt...", icon="🚀")
+
                             # Persistiere zu Disk
                             wip_dir = Path("transcripts/wip")
                             save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
@@ -8283,6 +8561,17 @@ def render_step_rename(idx: int):
         st.rerun()
 
     st.markdown("---")
+
+    # Prüfe ob Quelldatei noch existiert
+    if not file_path.exists():
+        st.warning(f"⚠️ Quelldatei nicht mehr vorhanden: `{file_path.name}`")
+        st.info("Die Datei wurde möglicherweise bereits umbenannt oder gelöscht. Umbenennung wird übersprungen.")
+        if st.button("Weiter →", type="primary", key=f"skip_rename_missing_{idx}"):
+            st.session_state['transcript_queue'][idx]['workflow_step'] = 2
+            wip_dir = Path("transcripts/wip")
+            save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
+            st.rerun()
+        return
 
     if not selected_event:
         st.info("ℹ️ Kein Termin zugeordnet - Umbenennung übersprungen")
@@ -8387,11 +8676,26 @@ def render_step_create_protocol(idx: int):
 
     st.markdown("---")
 
+    # Prüfe ob Quelldatei noch existiert (nur wenn noch kein Protokoll erstellt wurde)
+    if not item.get('protocol') and not file_path.exists():
+        st.error(f"❌ Quelldatei nicht gefunden: `{file_path.name}`")
+        st.info("Die Datei existiert nicht mehr. Bitte prüfe ob sie bereits verarbeitet wurde.")
+        return
+
     # Zeige Transkript-Info
     st.info(f"📄 Datei: **{file_path.name}**")
 
     # Button zum Starten
     if not item.get('protocol'):
+        # Prüfe ob Background-Job für dieses Item läuft
+        with _bg_jobs_lock:
+            bg_job = _bg_protocol_jobs.get(item['id'])
+
+        if bg_job and bg_job['status'] == 'running':
+            st.info(f"⏳ Protokoll wird im Hintergrund erstellt ({bg_job['chunks']} Tokens) – wird automatisch angezeigt wenn fertig.")
+            st.caption("Du kannst währenddessen andere Transkripte bearbeiten und dann hierher zurückkehren.")
+            return  # _bg_status_banner (run_every=2) triggert rerun wenn fertig
+
         if st.button("🚀 Protokoll jetzt erstellen", type="primary", use_container_width=True):
             st.session_state[f'start_protocol_{idx}'] = True
             st.rerun()
@@ -8457,9 +8761,46 @@ def render_step_create_protocol(idx: int):
             progress_bar.progress(30, text="✨ Generiere Protokoll live...")
             status_text.success("🎯 Live-Streaming aktiv!")
 
-            # STREAMING
-            from app import extract_protocol_from_transcript_streaming
+            # Lade Agenda falls vorhanden
+            agenda_text = None
+            if selected_event:
+                agenda_dir = Path("data/agendas")
+                if agenda_dir.exists():
+                    # Suche nach Agenda-Datei für diesen Termin
+                    event_title = selected_event.get('title', '')
+                    # Versuche verschiedene Dateinamen-Patterns
+                    import re
 
+                    # Extrahiere Datum aus Event
+                    event_start = selected_event.get('start')
+                    if isinstance(event_start, str):
+                        try:
+                            event_start_dt = datetime.fromisoformat(event_start.replace('Z', '+00:00'))
+                            date_str = event_start_dt.strftime("%Y-%m-%d")
+                        except:
+                            date_str = None
+                    else:
+                        date_str = None
+
+                    # Suche nach passender Agenda-Datei
+                    for agenda_file in agenda_dir.glob("Agenda_*.pdf"):
+                        # Prüfe ob Dateiname passt (Datum oder Titel)
+                        file_stem = agenda_file.stem
+                        if date_str and date_str in file_stem:
+                            # Datum stimmt überein
+                            if any(word.lower() in file_stem.lower() for word in event_title.split() if len(word) > 3):
+                                # Lade PDF-Inhalt
+                                try:
+                                    from langchain_community.document_loaders import PyPDFLoader
+                                    loader = PyPDFLoader(str(agenda_file))
+                                    pages = loader.load()
+                                    agenda_text = "\n\n".join([page.page_content for page in pages])
+                                    st.info(f"📋 Agenda gefunden: {agenda_file.name}")
+                                    break
+                                except:
+                                    pass
+
+            # STREAMING
             protocol_parts = []
             chunk_count = 0
 
@@ -8469,7 +8810,7 @@ def render_step_create_protocol(idx: int):
                 llm,
                 attendees=attendees,
                 meeting_date=meeting_date,
-                agenda_text=None
+                agenda_text=agenda_text
             ):
                 protocol_parts.append(chunk)
                 chunk_count += 1
@@ -8577,6 +8918,8 @@ def render_step_create_protocol(idx: int):
 
         with col_next:
             if st.button("Weiter zu Tasks →", type="primary", use_container_width=True):
+                # Explizit sicherstellen dass die aktuelle Editor-Version gespeichert wird
+                st.session_state['transcript_queue'][idx]['protocol'] = edited_protocol
                 st.session_state['transcript_queue'][idx]['workflow_step'] = 3
 
                 # Persistiere zu Disk
@@ -8646,7 +8989,6 @@ def render_step_extract_tasks(idx: int):
         status_text.info("🔄 Extrahiere Tasks aus Protokoll... Dies kann 30-60 Sekunden dauern.")
 
         try:
-            from app import extract_tasks_from_transcript
             import time
 
             orch = st.session_state['orchestrator']
@@ -8917,9 +9259,7 @@ def render_step_finalize(idx: int):
                         pdf_filename = md_filename.replace('.md', '.pdf')
                         pdf_path = protocol_dir / pdf_filename
 
-                        # Import convert_markdown_to_pdf
-                        from app import convert_markdown_to_pdf
-
+                        # convert_markdown_to_pdf ist bereits in diesem Modul definiert
                         if convert_markdown_to_pdf(md_path, pdf_path):
                             # Hänge an Outlook-Termin an
                             event_id = selected_event.get('id')
@@ -8931,6 +9271,23 @@ def render_step_finalize(idx: int):
 
                             if result.get('success'):
                                 st.success(f"✅ PDF erfolgreich an Termin angehängt!")
+
+                                # Füge Kategorie "Protokoll" zum Termin hinzu + Betreff-Prefix
+                                with st.spinner("Markiere Termin als 'Protokoll erstellt'..."):
+                                    category_result = outlook_tool.add_category_to_event(
+                                        event_id=event_id,
+                                        category="Protokoll"
+                                    )
+                                    if category_result.get('success'):
+                                        st.success(f"✅ {category_result.get('message', 'Kategorie hinzugefügt')}")
+                                    else:
+                                        st.warning(f"⚠️ Kategorie konnte nicht gesetzt werden: {category_result.get('error')}")
+
+                                    prefix_result = outlook_tool.add_protocol_subject_prefix(event_id=event_id)
+                                    if prefix_result.get('success'):
+                                        st.success(f"✅ {prefix_result.get('message', 'Betreff-Prefix gesetzt')}")
+                                    else:
+                                        st.warning(f"⚠️ Betreff-Prefix konnte nicht gesetzt werden: {prefix_result.get('error')}")
                             else:
                                 st.error(f"❌ Fehler beim Anhängen: {result.get('error')}")
                         else:
@@ -8988,6 +9345,34 @@ def render_step_finalize(idx: int):
                             selected_project_gid = p['gid']
                             break
 
+                # Section-Auswahl für Protokoll
+                selected_section_gid = None
+                if selected_project_gid:
+                    sections = asana_agent.get_project_sections(selected_project_gid)
+                    if sections:
+                        section_names = ["[Keine Section - Standardposition]"] + [s['name'] for s in sections]
+
+                        # Default: "Protokolle" Section falls vorhanden
+                        default_idx = 0
+                        for i, s in enumerate(sections, 1):
+                            if s['name'].lower() in ['protokolle', 'protokoll']:
+                                default_idx = i
+                                break
+
+                        selected_section_name = st.selectbox(
+                            "📂 In welche Section soll das Protokoll?",
+                            section_names,
+                            index=default_idx,
+                            key=f"protocol_section_{idx}",
+                            help="Wähle die Asana-Section für das Protokoll"
+                        )
+
+                        if selected_section_name != "[Keine Section - Standardposition]":
+                            for s in sections:
+                                if s['name'] == selected_section_name:
+                                    selected_section_gid = s['gid']
+                                    break
+
                 # Asana-Export Button
                 button_disabled = (selected_project_gid is None)
                 protocol_text = item.get('protocol', '')
@@ -9008,15 +9393,22 @@ def render_step_finalize(idx: int):
                             if item.get('selected_event'):
                                 meeting_title = item['selected_event'].get('title', 'Meeting')
 
-                            date_str = datetime.now().strftime("%Y-%m-%d")
+                            # Datum des Meetings verwenden, nicht heute
+                            meeting_date_str = None
+                            if item.get('selected_event'):
+                                raw_start = item['selected_event'].get('start', '')
+                                if isinstance(raw_start, str) and len(raw_start) >= 10:
+                                    meeting_date_str = raw_start[:10]
+                            date_str = meeting_date_str or datetime.now().strftime("%Y-%m-%d")
                             protocol_task_title = f"📄 Protokoll {date_str} - {meeting_title}"
 
-                            # Erstelle Protokoll-Aufgabe
+                            # Erstelle Protokoll-Aufgabe (direkt in ausgewählter Section via memberships)
                             protocol_task_result = asana_agent.create_task(
                                 name=protocol_task_title,
                                 notes=protocol_text,
                                 project_gid=selected_project_gid,
-                                assignee_gid=None
+                                assignee_gid=None,
+                                section_gid=selected_section_gid
                             )
 
                             if not protocol_task_result.get('success'):
@@ -9024,18 +9416,10 @@ def render_step_finalize(idx: int):
                                 raise Exception("Protokoll-Aufgabe konnte nicht erstellt werden")
 
                             protocol_task_gid = protocol_task_result.get('task_gid')
-                            st.success(f"✅ Protokoll-Aufgabe erstellt: {protocol_task_title}")
+                            section_label = f" in '{selected_section_name}'" if selected_section_gid else ""
+                            st.success(f"✅ Protokoll-Aufgabe erstellt{section_label}: {protocol_task_title}")
 
-                            # Verschiebe in "Protokolle"-Section falls vorhanden
-                            try:
-                                protocol_section_gid = asana_agent.ensure_section_exists(selected_project_gid, "Protokolle")
-                                if protocol_section_gid:
-                                    asana_agent.add_task_to_section(
-                                        task_gid=protocol_task_gid,
-                                        section_gid=protocol_section_gid
-                                    )
-                            except:
-                                pass  # Section-Handling ist optional
+                            # Kategorie wird beim "An Termin anhängen"-Button gesetzt, nicht hier
 
                         # ========================================
                         # SCHRITT 2: PDF ERSTELLEN UND ANHÄNGEN
@@ -9059,7 +9443,7 @@ def render_step_finalize(idx: int):
                                     pdf_filename = md_filename.replace('.md', '.pdf')
                                     pdf_path = protocol_dir / pdf_filename
 
-                                    from app import convert_markdown_to_pdf
+                                    # convert_markdown_to_pdf ist bereits in diesem Modul definiert
                                     if convert_markdown_to_pdf(md_path, pdf_path):
                                         # Hänge PDF an Asana-Aufgabe an
                                         attachment_result = asana_agent.attach_file_to_task(
@@ -9116,6 +9500,7 @@ def render_step_finalize(idx: int):
                                 description = task.get('description', '')
                                 assignee_name = task.get('assignee', '')
                                 due_date_str = task.get('due_date', '')
+                                top_name = task.get('top', '')
 
                                 # Berechne Statistiken
                                 elapsed_time = time.time() - start_time
@@ -9154,27 +9539,27 @@ def render_step_finalize(idx: int):
                                     except:
                                         pass
 
-                                # Finde Assignee
-                                assignee_gid = None
+                                # Baue erweiterte Beschreibung mit Ursprungsinfo auf
+                                origin_lines = []
+                                origin_lines.append(f"📎 Ursprung: {protocol_task_title}")
+                                if top_name:
+                                    origin_lines.append(f"📋 Tagesordnungspunkt: {top_name}")
                                 if assignee_name and assignee_name != '[?]':
-                                    cache_key = assignee_name.lower().strip()
-                                    if cache_key in user_cache:
-                                        assignee_gid = user_cache[cache_key]
-                                    else:
-                                        # Fuzzy-Search im Cache
-                                        mapped_words = cache_key.split()
-                                        for cached_name, gid in user_cache.items():
-                                            if all(word in cached_name for word in mapped_words):
-                                                assignee_gid = gid
-                                                break
+                                    origin_lines.append(f"👤 Geplanter Verantwortlicher: {assignee_name}")
 
-                                # Erstelle Subtask (Unteraufgabe der Protokoll-Aufgabe)
+                                origin_block = "\n".join(origin_lines)
+                                if description:
+                                    enhanced_description = f"{description}\n\n---\n{origin_block}"
+                                else:
+                                    enhanced_description = origin_block
+
+                                # Erstelle Subtask ohne Assignee (Verantwortlicher steht in der Beschreibung)
                                 result = asana_agent.create_subtask(
                                     parent_task_gid=protocol_task_gid,
                                     name=title,
-                                    notes=description,
+                                    notes=enhanced_description,
                                     due_on=due_on,
-                                    assignee_gid=assignee_gid
+                                    assignee_gid=None
                                 )
 
                                 if result.get('success'):

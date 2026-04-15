@@ -1,3 +1,24 @@
 {
-  "templates": []
+  "templates": [
+    {
+      "id": "template-1770845383",
+      "name": "Regelmäßiges Treffen",
+      "description": "",
+      "created": "2026-02-11",
+      "sections": [
+        {
+          "title": "offene Themen",
+          "content": ""
+        },
+        {
+          "title": "neue Themen",
+          "content": ""
+        },
+        {
+          "title": "Projekte",
+          "content": ""
+        }
+      ]
+    }
+  ]
 }

@@ -42,8 +42,38 @@ Thumbs.db
 # Microsoft Graph API Token
 .outlook_token.json
 
-# Meeting Manager Transcripts (may contain sensitive data)
-transcripts/incoming/*
-transcripts/processed/*
-!transcripts/incoming/.gitkeep
-!transcripts/processed/.gitkeep
+# Meeting Manager Transcripts & Protocols (sensitive data)
+transcripts/
+input_docs/
+newsletter_archiv/
+
+# Databases
+*.db
+*.db-shm
+*.db-wal
+
+# Log files
+*.log
+*.log.*
+
+# Backup files
+*.backup
+*.backup_*
+*.backup_path_fix
+
+# Runtime files
+*.pid
+email_worker_bg.log
+
+# Test results
+test_results/
+
+# Claude settings
+.claude/
+settings.local.json
+
+# Data folder (may contain sensitive info)
+data/
+
+# Misc
+=3.10.0

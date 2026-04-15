@@ -901,6 +901,174 @@ class OutlookGraphTool:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def add_category_to_event(
+        self,
+        event_id: str,
+        category: str
+    ) -> Dict[str, Any]:
+        """
+        Fügt eine Kategorie zu einem Outlook-Termin hinzu.
+        Behält bestehende Kategorien bei und fügt die neue hinzu (falls noch nicht vorhanden).
+
+        Args:
+            event_id: ID des Outlook-Events
+            category: Kategorie-Name (z.B. "Protokoll")
+
+        Returns:
+            Dict mit success und ggf. error
+        """
+        # Stelle sicher dass Token gültig ist (auto-refresh wenn nötig)
+        if not self._ensure_valid_token():
+            return {"success": False, "error": "Nicht authentifiziert oder Token-Refresh fehlgeschlagen"}
+
+        try:
+            import requests
+
+            print(f"[OutlookGraphTool] add_category_to_event: event_id={event_id}, category={category}")
+
+            # Schritt 1: Hole aktuellen Event um bestehende Kategorien zu lesen
+            url = f"https://graph.microsoft.com/v1.0/me/events/{event_id}"
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json"
+            }
+
+            params = {
+                "$select": "categories,subject"
+            }
+
+            print(f"[OutlookGraphTool] GET {url}")
+            response = requests.get(url, headers=headers, params=params)
+            print(f"[OutlookGraphTool] GET Response: {response.status_code}")
+
+            # Bei 401 Unauthorized: Versuche Token-Refresh und Retry
+            if response.status_code == 401:
+                print("[OutlookGraphTool] 401 Unauthorized - versuche Token-Refresh und Retry...")
+                if self._refresh_access_token():
+                    headers["Authorization"] = f"Bearer {self.access_token}"
+                    response = requests.get(url, headers=headers, params=params)
+                    print(f"[OutlookGraphTool] GET Retry Response: {response.status_code}")
+
+            if response.status_code != 200:
+                error_detail = response.text[:500]  # Begrenzt für Lesbarkeit
+                print(f"[OutlookGraphTool] ❌ Fehler: {response.status_code} - {error_detail}")
+                return {
+                    "success": False,
+                    "error": f"Fehler beim Laden des Events: {response.status_code} - {error_detail}"
+                }
+
+            event_data = response.json()
+            event_subject = event_data.get('subject', 'Unbekannt')
+            existing_categories = event_data.get('categories', [])
+            print(f"[OutlookGraphTool] Event '{event_subject}' hat Kategorien: {existing_categories}")
+
+            # Schritt 2: Füge neue Kategorie hinzu (falls noch nicht vorhanden)
+            if category in existing_categories:
+                print(f"[OutlookGraphTool] ✓ Kategorie '{category}' war bereits gesetzt")
+                return {
+                    "success": True,
+                    "message": f"Kategorie '{category}' war bereits gesetzt"
+                }
+
+            updated_categories = existing_categories + [category]
+            print(f"[OutlookGraphTool] Setze neue Kategorien: {updated_categories}")
+
+            # Schritt 3: Aktualisiere Event mit neuen Kategorien
+            update_data = {
+                "categories": updated_categories
+            }
+
+            print(f"[OutlookGraphTool] PATCH {url}")
+            response = requests.patch(url, headers=headers, json=update_data)
+            print(f"[OutlookGraphTool] PATCH Response: {response.status_code}")
+
+            # Bei 401 Unauthorized: Versuche Token-Refresh und Retry
+            if response.status_code == 401:
+                print("[OutlookGraphTool] 401 Unauthorized - versuche Token-Refresh und Retry...")
+                if self._refresh_access_token():
+                    headers["Authorization"] = f"Bearer {self.access_token}"
+                    response = requests.patch(url, headers=headers, json=update_data)
+                    print(f"[OutlookGraphTool] PATCH Retry Response: {response.status_code}")
+
+            if response.status_code == 200:
+                print(f"[OutlookGraphTool] ✅ Kategorie '{category}' erfolgreich hinzugefügt zu '{event_subject}'")
+                return {
+                    "success": True,
+                    "message": f"Kategorie '{category}' zum Termin '{event_subject}' hinzugefügt"
+                }
+            else:
+                error_detail = response.text[:500]
+                print(f"[OutlookGraphTool] ❌ PATCH Fehler: {response.status_code} - {error_detail}")
+                return {
+                    "success": False,
+                    "error": f"API Fehler {response.status_code}: {error_detail}"
+                }
+
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def add_protocol_subject_prefix(
+        self,
+        event_id: str,
+        prefix: str = "📄 "
+    ) -> Dict[str, Any]:
+        """
+        Fügt ein Protokoll-Prefix zum Betreff eines einzelnen Outlook-Termins hinzu.
+        Funktioniert auch bei einzelnen Serienterminen.
+
+        Args:
+            event_id: ID des Outlook-Events
+            prefix: Prefix-String (Standard: "📄 ")
+
+        Returns:
+            Dict mit success und ggf. error/message
+        """
+        if not self._ensure_valid_token():
+            return {"success": False, "error": "Nicht authentifiziert oder Token-Refresh fehlgeschlagen"}
+
+        try:
+            import requests
+
+            url = f"https://graph.microsoft.com/v1.0/me/events/{event_id}"
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json"
+            }
+
+            # Hole aktuellen Betreff
+            response = requests.get(url, headers=headers, params={"$select": "subject"})
+            if response.status_code == 401:
+                if self._refresh_access_token():
+                    headers["Authorization"] = f"Bearer {self.access_token}"
+                    response = requests.get(url, headers=headers, params={"$select": "subject"})
+
+            if response.status_code != 200:
+                return {"success": False, "error": f"Fehler beim Laden des Events: {response.status_code}"}
+
+            current_subject = response.json().get('subject', '')
+            print(f"[OutlookGraphTool] add_protocol_subject_prefix: aktueller Betreff='{current_subject}'")
+
+            # Prefix nur hinzufügen wenn noch nicht vorhanden
+            if current_subject.startswith(prefix):
+                print(f"[OutlookGraphTool] ✓ Prefix bereits vorhanden")
+                return {"success": True, "message": "Prefix war bereits gesetzt"}
+
+            new_subject = prefix + current_subject
+            response = requests.patch(url, headers=headers, json={"subject": new_subject})
+            if response.status_code == 401:
+                if self._refresh_access_token():
+                    headers["Authorization"] = f"Bearer {self.access_token}"
+                    response = requests.patch(url, headers=headers, json={"subject": new_subject})
+
+            if response.status_code == 200:
+                print(f"[OutlookGraphTool] ✅ Betreff aktualisiert: '{new_subject}'")
+                return {"success": True, "message": f"Betreff auf '{new_subject}' gesetzt"}
+            else:
+                return {"success": False, "error": f"API Fehler {response.status_code}: {response.text[:300]}"}
+
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     def search_emails(self, search_query: str, max_results: int = 10,
                       days_back: int = 30) -> List[Dict[str, Any]]:
         """

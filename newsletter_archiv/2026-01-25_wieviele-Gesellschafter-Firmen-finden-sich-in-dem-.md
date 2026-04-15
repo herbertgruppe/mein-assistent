@@ -1,4 +1,0 @@
-# Recherche
-
-Maximale Iterationen erreicht
-
