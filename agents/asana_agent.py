@@ -1078,25 +1078,43 @@ class AsanaAgent(BaseAgent):
             if not file_name:
                 file_name = file_path_obj.name
 
-            # Asana SDK v5: 'file' erwartet den Dateipfad als String (SDK öffnet die Datei selbst)
-            opts = {
-                'parent': task_gid,
-                'file': str(file_path_obj),
-                'name': file_name,
-            }
+            # Direkter HTTP-Request (zuverlässiger als SDK für Multipart-Upload)
+            import requests as req
 
             print(f"[{self.name}] Uploading attachment: {file_name} to task {task_gid}")
-            result = self.attachments_api.create_attachment_for_object(opts)
 
-            print(f"[{self.name}] ✓ Datei angehängt: {file_name} an Task {task_gid}")
-
-            return {
-                "success": True,
-                "attachment_gid": result.get('gid'),
-                "file_name": file_name,
-                "task_gid": task_gid,
-                "download_url": result.get('download_url', '')
+            url = "https://app.asana.com/api/1.0/attachments"
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Accept": "application/json",
             }
+
+            with open(str(file_path_obj), 'rb') as f:
+                files = {
+                    'file': (file_name, f, 'application/pdf'),
+                }
+                data = {
+                    'parent': str(task_gid),
+                }
+                response = req.post(url, headers=headers, files=files, data=data)
+
+            if response.status_code in (200, 201):
+                result = response.json().get('data', {})
+                print(f"[{self.name}] ✓ Datei angehängt: {file_name} an Task {task_gid}")
+                return {
+                    "success": True,
+                    "attachment_gid": result.get('gid'),
+                    "file_name": file_name,
+                    "task_gid": task_gid,
+                    "download_url": result.get('download_url', '')
+                }
+            else:
+                error_msg = response.text
+                print(f"[{self.name}] ✗ Attachment fehlgeschlagen ({response.status_code}): {error_msg}")
+                return {
+                    "success": False,
+                    "error": f"HTTP {response.status_code}: {error_msg[:200]}"
+                }
 
         except Exception as e:
             print(f"[{self.name}] ✗ Fehler beim Anhängen der Datei: {e}")
