@@ -8088,24 +8088,27 @@ def render_transcripts_tab():
                 save_wip_item(st.session_state['transcript_queue'][i], wip_dir)
                 break
 
-    # 3. Auto-Refresh-Fragment: NUR aktiv wenn Background-Jobs laufen
-    # (Ohne diese Bedingung würde run_every=2 die UI alle 2s ausgrauen, auch ohne Jobs)
+    # 3. Background-Job Status Banner (KEIN run_every mehr – verhinderte Button-Klicks)
     with _bg_jobs_lock:
-        _has_running_jobs = any(v['status'] == 'running' for v in _bg_protocol_jobs.values())
+        _running_jobs = [(k, v) for k, v in _bg_protocol_jobs.items() if v['status'] == 'running']
+        _has_finished = any(v['status'] in ('done', 'error') for v in _bg_protocol_jobs.values())
 
-    if _has_running_jobs:
-        @st.fragment(run_every=2)
-        def _bg_status_banner():
+    if _running_jobs:
+        for _, job in _running_jobs:
+            st.info(f"⏳ Protokoll wird erstellt: **{job['filename'][:60]}** ({job['chunks']} Tokens) – du kannst währenddessen weiterarbeiten.")
+        # Sanfter Auto-Refresh: Fragment mit längerer Pause, KEIN st.rerun() mehr
+        @st.fragment(run_every=5)
+        def _bg_poll():
+            """Prüft ob Jobs fertig sind, ohne die Hauptseite zu stören"""
             with _bg_jobs_lock:
-                running = [(k, v) for k, v in _bg_protocol_jobs.items() if v['status'] == 'running']
                 finished = [k for k, v in _bg_protocol_jobs.items() if v['status'] in ('done', 'error')]
-            if running:
-                for _, job in running:
-                    st.info(f"⏳ Protokoll wird erstellt: **{job['filename'][:60]}** ({job['chunks']} Tokens) – du kannst währenddessen weiterarbeiten.")
             if finished:
-                st.rerun()  # Ergebnisse in den Session State übertragen
-
-        _bg_status_banner()
+                st.toast("✅ Protokoll-Generierung abgeschlossen! Seite wird aktualisiert...", icon="🎉")
+                st.rerun()
+        _bg_poll()
+    elif _has_finished:
+        # Fertige Jobs sofort verarbeiten (wird oben im done_ids Block erledigt)
+        st.success("✅ Protokoll-Generierung abgeschlossen!")
 
     st.markdown("---")
 
@@ -8487,16 +8490,28 @@ def render_inline_termin_assignment(idx: int):
                     event_options.append(option_label)
                     event_dict[option_label] = event
 
+                # Event-Dict im Session State speichern für on_change Callback
+                st.session_state[f'_event_dict_{idx}'] = event_dict
+
+                def _on_termin_change():
+                    """Callback: speichert Termin sofort bei Dropdown-Auswahl"""
+                    sel = st.session_state.get(f"event_select_{idx}", "— Bitte wählen —")
+                    ev_dict = st.session_state.get(f'_event_dict_{idx}', {})
+                    if sel != "— Bitte wählen —" and sel in ev_dict:
+                        st.session_state['transcript_queue'][idx]['selected_event'] = ev_dict[sel]
+                        save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
+
                 selected_option = st.selectbox(
                     "Termin:",
                     options=event_options,
-                    key=f"event_select_{idx}"
+                    key=f"event_select_{idx}",
+                    on_change=_on_termin_change
                 )
 
                 if selected_option != "— Bitte wählen —":
                     selected_event = event_dict[selected_option]
 
-                    # SOFORT speichern wenn Auswahl getroffen (nicht erst auf Button warten)
+                    # Auch auf dem aktuellen Render sicherstellen
                     st.session_state['transcript_queue'][idx]['selected_event'] = selected_event
                     save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
 
