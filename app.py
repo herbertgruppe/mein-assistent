@@ -786,21 +786,19 @@ def render_sidebar():
                     st.markdown("### 📋 Ihr Anmeldecode:")
                     import streamlit.components.v1 as components
                     components.html(f"""
-                    <div style="display:flex; align-items:center; gap:10px; margin:10px 0; font-family:sans-serif;">
-                        <code style="font-size:2rem; font-weight:bold; padding:15px 25px; background:#f0f2f6; border-radius:8px; letter-spacing:3px;">{user_code}</code>
-                        <button id="copyBtn" style="padding:10px 20px; cursor:pointer; border:1px solid #ccc; border-radius:5px; background:white; font-size:1rem;">
-                            📋 Code kopieren
-                        </button>
+                    <div style="display:flex; align-items:center; gap:8px; font-family:sans-serif;">
+                        <code style="font-size:1.4rem; font-weight:bold; padding:8px 16px; background:#f0f2f6; border-radius:6px; letter-spacing:2px;">{user_code}</code>
+                        <button id="copyBtn" style="padding:6px 12px; cursor:pointer; border:1px solid #ccc; border-radius:5px; background:white; font-size:0.85rem;">📋 Kopieren</button>
                     </div>
                     <script>
                     document.getElementById('copyBtn').addEventListener('click', function() {{
                         navigator.clipboard.writeText('{user_code}').then(function() {{
                             document.getElementById('copyBtn').innerText = '✅ Kopiert!';
-                            setTimeout(function() {{ document.getElementById('copyBtn').innerText = '📋 Code kopieren'; }}, 2000);
+                            setTimeout(function() {{ document.getElementById('copyBtn').innerText = '📋 Kopieren'; }}, 2000);
                         }});
                     }});
                     </script>
-                    """, height=80)
+                    """, height=50)
 
                     # URL zum Anklicken
                     verification_url = device_info["verification_uri"]
