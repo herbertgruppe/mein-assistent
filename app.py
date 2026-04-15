@@ -7815,34 +7815,24 @@ def main():
 
     # Hauptbereich mit Tabs
     tabs_start = time.time()
-    tabs = st.tabs(["💬 Chat", "📊 Mein Tag", "📬 Posteingang", "🎙️ Meeting Manager", "📁 Dokumente", "📚 Archiv"])
+    tabs = st.tabs(["📊 Mein Tag", "🎙️ Meeting Manager", "📁 Dokumente", "📚 Archiv"])
 
     with tabs[0]:
-        tab_start = time.time()
-        render_chat_tab()
-        print(f"[DEBUG] render_chat_tab took {(time.time()-tab_start)*1000:.2f}ms")
-
-    with tabs[1]:
         tab_start = time.time()
         render_dashboard_tab()
         print(f"[DEBUG] render_dashboard_tab took {(time.time()-tab_start)*1000:.2f}ms")
 
-    with tabs[2]:
-        tab_start = time.time()
-        render_inbox_tab()
-        print(f"[DEBUG] render_inbox_tab (from main) took {(time.time()-tab_start)*1000:.2f}ms")
-
-    with tabs[3]:
+    with tabs[1]:
         tab_start = time.time()
         render_transcripts_tab()
         print(f"[DEBUG] render_transcripts_tab took {(time.time()-tab_start)*1000:.2f}ms")
 
-    with tabs[4]:
+    with tabs[2]:
         tab_start = time.time()
         render_documents_tab()
         print(f"[DEBUG] render_documents_tab took {(time.time()-tab_start)*1000:.2f}ms")
 
-    with tabs[5]:
+    with tabs[3]:
         tab_start = time.time()
         render_archive_tab()
         print(f"[DEBUG] render_archive_tab took {(time.time()-tab_start)*1000:.2f}ms")
