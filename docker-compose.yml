@@ -11,8 +11,10 @@ services:
       - transcripts:/app/transcripts
       - input_docs:/app/input_docs
       - data:/app/data
+      - auth:/app/auth
 
 volumes:
   transcripts:
   input_docs:
   data:
+  auth:

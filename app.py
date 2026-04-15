@@ -781,9 +781,18 @@ def render_sidebar():
 
                     st.success("✅ **Anmeldecode generiert!**")
 
-                    # Zeige Code prominent
+                    # Zeige Code prominent mit zuverlässigem Copy-Button
+                    user_code = device_info["user_code"]
                     st.markdown("### 📋 Ihr Anmeldecode:")
-                    st.code(device_info["user_code"], language=None)
+                    st.markdown(f"""
+                    <div style="display:flex; align-items:center; gap:10px; margin:10px 0;">
+                        <code style="font-size:2rem; font-weight:bold; padding:15px 25px; background:#f0f2f6; border-radius:8px; letter-spacing:3px;">{user_code}</code>
+                        <button onclick="navigator.clipboard.writeText('{user_code}').then(()=>this.innerText='Kopiert!')"
+                                style="padding:10px 20px; cursor:pointer; border:1px solid #ccc; border-radius:5px; background:white; font-size:1rem;">
+                            📋 Code kopieren
+                        </button>
+                    </div>
+                    """, unsafe_allow_html=True)
 
                     # URL zum Anklicken
                     verification_url = device_info["verification_uri"]

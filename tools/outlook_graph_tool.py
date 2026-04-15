@@ -24,7 +24,15 @@ class OutlookGraphTool:
         self.is_configured = bool(self.client_id) and bool(self.tenant_id)
         self.access_token = None
         self.refresh_token = None
-        self.token_file = ".outlook_token.json"  # Datei zum Speichern des Tokens
+        # Token in persistentem Verzeichnis speichern (überlebt Docker-Rebuilds)
+        auth_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'auth')
+        os.makedirs(auth_dir, exist_ok=True)
+        self.token_file = os.path.join(auth_dir, "outlook_token.json")
+        # Fallback: altes Token migrieren
+        old_token = ".outlook_token.json"
+        if os.path.exists(old_token) and not os.path.exists(self.token_file):
+            import shutil
+            shutil.move(old_token, self.token_file)
 
         # Versuche gespeichertes Token zu laden
         self._load_token_from_file()

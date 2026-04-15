@@ -24,7 +24,8 @@ RUN mkdir -p transcripts/incoming \
              transcripts/wip \
              transcripts/protocol_cache \
              input_docs \
-             data
+             data \
+             auth
 
 EXPOSE 8501
 
