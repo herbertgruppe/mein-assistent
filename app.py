@@ -784,15 +784,23 @@ def render_sidebar():
                     # Zeige Code prominent mit zuverlässigem Copy-Button
                     user_code = device_info["user_code"]
                     st.markdown("### 📋 Ihr Anmeldecode:")
-                    st.markdown(f"""
-                    <div style="display:flex; align-items:center; gap:10px; margin:10px 0;">
+                    import streamlit.components.v1 as components
+                    components.html(f"""
+                    <div style="display:flex; align-items:center; gap:10px; margin:10px 0; font-family:sans-serif;">
                         <code style="font-size:2rem; font-weight:bold; padding:15px 25px; background:#f0f2f6; border-radius:8px; letter-spacing:3px;">{user_code}</code>
-                        <button onclick="navigator.clipboard.writeText('{user_code}').then(()=>this.innerText='Kopiert!')"
-                                style="padding:10px 20px; cursor:pointer; border:1px solid #ccc; border-radius:5px; background:white; font-size:1rem;">
+                        <button id="copyBtn" style="padding:10px 20px; cursor:pointer; border:1px solid #ccc; border-radius:5px; background:white; font-size:1rem;">
                             📋 Code kopieren
                         </button>
                     </div>
-                    """, unsafe_allow_html=True)
+                    <script>
+                    document.getElementById('copyBtn').addEventListener('click', function() {{
+                        navigator.clipboard.writeText('{user_code}').then(function() {{
+                            document.getElementById('copyBtn').innerText = '✅ Kopiert!';
+                            setTimeout(function() {{ document.getElementById('copyBtn').innerText = '📋 Code kopieren'; }}, 2000);
+                        }});
+                    }});
+                    </script>
+                    """, height=80)
 
                     # URL zum Anklicken
                     verification_url = device_info["verification_uri"]
