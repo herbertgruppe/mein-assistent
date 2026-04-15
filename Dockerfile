@@ -2,9 +2,15 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# System-Abhängigkeiten
+# System-Abhängigkeiten (inkl. WeasyPrint für PDF-Generierung)
 RUN apt-get update && apt-get install -y \
     build-essential \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libgdk-pixbuf2.0-0 \
+    libffi-dev \
+    libcairo2 \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Python-Abhängigkeiten zuerst (Layer-Caching)

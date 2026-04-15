@@ -23,6 +23,10 @@ watchdog
 # Web Interface
 streamlit
 
+# PDF-Generierung aus Markdown-Protokollen
+markdown
+weasyprint
+
 # Task Management
 asana
 
