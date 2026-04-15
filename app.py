@@ -792,10 +792,16 @@ def render_sidebar():
                     </div>
                     <script>
                     document.getElementById('copyBtn').addEventListener('click', function() {{
-                        navigator.clipboard.writeText('{user_code}').then(function() {{
-                            document.getElementById('copyBtn').innerText = '✅ Kopiert!';
-                            setTimeout(function() {{ document.getElementById('copyBtn').innerText = '📋 Kopieren'; }}, 2000);
-                        }});
+                        var ta = document.createElement('textarea');
+                        ta.value = '{user_code}';
+                        ta.style.position = 'fixed';
+                        ta.style.left = '-9999px';
+                        document.body.appendChild(ta);
+                        ta.select();
+                        document.execCommand('copy');
+                        document.body.removeChild(ta);
+                        document.getElementById('copyBtn').innerText = '✅ Kopiert!';
+                        setTimeout(function() {{ document.getElementById('copyBtn').innerText = '📋 Kopieren'; }}, 2000);
                     }});
                     </script>
                     """, height=50)
