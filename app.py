@@ -7969,6 +7969,10 @@ def render_transcripts_tab():
     if 'selected_transcript_idx' not in st.session_state:
         st.session_state['selected_transcript_idx'] = None
 
+    # Initialisiere assign_termin_idx (Inline-Zuordnung)
+    if 'assign_termin_idx' not in st.session_state:
+        st.session_state['assign_termin_idx'] = None
+
     # Initialisiere show_archive
     if 'show_archive' not in st.session_state:
         st.session_state['show_archive'] = False
@@ -8169,54 +8173,85 @@ def render_transcripts_tab():
     if new_items:
         st.markdown("#### 🟡 Neue Transkripte")
         for idx, item in new_items:
-            col_name, col_edit, col_delete = st.columns([3, 1, 1])
+            selected_event = item.get('selected_event')
+            col_name, col_termin, col_assign, col_edit, col_delete = st.columns([3, 2, 0.8, 1.2, 0.5])
             with col_name:
                 st.write(f"📄 **{item['filename']}**")
                 st.caption(f"Hochgeladen: {datetime.fromisoformat(item['uploaded_at']).strftime('%d.%m.%Y %H:%M')}")
+            with col_termin:
+                if selected_event:
+                    ev_title = selected_event.get('title', 'Termin')[:35]
+                    st.caption(f"✅ {ev_title}")
+                else:
+                    st.caption("—")
+            with col_assign:
+                assign_label = "📅" if not selected_event else "📅✏️"
+                if st.button(assign_label, key=f"assign_{idx}", help="Termin zuordnen", use_container_width=True):
+                    current = st.session_state.get('assign_termin_idx')
+                    st.session_state['assign_termin_idx'] = None if current == idx else idx
+                    st.rerun()
             with col_edit:
                 if st.button("▶️ Bearbeiten", key=f"edit_new_{idx}", use_container_width=True):
                     st.session_state['selected_transcript_idx'] = idx
                     st.session_state['transcript_queue'][idx]['status'] = 'processing'
+                    if st.session_state['transcript_queue'][idx].get('workflow_step', 0) < 1:
+                        st.session_state['transcript_queue'][idx]['workflow_step'] = 1
+                    save_wip_item(st.session_state['transcript_queue'][idx], Path("transcripts/wip"))
                     st.rerun()
             with col_delete:
                 if st.button("🗑️", key=f"delete_new_{idx}", use_container_width=True, help="Löschen"):
-                    # Lösche aus Queue
                     deleted_item = st.session_state['transcript_queue'].pop(idx)
-                    # Lösche WIP-Datei
-                    wip_dir = Path("transcripts/wip")
-                    delete_wip_item(deleted_item, wip_dir)
-                    # Reset selected_idx falls nötig
+                    delete_wip_item(deleted_item, Path("transcripts/wip"))
                     if st.session_state.get('selected_transcript_idx') == idx:
                         st.session_state['selected_transcript_idx'] = None
                     st.success(f"✅ '{deleted_item['filename']}' gelöscht")
                     st.rerun()
 
+            # Inline Termin-Zuordnung (aufklappbar)
+            if st.session_state.get('assign_termin_idx') == idx:
+                render_inline_termin_assignment(idx)
+
     # IN BEARBEITUNG
     if processing_items:
         st.markdown("#### 🟠 In Bearbeitung")
         for idx, item in processing_items:
-            col_name, col_edit, col_delete = st.columns([3, 1, 1])
+            selected_event = item.get('selected_event')
+            workflow_steps = ["Neu", "Umbenennen", "Protokoll erstellen", "Tasks extrahieren", "Finalisieren"]
+            current_step = item.get('workflow_step', 0)
+            step_label = workflow_steps[min(current_step, len(workflow_steps) - 1)]
+
+            col_name, col_termin, col_assign, col_edit, col_delete = st.columns([3, 2, 0.8, 1.2, 0.5])
             with col_name:
                 st.write(f"📄 **{item['filename']}**")
-                workflow_steps = ["Neu", "Termin zuordnen", "Umbenennen", "Protokoll erstellen", "Tasks extrahieren", "Fertig"]
-                current_step = item.get('workflow_step', 0)
-                st.caption(f"Schritt {current_step}/5: {workflow_steps[min(current_step, 5)]}")
+                st.caption(f"Schritt {current_step}/4: {step_label}")
+            with col_termin:
+                if selected_event:
+                    ev_title = selected_event.get('title', 'Termin')[:35]
+                    st.caption(f"✅ {ev_title}")
+                else:
+                    st.caption("—")
+            with col_assign:
+                assign_label = "📅" if not selected_event else "📅✏️"
+                if st.button(assign_label, key=f"assign_proc_{idx}", help="Termin zuordnen/ändern", use_container_width=True):
+                    current = st.session_state.get('assign_termin_idx')
+                    st.session_state['assign_termin_idx'] = None if current == idx else idx
+                    st.rerun()
             with col_edit:
                 if st.button("📝 Fortsetzen", key=f"edit_proc_{idx}", use_container_width=True):
                     st.session_state['selected_transcript_idx'] = idx
                     st.rerun()
             with col_delete:
                 if st.button("🗑️", key=f"delete_proc_{idx}", use_container_width=True, help="Löschen"):
-                    # Lösche aus Queue
                     deleted_item = st.session_state['transcript_queue'].pop(idx)
-                    # Lösche WIP-Datei
-                    wip_dir = Path("transcripts/wip")
-                    delete_wip_item(deleted_item, wip_dir)
-                    # Reset selected_idx falls nötig
+                    delete_wip_item(deleted_item, Path("transcripts/wip"))
                     if st.session_state.get('selected_transcript_idx') == idx:
                         st.session_state['selected_transcript_idx'] = None
                     st.success(f"✅ '{deleted_item['filename']}' gelöscht")
                     st.rerun()
+
+            # Inline Termin-Zuordnung (aufklappbar)
+            if st.session_state.get('assign_termin_idx') == idx:
+                render_inline_termin_assignment(idx)
 
     # FERTIG (Archiv - optional ausblendbat)
     if completed_items and st.session_state['show_archive']:
@@ -8295,18 +8330,30 @@ def render_transcript_detail_view(idx: int):
     """
     Rendert die Detail-Ansicht für ein ausgewähltes Transkript
 
-    Workflow-Schritte:
-    1. Termin zuordnen
-    2. Umbenennen
-    3. Protokoll erstellen
-    4. Tasks extrahieren
-    5. Finalisieren
+    Workflow-Schritte (Termin-Zuordnung erfolgt in der Listenansicht):
+    1. Umbenennen
+    2. Protokoll erstellen
+    3. Tasks extrahieren
+    4. Finalisieren
     """
 
     item = st.session_state['transcript_queue'][idx]
 
+    # Falls workflow_step noch 0 ist (altes Item), auf 1 setzen
+    if item.get('workflow_step', 0) < 1:
+        st.session_state['transcript_queue'][idx]['workflow_step'] = 1
+        item['workflow_step'] = 1
+
     st.markdown("---")
     st.markdown(f"## 📄 {item['filename']}")
+
+    # Termin-Info anzeigen
+    selected_event = item.get('selected_event')
+    if selected_event:
+        ev_title = selected_event.get('title', 'Termin')
+        st.caption(f"📅 Zugeordneter Termin: **{ev_title}**")
+    else:
+        st.caption("📅 Kein Termin zugeordnet (kann in der Liste nachgeholt werden)")
 
     # Zurück-Button
     col_back, col_status = st.columns([1, 3])
@@ -8316,8 +8363,10 @@ def render_transcript_detail_view(idx: int):
             st.rerun()
 
     with col_status:
-        current_step = item.get('workflow_step', 0)
-        st.progress(current_step / 5, text=f"Fortschritt: Schritt {current_step}/5")
+        current_step = item.get('workflow_step', 1)
+        # Fortschritt: Step 1-4, angezeigt als 0-100%
+        progress = max(0, (current_step - 1)) / 4
+        st.progress(progress, text=f"Fortschritt: Schritt {current_step}/4")
 
     st.markdown("---")
 
@@ -8325,17 +8374,16 @@ def render_transcript_detail_view(idx: int):
     st.markdown("### 📝 Workflow")
 
     steps = [
-        ("1️⃣ Termin zuordnen", 1),
-        ("2️⃣ Umbenennen", 2),
-        ("3️⃣ Protokoll erstellen", 3),
-        ("4️⃣ Tasks extrahieren", 4),
-        ("5️⃣ Finalisieren", 5)
+        ("1️⃣ Umbenennen", 1),
+        ("2️⃣ Protokoll erstellen", 2),
+        ("3️⃣ Tasks extrahieren", 3),
+        ("4️⃣ Finalisieren", 4)
     ]
 
     for step_name, step_num in steps:
-        if current_step >= step_num:
+        if current_step > step_num:
             st.success(f"✅ {step_name}")
-        elif current_step == step_num - 1:
+        elif current_step == step_num:
             st.info(f"⏳ {step_name} - **Aktueller Schritt**")
         else:
             st.caption(f"⬜ {step_name}")
@@ -8343,9 +8391,7 @@ def render_transcript_detail_view(idx: int):
     st.markdown("---")
 
     # Zeige aktuellen Schritt
-    if current_step == 0:
-        render_step_assign_meeting(idx)
-    elif current_step == 1:
+    if current_step == 1:
         render_step_rename(idx)
     elif current_step == 2:
         render_step_create_protocol(idx)
@@ -8357,219 +8403,197 @@ def render_transcript_detail_view(idx: int):
         st.success("🎉 Protokoll abgeschlossen!")
 
 
-def render_step_assign_meeting(idx: int):
-    """Schritt 1: Termin zuordnen"""
-    st.markdown("### 1️⃣ Termin zuordnen")
-
+def render_inline_termin_assignment(idx: int):
+    """Inline Termin-Zuordnung in der Listenansicht (aufklappbar)"""
     item = st.session_state['transcript_queue'][idx]
-    file_path = Path(item['path'])
+    file_path = Path(item.get('path', ''))
+    wip_dir = Path("transcripts/wip")
 
-    # Datums-Extraktion aus Dateiname oder default heute
-    import re
-    date_match = re.search(r'(\d{4})-(\d{2})-(\d{2})', file_path.stem)
-    if date_match:
-        extracted_date = datetime.strptime(date_match.group(0), '%Y-%m-%d').date()
-    else:
-        extracted_date = datetime.now().date()
+    with st.container():
+        st.markdown("---")
+        st.markdown("##### 📅 Termin zuordnen")
 
-    # Datum-Picker
-    st.markdown("#### 📅 Wann war das Meeting?")
-    meeting_date = st.date_input(
-        "Meeting-Datum:",
-        value=extracted_date,
-        key=f"meeting_date_{idx}"
-    )
+        # Datums-Extraktion aus Dateiname oder default heute
+        import re
+        date_match = re.search(r'(\d{4})-(\d{2})-(\d{2})', file_path.stem)
+        if date_match:
+            extracted_date = datetime.strptime(date_match.group(0), '%Y-%m-%d').date()
+        else:
+            extracted_date = datetime.now().date()
 
-    # Termine laden
+        # Datum-Picker
+        meeting_date = st.date_input(
+            "Meeting-Datum:",
+            value=extracted_date,
+            key=f"meeting_date_{idx}"
+        )
+
+        # Auth-Check
+        orch = st.session_state.get('orchestrator')
+        if not orch or not orch.outlook_tool.is_authenticated():
+            st.warning("⚠️ Outlook nicht authentifiziert. Bitte in der Sidebar authentifizieren.")
+            if st.button("✖️ Schließen", key=f"close_assign_noauth_{idx}"):
+                st.session_state['assign_termin_idx'] = None
+                st.rerun()
+            st.markdown("---")
+            return
+
+        outlook_tool = orch.outlook_tool
+
+        # Events laden und cachen (Schlüssel: Datum + idx)
+        cache_key = f"cached_events_{meeting_date.isoformat()}_{idx}"
+
+        col_load, col_close = st.columns([2, 1])
+        with col_load:
+            if st.button("🔄 Termine laden", key=f"load_ev_{idx}", use_container_width=True):
+                try:
+                    start_of_day = datetime.combine(meeting_date, datetime.min.time())
+                    end_of_day = datetime.combine(meeting_date, datetime.max.time())
+                    events = outlook_tool.get_events_for_date_range(start_of_day, end_of_day)
+                    st.session_state[cache_key] = events or []
+                except Exception as e:
+                    st.error(f"❌ Fehler beim Laden: {e}")
+                    st.session_state[cache_key] = []
+                st.rerun()
+        with col_close:
+            if st.button("✖️ Schließen", key=f"close_assign_{idx}", use_container_width=True):
+                st.session_state['assign_termin_idx'] = None
+                st.rerun()
+
+        # Zeige gecachte Events
+        events = st.session_state.get(cache_key)
+        if events is not None:
+            if events:
+                st.success(f"✓ {len(events)} Termin(e) gefunden")
+
+                event_options = ["— Bitte wählen —"]
+                event_dict = {}
+
+                for event in events:
+                    event_start = event.get('start')
+                    event_title = event.get('title', 'Ohne Titel')
+
+                    if isinstance(event_start, str):
+                        try:
+                            event_start_dt = datetime.fromisoformat(event_start.replace('Z', '+00:00'))
+                            event_start_dt = convert_to_berlin_time(event_start_dt)
+                            time_str = event_start_dt.strftime('%H:%M')
+                        except Exception:
+                            time_str = event_start[:5] if len(event_start) >= 5 else "??:??"
+                    else:
+                        time_str = "??:??"
+
+                    option_label = f"{time_str} - {event_title}"
+                    event_options.append(option_label)
+                    event_dict[option_label] = event
+
+                selected_option = st.selectbox(
+                    "Termin:",
+                    options=event_options,
+                    key=f"event_select_{idx}"
+                )
+
+                if selected_option != "— Bitte wählen —":
+                    selected_event = event_dict[selected_option]
+
+                    # Zeige Details
+                    with st.expander("📋 Details", expanded=False):
+                        st.write(f"**Titel:** {selected_event.get('title')}")
+                        st.write(f"**Ort:** {selected_event.get('location', 'Kein Ort')}")
+                        if selected_event.get('attendees'):
+                            st.write(f"**Teilnehmer:** {len(selected_event['attendees'])}")
+
+                    # Zuordnen-Button
+                    if st.button("✅ Termin zuordnen", type="primary", key=f"confirm_assign_{idx}", use_container_width=True):
+                        # Event speichern
+                        st.session_state['transcript_queue'][idx]['selected_event'] = selected_event
+                        save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
+
+                        # Starte Background-Protokoll-Generierung
+                        _start_bg_protocol_for_item(idx, selected_event)
+
+                        # UI schließen
+                        st.session_state['assign_termin_idx'] = None
+                        st.toast(f"✅ Termin '{selected_event.get('title', '')}' zugeordnet!")
+                        st.rerun()
+            else:
+                st.info(f"📭 Keine Termine am {meeting_date.strftime('%d.%m.%Y')} gefunden")
+        else:
+            st.caption("💡 Klicke 'Termine laden' um Outlook-Termine abzurufen")
+
+        st.markdown("---")
+
+
+def _start_bg_protocol_for_item(idx: int, selected_event: dict):
+    """Startet die Hintergrund-Protokoll-Generierung für ein Item mit zugeordnetem Termin"""
+    item = st.session_state['transcript_queue'][idx]
     orch = st.session_state.get('orchestrator')
-    if not orch or not orch.outlook_tool.is_authenticated():
-        st.warning("⚠️ Outlook nicht authentifiziert. Bitte authentifiziere dich in der Sidebar.")
-        if st.button("Ohne Termin fortfahren →"):
-            st.session_state['transcript_queue'][idx]['workflow_step'] = 1
-            st.rerun()
+
+    if not orch or not orch.research_agent or item.get('protocol'):
         return
 
-    outlook_tool = orch.outlook_tool
+    with _bg_jobs_lock:
+        already_running = item['id'] in _bg_protocol_jobs
+    if already_running:
+        return
 
-    # Button zum Laden der Termine
-    if st.button("🔄 Termine für diesen Tag laden", use_container_width=True):
-        st.session_state[f'load_events_{idx}'] = True
-        st.rerun()
+    # Teilnehmer extrahieren
+    bg_attendees = []
+    for att in selected_event.get('attendees', []):
+        if isinstance(att, dict):
+            bg_attendees.append(att.get('name', att.get('email', '')))
+        elif isinstance(att, str):
+            bg_attendees.append(att)
 
-    # Zeige Termine falls geladen
-    if st.session_state.get(f'load_events_{idx}', False):
-        with st.spinner("📅 Lade Termine..."):
-            start_of_day = datetime.combine(meeting_date, datetime.min.time())
-            end_of_day = datetime.combine(meeting_date, datetime.max.time())
+    # Datum extrahieren
+    bg_date = None
+    ev_start = selected_event.get('start')
+    if isinstance(ev_start, str):
+        try:
+            ev_dt = datetime.fromisoformat(ev_start.replace('Z', '+00:00'))
+            ev_dt = convert_to_berlin_time(ev_dt)
+            bg_date = ev_dt.strftime('%d.%m.%Y %H:%M')
+        except Exception:
+            pass
 
-            try:
-                events = outlook_tool.get_events_for_date_range(start_of_day, end_of_day)
-
-                if events:
-                    st.success(f"✓ {len(events)} Termin(e) gefunden")
-
-                    # Termin-Auswahl
-                    st.markdown("#### 📋 Wähle den passenden Termin:")
-
-                    event_options = ["Kein Termin zuordnen"]
-                    event_dict = {}
-
-                    for event in events:
-                        event_start = event.get('start')
-                        event_title = event.get('title', 'Ohne Titel')
-
-                        # Parse Zeit
-                        if isinstance(event_start, str):
-                            try:
-                                event_start_dt = datetime.fromisoformat(event_start.replace('Z', '+00:00'))
-                                event_start_dt = convert_to_berlin_time(event_start_dt)
-                                time_str = event_start_dt.strftime('%H:%M')
-                            except:
-                                time_str = event_start[:5] if len(event_start) >= 5 else "??:??"
-                        else:
-                            time_str = "??:??"
-
-                        option_label = f"{time_str} - {event_title}"
-                        event_options.append(option_label)
-                        event_dict[option_label] = event
-
-                    # Selectbox
-                    selected_option = st.selectbox(
-                        "Termin:",
-                        options=event_options,
-                        key=f"event_select_{idx}"
+    # Agenda laden (falls vorhanden)
+    bg_agenda = None
+    agenda_dir = Path("data/agendas")
+    if agenda_dir.exists() and bg_date:
+        date_str_short = bg_date[:10]
+        ev_title = selected_event.get('title', '')
+        for af in agenda_dir.glob("Agenda_*.pdf"):
+            if date_str_short in af.stem and any(
+                w.lower() in af.stem.lower() for w in ev_title.split() if len(w) > 3
+            ):
+                try:
+                    from langchain_community.document_loaders import PyPDFLoader
+                    bg_agenda = "\n\n".join(
+                        p.page_content for p in PyPDFLoader(str(af)).load()
                     )
+                except Exception:
+                    pass
+                break
 
-                    # Speichere Auswahl
-                    if selected_option != "Kein Termin zuordnen":
-                        selected_event = event_dict[selected_option]
-                        st.session_state['transcript_queue'][idx]['selected_event'] = selected_event
-
-                        # Persistiere zu Disk
-                        wip_dir = Path("transcripts/wip")
-                        save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
-
-                        # Zeige Details
-                        with st.expander("📋 Termin-Details", expanded=False):
-                            st.write(f"**Titel:** {selected_event.get('title')}")
-                            st.write(f"**Ort:** {selected_event.get('location', 'Kein Ort')}")
-                            if selected_event.get('attendees'):
-                                st.write(f"**Teilnehmer:** {len(selected_event['attendees'])}")
-
-                        # Weiter-Button
-                        if st.button("✅ Termin zugeordnet - Weiter →", type="primary", use_container_width=True):
-                            st.session_state['transcript_queue'][idx]['workflow_step'] = 1
-
-                            # Starte Background-Protokoll-Generierung mit vollem Event-Kontext
-                            orch = st.session_state.get('orchestrator')
-                            if orch and orch.research_agent and not item.get('protocol'):
-                                with _bg_jobs_lock:
-                                    already_running = item['id'] in _bg_protocol_jobs
-                                if not already_running:
-                                    # Teilnehmer extrahieren
-                                    bg_attendees = []
-                                    for att in selected_event.get('attendees', []):
-                                        if isinstance(att, dict):
-                                            bg_attendees.append(att.get('name', att.get('email', '')))
-                                        elif isinstance(att, str):
-                                            bg_attendees.append(att)
-                                    # Datum extrahieren
-                                    bg_date = None
-                                    ev_start = selected_event.get('start')
-                                    if isinstance(ev_start, str):
-                                        try:
-                                            ev_dt = datetime.fromisoformat(ev_start.replace('Z', '+00:00'))
-                                            ev_dt = convert_to_berlin_time(ev_dt)
-                                            bg_date = ev_dt.strftime('%d.%m.%Y %H:%M')
-                                        except Exception:
-                                            pass
-                                    # Agenda laden (falls vorhanden)
-                                    bg_agenda = None
-                                    agenda_dir = Path("data/agendas")
-                                    if agenda_dir.exists() and bg_date:
-                                        date_str_short = bg_date[:10]
-                                        ev_title = selected_event.get('title', '')
-                                        for af in agenda_dir.glob("Agenda_*.pdf"):
-                                            if date_str_short in af.stem and any(
-                                                w.lower() in af.stem.lower() for w in ev_title.split() if len(w) > 3
-                                            ):
-                                                try:
-                                                    from langchain_community.document_loaders import PyPDFLoader
-                                                    bg_agenda = "\n\n".join(
-                                                        p.page_content for p in PyPDFLoader(str(af)).load()
-                                                    )
-                                                except Exception:
-                                                    pass
-                                                break
-                                    fp = Path(item['path'])
-                                    title = fp.stem.split('_', 2)[-1] if '_' in fp.stem else fp.stem
-                                    start_bg_protocol_generation(
-                                        item['id'], item['path'], title,
-                                        orch.research_agent.llm, item['filename'],
-                                        attendees=bg_attendees or None,
-                                        meeting_date=bg_date,
-                                        agenda_text=bg_agenda
-                                    )
-                                    st.toast("⏳ Protokoll wird im Hintergrund erstellt...", icon="🚀")
-
-                            # Persistiere zu Disk
-                            wip_dir = Path("transcripts/wip")
-                            save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
-
-                            st.rerun()
-                    else:
-                        if st.button("Ohne Termin fortfahren →", use_container_width=True):
-                            st.session_state['transcript_queue'][idx]['selected_event'] = None
-                            st.session_state['transcript_queue'][idx]['workflow_step'] = 1
-
-                            # Persistiere zu Disk
-                            wip_dir = Path("transcripts/wip")
-                            save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
-
-                            st.rerun()
-
-                else:
-                    st.info(f"📭 Keine Termine am {meeting_date.strftime('%d.%m.%Y')} gefunden")
-                    if st.button("Ohne Termin fortfahren →"):
-                        st.session_state['transcript_queue'][idx]['workflow_step'] = 1
-
-                        # Persistiere zu Disk
-                        wip_dir = Path("transcripts/wip")
-                        save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
-
-                        st.rerun()
-
-            except Exception as e:
-                st.error(f"❌ Fehler: {e}")
-                if st.button("Ohne Termin fortfahren →"):
-                    st.session_state['transcript_queue'][idx]['workflow_step'] = 1
-                    st.rerun()
-    else:
-        st.info("💡 Klicke auf 'Termine laden' um fortzufahren")
-        if st.button("Ohne Termin fortfahren →"):
-            st.session_state['transcript_queue'][idx]['workflow_step'] = 1
-            st.rerun()
+    fp = Path(item['path'])
+    title = fp.stem.split('_', 2)[-1] if '_' in fp.stem else fp.stem
+    start_bg_protocol_generation(
+        item['id'], item['path'], title,
+        orch.research_agent.llm, item['filename'],
+        attendees=bg_attendees or None,
+        meeting_date=bg_date,
+        agenda_text=bg_agenda
+    )
+    st.toast("⏳ Protokoll wird im Hintergrund erstellt...", icon="🚀")
 
 
 def render_step_rename(idx: int):
-    """Schritt 2: Umbenennen"""
-    st.markdown("### 2️⃣ Datei umbenennen")
+    """Schritt 1: Umbenennen"""
+    st.markdown("### 1️⃣ Datei umbenennen")
 
     item = st.session_state['transcript_queue'][idx]
     file_path = Path(item['path'])
     selected_event = item.get('selected_event')
-
-    # Zurück-Button zu Schritt 1
-    if st.button("← Zurück zu Schritt 1 (Termin zuordnen)", key=f"back_to_step1_from_2_{idx}"):
-        st.session_state['transcript_queue'][idx]['workflow_step'] = 0
-
-        # Persistiere zu Disk
-        wip_dir = Path("transcripts/wip")
-        save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
-
-        st.rerun()
-
-    st.markdown("---")
 
     # Prüfe ob Quelldatei noch existiert
     if not file_path.exists():
@@ -8583,7 +8607,7 @@ def render_step_rename(idx: int):
         return
 
     if not selected_event:
-        st.info("ℹ️ Kein Termin zugeordnet - Umbenennung übersprungen")
+        st.info("ℹ️ Kein Termin zugeordnet – Umbenennung übersprungen. Du kannst in der Liste noch einen Termin zuordnen.")
         if st.button("Weiter →", type="primary"):
             st.session_state['transcript_queue'][idx]['workflow_step'] = 2
             st.rerun()
@@ -8667,14 +8691,14 @@ def render_step_rename(idx: int):
 
 def render_step_create_protocol(idx: int):
     """Schritt 3: Protokoll erstellen"""
-    st.markdown("### 3️⃣ Protokoll erstellen")
+    st.markdown("### 2️⃣ Protokoll erstellen")
 
     item = st.session_state['transcript_queue'][idx]
     file_path = Path(item['path'])
     selected_event = item.get('selected_event')
 
-    # Zurück-Button zu Schritt 2
-    if st.button("← Zurück zu Schritt 2 (Umbenennen)", key=f"back_to_step2_from_3_{idx}"):
+    # Zurück-Button zu Schritt 1
+    if st.button("← Zurück zu Schritt 1 (Umbenennen)", key=f"back_to_step2_from_3_{idx}"):
         st.session_state['transcript_queue'][idx]['workflow_step'] = 1
 
         # Persistiere zu Disk
@@ -8967,13 +8991,13 @@ def render_step_create_protocol(idx: int):
 
 def render_step_extract_tasks(idx: int):
     """Schritt 4: Tasks extrahieren"""
-    st.markdown("### 4️⃣ Tasks extrahieren")
+    st.markdown("### 3️⃣ Tasks extrahieren")
 
     item = st.session_state['transcript_queue'][idx]
     protocol_text = item.get('protocol', '')
 
     # Zurück-Button zu Schritt 3
-    if st.button("← Zurück zu Schritt 3 (Protokoll bearbeiten)", key=f"back_to_step3_from_4_{idx}"):
+    if st.button("← Zurück zu Schritt 2 (Protokoll bearbeiten)", key=f"back_to_step3_from_4_{idx}"):
         st.session_state['transcript_queue'][idx]['workflow_step'] = 2
 
         # Persistiere zu Disk
@@ -8986,7 +9010,7 @@ def render_step_extract_tasks(idx: int):
 
     if not protocol_text:
         st.warning("⚠️ Kein Protokoll vorhanden. Bitte erstelle zuerst ein Protokoll.")
-        if st.button("← Zurück zu Schritt 3"):
+        if st.button("← Zurück zu Schritt 2"):
             st.session_state['transcript_queue'][idx]['workflow_step'] = 2
 
             # Persistiere zu Disk
@@ -9221,7 +9245,7 @@ def render_step_extract_tasks(idx: int):
 
 def render_step_finalize(idx: int):
     """Schritt 5: Finalisieren"""
-    st.markdown("### 5️⃣ Finalisieren & Archivieren")
+    st.markdown("### 4️⃣ Finalisieren & Archivieren")
 
     item = st.session_state['transcript_queue'][idx]
 
@@ -9238,8 +9262,8 @@ def render_step_finalize(idx: int):
         st.metric("📅 Termin", "✅ Zugeordnet" if item.get('selected_event') else "➖ Kein")
 
     # Zurück-Button um Tasks zu bearbeiten
-    if st.button("← Zurück zu Schritt 4 (Tasks bearbeiten)", key=f"back_to_step4_{idx}"):
-        st.session_state['transcript_queue'][idx]['workflow_step'] = 3  # Zurück zu Schritt 4
+    if st.button("← Zurück zu Schritt 3 (Tasks bearbeiten)", key=f"back_to_step4_{idx}"):
+        st.session_state['transcript_queue'][idx]['workflow_step'] = 3  # Zurück zu Tasks
 
         # Persistiere zu Disk
         wip_dir = Path("transcripts/wip")
