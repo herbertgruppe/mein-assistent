@@ -8181,9 +8181,9 @@ def render_transcripts_tab():
             with col_termin:
                 if selected_event:
                     ev_title = selected_event.get('title', 'Termin')[:35]
-                    st.caption(f"✅ {ev_title}")
+                    st.write(f"✅ **{ev_title}**")
                 else:
-                    st.caption("—")
+                    st.caption("❌ Kein Termin")
             with col_assign:
                 assign_label = "📅" if not selected_event else "📅✏️"
                 if st.button(assign_label, key=f"assign_{idx}", help="Termin zuordnen", use_container_width=True):
@@ -8227,9 +8227,9 @@ def render_transcripts_tab():
             with col_termin:
                 if selected_event:
                     ev_title = selected_event.get('title', 'Termin')[:35]
-                    st.caption(f"✅ {ev_title}")
+                    st.write(f"✅ **{ev_title}**")
                 else:
-                    st.caption("—")
+                    st.caption("❌ Kein Termin")
             with col_assign:
                 assign_label = "📅" if not selected_event else "📅✏️"
                 if st.button(assign_label, key=f"assign_proc_{idx}", help="Termin zuordnen/ändern", use_container_width=True):
@@ -8496,6 +8496,10 @@ def render_inline_termin_assignment(idx: int):
                 if selected_option != "— Bitte wählen —":
                     selected_event = event_dict[selected_option]
 
+                    # SOFORT speichern wenn Auswahl getroffen (nicht erst auf Button warten)
+                    st.session_state['transcript_queue'][idx]['selected_event'] = selected_event
+                    save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
+
                     # Zeige Details
                     with st.expander("📋 Details", expanded=False):
                         st.write(f"**Titel:** {selected_event.get('title')}")
@@ -8503,19 +8507,19 @@ def render_inline_termin_assignment(idx: int):
                         if selected_event.get('attendees'):
                             st.write(f"**Teilnehmer:** {len(selected_event['attendees'])}")
 
-                    # Zuordnen-Button
-                    if st.button("✅ Termin zuordnen", type="primary", key=f"confirm_assign_{idx}", use_container_width=True):
-                        # Event speichern
-                        st.session_state['transcript_queue'][idx]['selected_event'] = selected_event
-                        save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
-
-                        # Starte Background-Protokoll-Generierung
-                        _start_bg_protocol_for_item(idx, selected_event)
+                    # Zuordnen-Button: schließt Panel + startet Background-Generierung
+                    if st.button("✅ Zuordnen & Protokoll starten", type="primary", key=f"confirm_assign_{idx}", use_container_width=True):
+                        # Background-Protokoll starten (Fehler abfangen, damit rerun nicht blockiert wird)
+                        try:
+                            _start_bg_protocol_for_item(idx, selected_event)
+                        except Exception as e:
+                            print(f"[BG-Protocol] Fehler beim Starten: {e}")
 
                         # UI schließen
                         st.session_state['assign_termin_idx'] = None
-                        st.toast(f"✅ Termin '{selected_event.get('title', '')}' zugeordnet!")
                         st.rerun()
+
+                    st.success(f"✅ **{selected_event.get('title', 'Termin')}** wurde zugeordnet!")
             else:
                 st.info(f"📭 Keine Termine am {meeting_date.strftime('%d.%m.%Y')} gefunden")
         else:
