@@ -47,6 +47,10 @@ transcripts/
 input_docs/
 newsletter_archiv/
 
+# Multi-User data (sensitive: tokens, user data)
+users/
+config/
+
 # Databases
 *.db
 *.db-shm

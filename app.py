@@ -9,7 +9,10 @@ import subprocess
 import signal
 import time
 import threading
+import yaml
+import bcrypt
 import streamlit as st
+import streamlit_authenticator as stauth
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional, Any
@@ -22,6 +25,58 @@ load_dotenv()
 from agents import ResearchAgent, TaskAgent, CommunicationAgent, AsanaAgent, CalendarEmailAgent
 from utils import MemoryManager
 from tools import DocumentTool, AsanaTool, OutlookGraphTool
+from user_context import UserContext
+
+
+# ============================================================================
+# USERS CONFIG - Laden/Speichern der Benutzerkonfiguration
+# ============================================================================
+USERS_CONFIG_PATH = Path("config/users_config.yaml")
+
+
+def _load_users_config() -> dict:
+    """Lädt die User-Konfiguration aus YAML. Fallback auf Bundled-Datei."""
+    if USERS_CONFIG_PATH.exists():
+        with open(USERS_CONFIG_PATH, 'r', encoding='utf-8') as f:
+            return yaml.safe_load(f)
+    # Fallback: Datei aus dem App-Verzeichnis (erster Start)
+    bundled = Path("users_config.yaml")
+    if bundled.exists():
+        USERS_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(bundled, USERS_CONFIG_PATH)
+        with open(USERS_CONFIG_PATH, 'r', encoding='utf-8') as f:
+            return yaml.safe_load(f)
+    return {}
+
+
+def _save_users_config(config: dict):
+    """Speichert die User-Konfiguration."""
+    USERS_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(USERS_CONFIG_PATH, 'w', encoding='utf-8') as f:
+        yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
+
+
+def _check_initial_setup_needed(config: dict) -> bool:
+    """Prüft ob der initiale Setup (Passwort setzen) nötig ist."""
+    users = config.get('credentials', {}).get('usernames', {})
+    for username, user_data in users.items():
+        pw = user_data.get('password', '')
+        if 'PLACEHOLDER' in str(pw):
+            return True
+    return False
+
+
+# ============================================================================
+# HELPER: User-Kontext aus Session State
+# ============================================================================
+
+def _get_user_ctx():
+    """Holt den UserContext aus dem Session-State. Fallback auf Legacy-Pfade."""
+    ctx = st.session_state.get('user_ctx')
+    if ctx:
+        return ctx
+    # Fallback für Übergangszeitraum (kein Login aktiv)
+    return UserContext("_default")
 
 
 # ============================================================================
@@ -33,7 +88,8 @@ _bg_jobs_lock = threading.Lock()
 
 
 def _run_protocol_generation_bg(item_id: str, file_path_str: str, meeting_title: str, llm,
-                                 attendees=None, meeting_date=None, agenda_text=None):
+                                 attendees=None, meeting_date=None, agenda_text=None,
+                                 protocol_cache_dir: str = None):
     """Läuft in einem Background-Thread. Erzeugt das Protokoll ohne den UI-Thread zu blockieren."""
     try:
         file_path = Path(file_path_str)
@@ -58,7 +114,7 @@ def _run_protocol_generation_bg(item_id: str, file_path_str: str, meeting_title:
         protocol = ''.join(protocol_parts)
 
         # Cache auf Disk schreiben
-        cache_dir = Path("transcripts/protocol_cache")
+        cache_dir = Path(protocol_cache_dir) if protocol_cache_dir else Path("transcripts/protocol_cache")
         cache_dir.mkdir(parents=True, exist_ok=True)
         (cache_dir / f"{file_path.stem}_protocol.md").write_text(protocol, encoding='utf-8')
 
@@ -73,7 +129,8 @@ def _run_protocol_generation_bg(item_id: str, file_path_str: str, meeting_title:
 
 
 def start_bg_protocol_generation(item_id: str, file_path_str: str, meeting_title: str, llm, filename: str,
-                                   attendees=None, meeting_date=None, agenda_text=None):
+                                   attendees=None, meeting_date=None, agenda_text=None,
+                                   protocol_cache_dir: str = None):
     """Startet die Protokoll-Erstellung in einem Background-Thread."""
     with _bg_jobs_lock:
         _bg_protocol_jobs[item_id] = {
@@ -86,7 +143,12 @@ def start_bg_protocol_generation(item_id: str, file_path_str: str, meeting_title
     t = threading.Thread(
         target=_run_protocol_generation_bg,
         args=(item_id, file_path_str, meeting_title, llm),
-        kwargs={'attendees': attendees, 'meeting_date': meeting_date, 'agenda_text': agenda_text},
+        kwargs={
+            'attendees': attendees,
+            'meeting_date': meeting_date,
+            'agenda_text': agenda_text,
+            'protocol_cache_dir': protocol_cache_dir,
+        },
         daemon=True
     )
     t.start()
@@ -247,8 +309,15 @@ st.markdown("""
 class StreamlitOrchestrator:
     """Orchestrator für Streamlit Web-Interface"""
 
-    def __init__(self):
-        """Initialisiere Orchestrator"""
+    def __init__(self, user_ctx=None):
+        """Initialisiere Orchestrator
+
+        Args:
+            user_ctx: Optional UserContext für Multi-User-Support.
+                      Falls None, werden Legacy-Pfade verwendet.
+        """
+        self.user_ctx = user_ctx
+
         # LLM Provider aus Umgebungsvariablen
         self.llm_provider = os.getenv("LLM_PROVIDER", "anthropic")
 
@@ -261,12 +330,14 @@ class StreamlitOrchestrator:
         # Asana Tool initialisieren
         self.asana_tool = AsanaTool()
 
-        # Asana Agent zuerst initialisieren
-        self.asana_agent = AsanaAgent()
+        # Asana Agent zuerst initialisieren - mit per-User Token falls vorhanden
+        asana_token = user_ctx.get_asana_token() if user_ctx else os.getenv("ASANA_ACCESS_TOKEN", "")
+        self.asana_agent = AsanaAgent(api_key=asana_token) if asana_token else AsanaAgent()
 
-        # Outlook Graph Tool initialisieren
+        # Outlook Graph Tool initialisieren - mit per-User Token-Datei falls vorhanden
         from tools.outlook_graph_tool import OutlookGraphTool
-        self.outlook_tool = OutlookGraphTool()
+        outlook_token_file = str(user_ctx.outlook_token_file) if user_ctx else None
+        self.outlook_tool = OutlookGraphTool(token_file=outlook_token_file)
 
         # Email Tool initialisieren
         from tools.email_tool import EmailTool
@@ -536,6 +607,18 @@ Du musst NICHT auf Dateien zugreifen - der Inhalt ist bereits hier verfügbar.
 
 def initialize_session_state():
     """Initialisiere Session State"""
+    # Prüfe ob Orchestrator neu erstellt werden muss (anderer User)
+    user_ctx = st.session_state.get('user_ctx')
+    current_orch = st.session_state.get('orchestrator')
+    needs_reinit = (
+        current_orch is not None
+        and user_ctx is not None
+        and getattr(current_orch, 'user_ctx', None) is not None
+        and current_orch.user_ctx.username != user_ctx.username
+    )
+    if needs_reinit:
+        del st.session_state['orchestrator']
+
     if 'orchestrator' not in st.session_state:
         # Validiere API-Keys vor der Initialisierung
         llm_provider = os.getenv("LLM_PROVIDER", "anthropic")
@@ -554,7 +637,8 @@ def initialize_session_state():
         print(f"\n[INIT] Initialisiere Orchestrator mit Provider: {llm_provider}")
         print(f"[INIT] API-Key vorhanden: {'Ja' if api_key else 'Nein'}")
 
-        st.session_state.orchestrator = StreamlitOrchestrator()
+        user_ctx = st.session_state.get('user_ctx')
+        st.session_state.orchestrator = StreamlitOrchestrator(user_ctx=user_ctx)
 
         # Validiere Agenten-Initialisierung
         if not st.session_state.orchestrator.task_agent.llm:
@@ -600,8 +684,10 @@ def reset_chat_session():
 def render_sidebar():
     """Rendert die Sidebar mit Status-Informationen"""
     with st.sidebar:
-        # Herbert Gruppe Logo/Header
-        st.markdown("""
+        # Herbert Gruppe Logo/Header mit User-Info
+        username = st.session_state.get('username', '')
+        display_name = st.session_state.get('name', username)
+        st.markdown(f"""
         <div style="
             background: linear-gradient(135deg, #003366 0%, #004080 100%);
             padding: 20px;
@@ -628,14 +714,33 @@ def render_sidebar():
                 font-size: 10px;
                 margin: 5px 0 0 0;
             ">Management Assistent</p>
+            <p style="
+                color: rgba(255,255,255,0.9);
+                font-size: 11px;
+                margin: 8px 0 0 0;
+                border-top: 1px solid rgba(255,255,255,0.2);
+                padding-top: 8px;
+            ">👤 {display_name}</p>
         </div>
         """, unsafe_allow_html=True)
 
-        # Neuer Chat Button ganz oben
-        if st.button("🔄 Neuer Chat / Thema wechseln", type="primary", use_container_width=True):
-            reset_chat_session()
-            st.success("✓ Neuer Chat gestartet!")
-            st.rerun()
+        # Logout Button
+        col_chat, col_logout = st.columns([3, 1])
+        with col_chat:
+            if st.button("🔄 Neuer Chat", type="primary", use_container_width=True):
+                reset_chat_session()
+                st.success("✓ Neuer Chat gestartet!")
+                st.rerun()
+        with col_logout:
+            if st.button("🚪", help="Abmelden", use_container_width=True):
+                # Logout über streamlit-authenticator
+                authenticator = st.session_state.get('authenticator')
+                if authenticator:
+                    authenticator.logout(location='unrendered')
+                for key in ['authentication_status', 'username', 'name', 'user_ctx', 'authenticator']:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                st.rerun()
 
         st.markdown("---")
 
@@ -705,7 +810,7 @@ def render_sidebar():
                     with col2:
                         if st.button("🗑️", key=f"delete_{idx}", help="Datei löschen"):
                             try:
-                                file_path = os.path.join("input_docs", doc['name'])
+                                file_path = os.path.join(str(_get_user_ctx().input_docs), doc['name'])
                                 os.remove(file_path)
                                 st.success(f"✓ {doc['name']} gelöscht")
                                 st.rerun()
@@ -1156,7 +1261,7 @@ def render_documents_tab():
         if uploaded_files:
             if st.button("📥 Dateien speichern", type="primary", use_container_width=True):
                 # Stelle sicher dass input_docs/ existiert
-                os.makedirs("input_docs", exist_ok=True)
+                os.makedirs(str(_get_user_ctx().input_docs), exist_ok=True)
 
                 success_count = 0
                 error_count = 0
@@ -1164,7 +1269,7 @@ def render_documents_tab():
                 for uploaded_file in uploaded_files:
                     try:
                         # Speichere Datei
-                        file_path = os.path.join("input_docs", uploaded_file.name)
+                        file_path = os.path.join(str(_get_user_ctx().input_docs), uploaded_file.name)
                         with open(file_path, "wb") as f:
                             f.write(uploaded_file.getbuffer())
                         success_count += 1
@@ -1235,7 +1340,7 @@ def render_documents_tab():
 
             if cols[3].button("🗑️ Löschen", key=f"del_doc_{idx}"):
                 try:
-                    file_path = os.path.join("input_docs", doc['name'])
+                    file_path = os.path.join(str(_get_user_ctx().input_docs), doc['name'])
                     os.remove(file_path)
                     st.success(f"✓ {doc['name']} gelöscht")
                     st.rerun()
@@ -2952,7 +3057,7 @@ def render_meeting_preparation_view():
                             outlook_tool = orch.outlook_tool
 
                             # Speichere Dokument
-                            prep_dir = Path("transcripts/meeting_prep")
+                            prep_dir = _get_user_ctx().meeting_prep
                             prep_dir.mkdir(parents=True, exist_ok=True)
 
                             event = st.session_state.get('preparing_event')
@@ -2972,7 +3077,7 @@ def render_meeting_preparation_view():
 
                             if convert_markdown_to_pdf(filepath, pdf_path):
                                 # Speichere zusätzlich in data/agendas/
-                                agenda_dir = Path("data/agendas")
+                                agenda_dir = _get_user_ctx().data_dir / "agendas"
                                 agenda_dir.mkdir(parents=True, exist_ok=True)
 
                                 # Datum aus Termin
@@ -3294,7 +3399,7 @@ Deine Aufgaben:
                     """
                     try:
                         # Speichere Dokument
-                        prep_dir = Path("transcripts/meeting_prep")
+                        prep_dir = _get_user_ctx().meeting_prep
                         prep_dir.mkdir(parents=True, exist_ok=True)
 
                         safe_title = title.replace(' ', '_').replace('/', '-')[:50]
@@ -3316,7 +3421,7 @@ Deine Aufgaben:
                         is_agenda = 'agenda' in title.lower()
                         if is_agenda:
                             # Erstelle Agenda-Ordner falls nicht vorhanden
-                            agenda_dir = Path("data/agendas")
+                            agenda_dir = _get_user_ctx().data_dir / "agendas"
                             agenda_dir.mkdir(parents=True, exist_ok=True)
 
                             # Erstelle standardisierten Dateinamen
@@ -4985,7 +5090,7 @@ def load_agenda_templates() -> List[Dict[str, Any]]:
     Returns:
         Liste von Template-Dictionaries
     """
-    template_file = Path("data/agenda_templates.json")
+    template_file = _get_user_ctx().data_dir / "agenda_templates.json"
 
     if not template_file.exists():
         # Erstelle leere Template-Datei
@@ -5015,7 +5120,7 @@ def save_agenda_templates(templates: List[Dict[str, Any]]) -> bool:
     Returns:
         True bei Erfolg, False bei Fehler
     """
-    template_file = Path("data/agenda_templates.json")
+    template_file = _get_user_ctx().data_dir / "agenda_templates.json"
     template_file.parent.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -5860,7 +5965,7 @@ def render_transcripts_tab_OLD():
         help="Lade ein oder mehrere Meeting-Transkripte hoch (TXT, MD oder PDF)"
     )
 
-    processed_dir = Path("transcripts/processed")
+    processed_dir = _get_user_ctx().transcripts_processed
     processed_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialisiere Transcript Queue im Session State
@@ -6233,7 +6338,7 @@ def render_transcripts_tab_OLD():
         st.caption("Wenn eine Agenda vorhanden ist, wird das Protokoll streng nach der Agenda-Struktur erstellt.")
 
         # Suche nach verfügbaren Agendas
-        agenda_dir = Path("data/agendas")
+        agenda_dir = _get_user_ctx().data_dir / "agendas"
         agenda_files = []
         if agenda_dir.exists():
             agenda_files = sorted(
@@ -7241,7 +7346,7 @@ def render_transcripts_tab_OLD():
                                         st.success(f"✅ Protokoll-Aufgabe erstellt")
 
                                 with st.spinner("Erstelle und hänge PDF an..."):
-                                    protocol_dir = Path("transcripts/protocols")
+                                    protocol_dir = _get_user_ctx().protocols_dir
                                     protocol_dir.mkdir(parents=True, exist_ok=True)
 
                                     md_filename = f"{date_str}_Protokoll_{meeting_title}.md"
@@ -7502,7 +7607,7 @@ def render_transcripts_tab_OLD():
                         protocol_text = st.session_state['extracted_protocol']
 
                         # Speichere als Markdown
-                        protocol_dir = Path("transcripts/protocols")
+                        protocol_dir = _get_user_ctx().protocols_dir
                         protocol_dir.mkdir(parents=True, exist_ok=True)
 
                         meeting_title = st.session_state.get('meeting_title', 'Meeting')
@@ -7547,7 +7652,7 @@ def render_transcripts_tab_OLD():
             if st.button("✅ Abschließen & Archivieren", type="primary", help="Protokoll als PDF archivieren und zur nächsten Nachbereitung wechseln"):
                 try:
                     # Erstelle Archiv-Ordner
-                    archive_dir = Path("transcripts/archive")
+                    archive_dir = _get_user_ctx().transcripts_archive
                     archive_dir.mkdir(parents=True, exist_ok=True)
 
                     # Speichere Protokoll als Markdown
@@ -7576,7 +7681,7 @@ def render_transcripts_tab_OLD():
                         # Optional: Verschiebe auch das Transkript ins Archiv
                         transcript_source = st.session_state.get('transcript_source')
                         if transcript_source:
-                            source_path = Path("transcripts/processed") / transcript_source
+                            source_path = _get_user_ctx().transcripts_processed / transcript_source
                             if source_path.exists():
                                 archive_transcript_path = archive_dir / f"{date_str}_Transkript_{transcript_source}"
                                 import shutil
@@ -7611,11 +7716,238 @@ def render_transcripts_tab_OLD():
                         del st.session_state[key]
                 st.success("✓ Daten verworfen")
                 st.rerun()
+
+
+def render_settings_tab():
+    """Einstellungen-Tab: Per-User Credentials für Outlook und Asana."""
+    st.header("⚙️ Einstellungen")
+    user_ctx = st.session_state.get('user_ctx')
+    if not user_ctx:
+        st.warning("Kein Benutzerkontext verfügbar.")
+        return
+
+    st.subheader(f"Verbindungen für: **{st.session_state.get('name', user_ctx.username)}**")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("### 📧 Microsoft Outlook")
+        if user_ctx.has_outlook_token():
+            st.success("✅ Outlook verbunden")
+            st.caption(f"Token: `{user_ctx.outlook_token_file}`")
+            if st.button("🔄 Outlook neu verbinden", key="reconnect_outlook"):
+                # Token löschen, damit Device-Code-Flow beim nächsten Aufruf neu startet
+                user_ctx.outlook_token_file.unlink(missing_ok=True)
+                # Auch Orchestrator-Cache invalidieren
+                if 'orchestrator' in st.session_state:
+                    st.session_state.orchestrator._outlook_tool = None
+                st.success("Token gelöscht. Bitte laden Sie die Seite neu, um sich erneut zu verbinden.")
+                st.rerun()
+        else:
+            st.warning("❌ Outlook nicht verbunden")
+            st.caption("Die Verbindung wird automatisch hergestellt, wenn Sie den Kalender oder E-Mails nutzen.")
+
+    with col2:
+        st.markdown("### 📋 Asana")
+        current_token = user_ctx.get_asana_token()
+        if current_token and user_ctx.asana_credentials_file.exists():
+            st.success("✅ Asana verbunden (eigener Token)")
+            masked = current_token[:6] + "..." + current_token[-4:] if len(current_token) > 10 else "***"
+            st.caption(f"Token: `{masked}`")
+        elif current_token:
+            st.info("ℹ️ Asana verbunden (globaler Token aus .env)")
+            st.caption("Sie können einen eigenen Token hinterlegen:")
+        else:
+            st.warning("❌ Asana nicht verbunden")
+
+        new_asana_token = st.text_input(
+            "Asana Personal Access Token",
+            type="password",
+            key="settings_asana_pat",
+            help="Erstellen Sie einen Token unter: https://app.asana.com/0/my-apps"
+        )
+        if st.button("💾 Asana Token speichern", key="save_asana_token"):
+            if new_asana_token and len(new_asana_token) > 10:
+                user_ctx.save_asana_token(new_asana_token)
+                st.success("✅ Asana Token gespeichert!")
+                st.rerun()
+            else:
+                st.error("Bitte geben Sie einen gültigen Token ein.")
+
+    st.markdown("---")
+
+    # Passwort ändern
+    st.subheader("🔑 Passwort ändern")
+    old_pw = st.text_input("Aktuelles Passwort", type="password", key="change_pw_old")
+    new_pw = st.text_input("Neues Passwort", type="password", key="change_pw_new")
+    confirm_pw = st.text_input("Neues Passwort bestätigen", type="password", key="change_pw_confirm")
+
+    if st.button("🔑 Passwort ändern", key="change_pw_btn"):
+        if not old_pw or not new_pw:
+            st.error("Bitte alle Felder ausfüllen.")
+        elif new_pw != confirm_pw:
+            st.error("Neue Passwörter stimmen nicht überein.")
+        elif len(new_pw) < 6:
+            st.error("Passwort muss mindestens 6 Zeichen haben.")
+        else:
+            config = _load_users_config()
+            stored_hash = config['credentials']['usernames'][user_ctx.username]['password']
+            if bcrypt.checkpw(old_pw.encode(), stored_hash.encode()):
+                hashed = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
+                config['credentials']['usernames'][user_ctx.username]['password'] = hashed
+                _save_users_config(config)
+                st.success("✅ Passwort geändert!")
+            else:
+                st.error("❌ Aktuelles Passwort ist falsch.")
+
+
+def render_initial_setup(config: dict):
+    """Zeigt den Initial-Setup-Screen (Passwort setzen) beim ersten Start."""
+    st.title("🔧 Ersteinrichtung")
+    st.info("Willkommen! Bitte setzen Sie Ihr Passwort, um die App zu starten.")
+
+    users = config.get('credentials', {}).get('usernames', {})
+    for username, user_data in users.items():
+        pw = user_data.get('password', '')
+        if 'PLACEHOLDER' not in str(pw):
+            continue
+        st.subheader(f"Passwort für: **{user_data.get('name', username)}** ({username})")
+        new_pw = st.text_input("Neues Passwort", type="password", key=f"setup_pw_{username}")
+        confirm_pw = st.text_input("Passwort bestätigen", type="password", key=f"setup_pw_confirm_{username}")
+
+        if st.button("✅ Passwort setzen", key=f"setup_btn_{username}", type="primary"):
+            if not new_pw or len(new_pw) < 6:
+                st.error("Passwort muss mindestens 6 Zeichen haben.")
+            elif new_pw != confirm_pw:
+                st.error("Passwörter stimmen nicht überein.")
+            else:
+                hashed = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
+                config['credentials']['usernames'][username]['password'] = hashed
+                _save_users_config(config)
+                st.success("✅ Passwort gesetzt! Die App wird neu geladen...")
+                time.sleep(1)
+                st.rerun()
+    return
+
+
+def render_admin_panel():
+    """Admin-Bereich: User verwalten (nur für Admins)."""
+    config = _load_users_config()
+    users = config.get('credentials', {}).get('usernames', {})
+
+    st.subheader("👥 Benutzerverwaltung")
+
+    # Bestehende User anzeigen
+    for username, user_data in users.items():
+        col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
+        with col1:
+            st.text(f"👤 {user_data.get('name', username)}")
+        with col2:
+            st.text(f"📧 {user_data.get('email', '-')}")
+        with col3:
+            role = user_data.get('role', 'user')
+            st.text(f"🔑 {role}")
+        with col4:
+            if username != st.session_state.get('username'):
+                if st.button("🗑️", key=f"del_user_{username}", help=f"User {username} löschen"):
+                    del config['credentials']['usernames'][username]
+                    _save_users_config(config)
+                    st.success(f"User {username} gelöscht.")
+                    st.rerun()
+
+    st.markdown("---")
+
+    # Neuen User anlegen
+    with st.expander("➕ Neuen Benutzer anlegen"):
+        new_username = st.text_input("Benutzername", key="new_user_username",
+                                      help="Kurzer Name ohne Sonderzeichen")
+        new_name = st.text_input("Voller Name", key="new_user_name")
+        new_email = st.text_input("E-Mail", key="new_user_email")
+        new_pw = st.text_input("Passwort", type="password", key="new_user_pw")
+        new_role = st.selectbox("Rolle", ["user", "admin"], key="new_user_role")
+
+        if st.button("✅ Benutzer anlegen", key="create_user_btn", type="primary"):
+            if not new_username or not new_name or not new_pw:
+                st.error("Benutzername, Name und Passwort sind Pflichtfelder.")
+            elif new_username in users:
+                st.error(f"Benutzername '{new_username}' existiert bereits.")
+            elif len(new_pw) < 6:
+                st.error("Passwort muss mindestens 6 Zeichen haben.")
+            else:
+                hashed = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
+                config['credentials']['usernames'][new_username] = {
+                    'name': new_name,
+                    'email': new_email,
+                    'password': hashed,
+                    'role': new_role,
+                    'failed_login_attempts': 0,
+                    'logged_in': False,
+                }
+                _save_users_config(config)
+                # Verzeichnisse für neuen User anlegen
+                UserContext(new_username).ensure_dirs()
+                st.success(f"✅ Benutzer '{new_username}' angelegt!")
+                st.rerun()
+
+    # Passwort zurücksetzen
+    with st.expander("🔑 Passwort zurücksetzen"):
+        reset_user = st.selectbox("Benutzer", list(users.keys()), key="reset_pw_user")
+        reset_pw = st.text_input("Neues Passwort", type="password", key="reset_pw_input")
+        if st.button("🔑 Passwort ändern", key="reset_pw_btn"):
+            if not reset_pw or len(reset_pw) < 6:
+                st.error("Passwort muss mindestens 6 Zeichen haben.")
+            else:
+                hashed = bcrypt.hashpw(reset_pw.encode(), bcrypt.gensalt()).decode()
+                config['credentials']['usernames'][reset_user]['password'] = hashed
+                _save_users_config(config)
+                st.success(f"✅ Passwort für '{reset_user}' geändert.")
+
+
 def main():
     """Haupt-App-Logik"""
     import time
     main_start = time.time()
     print(f"\n[DEBUG] ========== MAIN START @ {main_start} ==========")
+
+    # ---- Authentication Gate ----
+    config = _load_users_config()
+
+    if not config:
+        st.error("⚠️ Keine Benutzerkonfiguration gefunden. Bitte users_config.yaml erstellen.")
+        st.stop()
+
+    # Initial Setup: Passwort setzen beim ersten Start
+    if _check_initial_setup_needed(config):
+        render_initial_setup(config)
+        st.stop()
+
+    authenticator = stauth.Authenticate(
+        config['credentials'],
+        config['cookie']['name'],
+        config['cookie']['key'],
+        config['cookie']['expiry_days']
+    )
+    st.session_state['authenticator'] = authenticator
+
+    authenticator.login(location='main')
+
+    if st.session_state.get("authentication_status") is None:
+        st.info("Bitte melden Sie sich an.")
+        st.stop()
+    elif st.session_state.get("authentication_status") is False:
+        st.error("❌ Benutzername oder Passwort falsch.")
+        st.stop()
+
+    # ---- Authentifiziert: User-Kontext aufbauen ----
+    username = st.session_state["username"]
+    print(f"[AUTH] User eingeloggt: {username}")
+
+    # UserContext erstellen/laden
+    if 'user_ctx' not in st.session_state or st.session_state['user_ctx'].username != username:
+        user_ctx = UserContext(username)
+        user_ctx.ensure_dirs()
+        st.session_state['user_ctx'] = user_ctx
+        print(f"[AUTH] UserContext erstellt für: {username} → {user_ctx.base}")
 
     # Initialisierung
     init_start = time.time()
@@ -7627,8 +7959,9 @@ def main():
     check_and_reset_cache_if_env_changed()
     print(f"[DEBUG] check_and_reset_cache took {(time.time()-cache_start)*1000:.2f}ms")
 
-    # Erstelle notwendige Ordner
-    Path("data/agendas").mkdir(parents=True, exist_ok=True)
+    # Erstelle notwendige Ordner (user-spezifisch)
+    user_ctx = st.session_state['user_ctx']
+    (user_ctx.data_dir / "agendas").mkdir(parents=True, exist_ok=True)
 
     # Herbert Gruppe Custom CSS - Firmenfarben und Styling
     st.markdown("""
@@ -7834,9 +8167,17 @@ def main():
     render_sidebar()
     print(f"[DEBUG] render_sidebar took {(time.time()-sidebar_start)*1000:.2f}ms")
 
-    # Hauptbereich mit Tabs
+    # Hauptbereich mit Tabs - Admin-Tab nur für Admins
     tabs_start = time.time()
-    tabs = st.tabs(["📊 Mein Tag", "🎙️ Meeting Manager", "📁 Dokumente", "📚 Archiv"])
+    config = _load_users_config()
+    user_role = config.get('credentials', {}).get('usernames', {}).get(username, {}).get('role', 'user')
+    is_admin = (user_role == 'admin')
+
+    tab_labels = ["📊 Mein Tag", "🎙️ Meeting Manager", "📁 Dokumente", "📚 Archiv", "⚙️ Einstellungen"]
+    if is_admin:
+        tab_labels.append("👥 Admin")
+
+    tabs = st.tabs(tab_labels)
 
     with tabs[0]:
         tab_start = time.time()
@@ -7857,6 +8198,13 @@ def main():
         tab_start = time.time()
         render_archive_tab()
         print(f"[DEBUG] render_archive_tab took {(time.time()-tab_start)*1000:.2f}ms")
+
+    with tabs[4]:
+        render_settings_tab()
+
+    if is_admin:
+        with tabs[5]:
+            render_admin_panel()
 
     print(f"[DEBUG] ========== MAIN TOTAL took {(time.time()-main_start)*1000:.2f}ms ==========")
 
@@ -7936,11 +8284,11 @@ def render_transcripts_tab():
         key="transcript_uploader"
     )
 
-    processed_dir = Path("transcripts/processed")
+    processed_dir = _get_user_ctx().transcripts_processed
     processed_dir.mkdir(parents=True, exist_ok=True)
 
     # WIP-Verzeichnis erstellen
-    wip_dir = Path("transcripts/wip")
+    wip_dir = _get_user_ctx().wip_dir
     wip_dir.mkdir(parents=True, exist_ok=True)
 
     # ========================================================================
@@ -8186,12 +8534,12 @@ def render_transcripts_tab():
                     st.session_state['transcript_queue'][idx]['status'] = 'processing'
                     if st.session_state['transcript_queue'][idx].get('workflow_step', 0) < 1:
                         st.session_state['transcript_queue'][idx]['workflow_step'] = 1
-                    save_wip_item(st.session_state['transcript_queue'][idx], Path("transcripts/wip"))
+                    save_wip_item(st.session_state['transcript_queue'][idx], _get_user_ctx().wip_dir)
                     st.rerun()
             with col_delete:
                 if st.button("🗑️", key=f"delete_new_{idx}", use_container_width=True, help="Löschen"):
                     deleted_item = st.session_state['transcript_queue'].pop(idx)
-                    delete_wip_item(deleted_item, Path("transcripts/wip"))
+                    delete_wip_item(deleted_item, _get_user_ctx().wip_dir)
                     if st.session_state.get('selected_transcript_idx') == idx:
                         st.session_state['selected_transcript_idx'] = None
                     st.success(f"✅ '{deleted_item['filename']}' gelöscht")
@@ -8233,7 +8581,7 @@ def render_transcripts_tab():
             with col_delete:
                 if st.button("🗑️", key=f"delete_proc_{idx}", use_container_width=True, help="Löschen"):
                     deleted_item = st.session_state['transcript_queue'].pop(idx)
-                    delete_wip_item(deleted_item, Path("transcripts/wip"))
+                    delete_wip_item(deleted_item, _get_user_ctx().wip_dir)
                     if st.session_state.get('selected_transcript_idx') == idx:
                         st.session_state['selected_transcript_idx'] = None
                     st.success(f"✅ '{deleted_item['filename']}' gelöscht")
@@ -8267,7 +8615,7 @@ def render_transcripts_tab():
                         # Lösche aus Queue
                         deleted_item = st.session_state['transcript_queue'].pop(idx)
                         # Lösche WIP-Datei
-                        wip_dir = Path("transcripts/wip")
+                        wip_dir = _get_user_ctx().wip_dir
                         delete_wip_item(deleted_item, wip_dir)
                         # Reset selected_idx falls nötig
                         if st.session_state.get('selected_transcript_idx') == idx:
@@ -8294,7 +8642,7 @@ def render_transcripts_tab():
                         # Lösche aus Queue
                         deleted_item = st.session_state['transcript_queue'].pop(idx)
                         # Lösche WIP-Datei
-                        wip_dir = Path("transcripts/wip")
+                        wip_dir = _get_user_ctx().wip_dir
                         delete_wip_item(deleted_item, wip_dir)
                         # Reset selected_idx falls nötig
                         if st.session_state.get('selected_transcript_idx') == idx:
@@ -8397,7 +8745,7 @@ def render_inline_termin_assignment(idx: int):
     """Inline Termin-Zuordnung in der Listenansicht (aufklappbar)"""
     item = st.session_state['transcript_queue'][idx]
     file_path = Path(item.get('path', ''))
-    wip_dir = Path("transcripts/wip")
+    wip_dir = _get_user_ctx().wip_dir
 
     with st.container():
         st.markdown("---")
@@ -8556,7 +8904,7 @@ def _start_bg_protocol_for_item(idx: int, selected_event: dict):
 
     # Agenda laden (falls vorhanden)
     bg_agenda = None
-    agenda_dir = Path("data/agendas")
+    agenda_dir = _get_user_ctx().data_dir / "agendas"
     if agenda_dir.exists() and bg_date:
         date_str_short = bg_date[:10]
         ev_title = selected_event.get('title', '')
@@ -8580,7 +8928,8 @@ def _start_bg_protocol_for_item(idx: int, selected_event: dict):
         orch.research_agent.llm, item['filename'],
         attendees=bg_attendees or None,
         meeting_date=bg_date,
-        agenda_text=bg_agenda
+        agenda_text=bg_agenda,
+        protocol_cache_dir=str(_get_user_ctx().protocol_cache)
     )
     st.toast("⏳ Protokoll wird im Hintergrund erstellt...", icon="🚀")
 
@@ -8599,7 +8948,7 @@ def render_step_rename(idx: int):
         st.info("Die Datei wurde möglicherweise bereits umbenannt oder gelöscht. Umbenennung wird übersprungen.")
         if st.button("Weiter →", type="primary", key=f"skip_rename_missing_{idx}"):
             st.session_state['transcript_queue'][idx]['workflow_step'] = 2
-            wip_dir = Path("transcripts/wip")
+            wip_dir = _get_user_ctx().wip_dir
             save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
             st.rerun()
         return
@@ -8662,7 +9011,7 @@ def render_step_rename(idx: int):
     with col_rename:
         if st.button("✅ Umbenennen", type="primary", use_container_width=True):
             try:
-                processed_dir = Path("transcripts/processed")
+                processed_dir = _get_user_ctx().transcripts_processed
                 new_file_path = processed_dir / new_filename
 
                 # Duplikat-Check
@@ -8709,14 +9058,14 @@ def render_step_create_protocol(idx: int):
         st.session_state['transcript_queue'][idx]['workflow_step'] = 1
 
         # Persistiere zu Disk
-        wip_dir = Path("transcripts/wip")
+        wip_dir = _get_user_ctx().wip_dir
         save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
 
         st.rerun()
 
     st.markdown("---")
 
-    wip_dir = Path("transcripts/wip")
+    wip_dir = _get_user_ctx().wip_dir
 
     # === ÄNDERUNG 1: Background-Job und Disk-Cache konsultieren ===
     # Direkt prüfen ob ein fertiger Background-Job vorliegt
@@ -8732,7 +9081,7 @@ def render_step_create_protocol(idx: int):
 
     # Falls immer noch kein Protokoll: Cache auf Disk prüfen
     if not item.get('protocol'):
-        cache_dir = Path("transcripts/protocol_cache")
+        cache_dir = _get_user_ctx().protocol_cache
         cache_file = cache_dir / f"{file_path.stem}_protocol.md"
         if cache_file.exists():
             item['protocol'] = cache_file.read_text(encoding='utf-8')
@@ -8832,7 +9181,7 @@ def render_step_create_protocol(idx: int):
             # Lade Agenda falls vorhanden
             agenda_text = None
             if selected_event:
-                agenda_dir = Path("data/agendas")
+                agenda_dir = _get_user_ctx().data_dir / "agendas"
                 if agenda_dir.exists():
                     # Suche nach Agenda-Datei für diesen Termin
                     event_title = selected_event.get('title', '')
@@ -8956,7 +9305,7 @@ def render_step_create_protocol(idx: int):
             st.session_state['transcript_queue'][idx]['protocol'] = edited_protocol
 
             # Persistiere zu Disk
-            wip_dir = Path("transcripts/wip")
+            wip_dir = _get_user_ctx().wip_dir
             save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
 
             st.info("💾 Auto-Speichern: Änderungen gespeichert")
@@ -8977,7 +9326,7 @@ def render_step_create_protocol(idx: int):
                 st.session_state[f'start_protocol_{idx}'] = False
 
                 # Persistiere zu Disk
-                wip_dir = Path("transcripts/wip")
+                wip_dir = _get_user_ctx().wip_dir
                 save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
 
                 st.info("Protokoll zurückgesetzt - klicke auf 'Protokoll erstellen' um neu zu generieren")
@@ -8990,7 +9339,7 @@ def render_step_create_protocol(idx: int):
                 st.session_state['transcript_queue'][idx]['workflow_step'] = 3
 
                 # Persistiere zu Disk
-                wip_dir = Path("transcripts/wip")
+                wip_dir = _get_user_ctx().wip_dir
                 save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
 
                 st.rerun()
@@ -9008,7 +9357,7 @@ def render_step_extract_tasks(idx: int):
         st.session_state['transcript_queue'][idx]['workflow_step'] = 2
 
         # Persistiere zu Disk
-        wip_dir = Path("transcripts/wip")
+        wip_dir = _get_user_ctx().wip_dir
         save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
 
         st.rerun()
@@ -9021,7 +9370,7 @@ def render_step_extract_tasks(idx: int):
             st.session_state['transcript_queue'][idx]['workflow_step'] = 2
 
             # Persistiere zu Disk
-            wip_dir = Path("transcripts/wip")
+            wip_dir = _get_user_ctx().wip_dir
             save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
 
             st.rerun()
@@ -9045,7 +9394,7 @@ def render_step_extract_tasks(idx: int):
                     st.session_state['transcript_queue'][idx]['workflow_step'] = 4
 
                     # Persistiere zu Disk
-                    wip_dir = Path("transcripts/wip")
+                    wip_dir = _get_user_ctx().wip_dir
                     save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
 
                     st.rerun()
@@ -9075,7 +9424,7 @@ def render_step_extract_tasks(idx: int):
             st.session_state[f'extract_tasks_{idx}'] = False
 
             # Persistiere zu Disk
-            wip_dir = Path("transcripts/wip")
+            wip_dir = _get_user_ctx().wip_dir
             save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
 
             st.success(f"✅ {len(tasks)} Tasks gefunden in {elapsed}s!")
@@ -9102,7 +9451,7 @@ def render_step_extract_tasks(idx: int):
                     st.session_state[f'extract_tasks_{idx}'] = False
 
                     # Persistiere zu Disk
-                    wip_dir = Path("transcripts/wip")
+                    wip_dir = _get_user_ctx().wip_dir
                     save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
 
                     st.rerun()
@@ -9216,7 +9565,7 @@ def render_step_extract_tasks(idx: int):
             st.session_state['transcript_queue'][idx]['tasks'] = updated_tasks
 
             # Persistiere zu Disk
-            wip_dir = Path("transcripts/wip")
+            wip_dir = _get_user_ctx().wip_dir
             save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
         else:
             st.info("Keine Tasks gefunden")
@@ -9234,7 +9583,7 @@ def render_step_extract_tasks(idx: int):
                 st.session_state['transcript_queue'][idx]['tasks'].append(new_task)
 
                 # Persistiere zu Disk
-                wip_dir = Path("transcripts/wip")
+                wip_dir = _get_user_ctx().wip_dir
                 save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
 
                 st.rerun()
@@ -9244,7 +9593,7 @@ def render_step_extract_tasks(idx: int):
             st.session_state['transcript_queue'][idx]['workflow_step'] = 4
 
             # Persistiere zu Disk
-            wip_dir = Path("transcripts/wip")
+            wip_dir = _get_user_ctx().wip_dir
             save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
 
             st.rerun()
@@ -9273,7 +9622,7 @@ def render_step_finalize(idx: int):
         st.session_state['transcript_queue'][idx]['workflow_step'] = 3  # Zurück zu Tasks
 
         # Persistiere zu Disk
-        wip_dir = Path("transcripts/wip")
+        wip_dir = _get_user_ctx().wip_dir
         save_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
 
         st.rerun()
@@ -9308,7 +9657,7 @@ def render_step_finalize(idx: int):
                         outlook_tool = orch.outlook_tool
 
                         # Erstelle Protokoll-Verzeichnis
-                        protocol_dir = Path("transcripts/protocols")
+                        protocol_dir = _get_user_ctx().protocols_dir
                         protocol_dir.mkdir(parents=True, exist_ok=True)
 
                         # Meeting-Titel und Datum
@@ -9494,7 +9843,7 @@ def render_step_finalize(idx: int):
                         if protocol_text:
                             with st.spinner("📎 Erstelle und hänge PDF an..."):
                                 try:
-                                    protocol_dir = Path("transcripts/protocols")
+                                    protocol_dir = _get_user_ctx().protocols_dir
                                     protocol_dir.mkdir(parents=True, exist_ok=True)
 
                                     # Bereinige Meeting-Titel für Dateinamen
@@ -9685,7 +10034,7 @@ def render_step_finalize(idx: int):
         st.session_state['selected_transcript_idx'] = None
 
         # Lösche WIP-Datei (Workflow abgeschlossen)
-        wip_dir = Path("transcripts/wip")
+        wip_dir = _get_user_ctx().wip_dir
         delete_wip_item(st.session_state['transcript_queue'][idx], wip_dir)
 
         st.success("🎉 Protokoll erfolgreich abgeschlossen!")

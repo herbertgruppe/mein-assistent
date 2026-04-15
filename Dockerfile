@@ -31,7 +31,9 @@ RUN mkdir -p transcripts/incoming \
              transcripts/protocol_cache \
              input_docs \
              data \
-             auth
+             auth \
+             users \
+             config
 
 EXPOSE 8501
 

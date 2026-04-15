@@ -37,3 +37,8 @@ requests
 # Background Worker
 apscheduler>=3.10.0
 beautifulsoup4
+
+# Multi-User Authentication
+streamlit-authenticator>=0.4.1
+pyyaml
+bcrypt

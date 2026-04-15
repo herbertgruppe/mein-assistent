@@ -10,8 +10,13 @@ from datetime import datetime, timedelta
 class OutlookGraphTool:
     """Tool für Microsoft Graph API - Outlook Kalender"""
 
-    def __init__(self):
-        """Initialisiert das Outlook Graph Tool"""
+    def __init__(self, token_file: str = None):
+        """Initialisiert das Outlook Graph Tool.
+
+        Args:
+            token_file: Optionaler Pfad zur Token-Datei. Falls None, wird der
+                        Default-Pfad 'auth/outlook_token.json' verwendet.
+        """
         # Stelle sicher dass .env geladen ist
         self._ensure_env_loaded()
 
@@ -24,10 +29,17 @@ class OutlookGraphTool:
         self.is_configured = bool(self.client_id) and bool(self.tenant_id)
         self.access_token = None
         self.refresh_token = None
-        # Token in persistentem Verzeichnis speichern (überlebt Docker-Rebuilds)
-        auth_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'auth')
-        os.makedirs(auth_dir, exist_ok=True)
-        self.token_file = os.path.join(auth_dir, "outlook_token.json")
+
+        if token_file:
+            # Multi-User: Token-Pfad explizit übergeben
+            os.makedirs(os.path.dirname(token_file), exist_ok=True)
+            self.token_file = token_file
+        else:
+            # Legacy: Token in persistentem Verzeichnis speichern
+            auth_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'auth')
+            os.makedirs(auth_dir, exist_ok=True)
+            self.token_file = os.path.join(auth_dir, "outlook_token.json")
+
         # Fallback: altes Token migrieren
         old_token = ".outlook_token.json"
         if os.path.exists(old_token) and not os.path.exists(self.token_file):

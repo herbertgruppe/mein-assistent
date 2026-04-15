@@ -12,9 +12,13 @@ services:
       - input_docs:/app/input_docs
       - data:/app/data
       - auth:/app/auth
+      - users_data:/app/users
+      - users_config:/app/config
 
 volumes:
   transcripts:
   input_docs:
   data:
   auth:
+  users_data:
+  users_config:

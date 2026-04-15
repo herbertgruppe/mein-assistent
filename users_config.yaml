@@ -1,0 +1,14 @@
+credentials:
+  usernames:
+    sherbert:
+      email: s.herbert@helmut-herbert.de
+      failed_login_attempts: 0
+      logged_in: false
+      name: Dr. Sven Herbert
+      password: $2b$12$PLACEHOLDER_NEEDS_INITIAL_SETUP
+      role: admin
+
+cookie:
+  expiry_days: 30
+  key: 92c5f062c0aaed8b818eac4698db801437fea26cabd6f57d776b69057a1b6ee6
+  name: mein_assistent_auth
