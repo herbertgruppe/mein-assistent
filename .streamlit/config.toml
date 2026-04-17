@@ -3,3 +3,11 @@ gatherUsageStats = false
 
 [server]
 headless = true
+
+[theme]
+base = "light"
+primaryColor = "#1B2D4F"             # brand-600 — Herbert-Gruppe Marine-Blau
+backgroundColor = "#ffffff"           # Haupt-Content-Hintergrund
+secondaryBackgroundColor = "#f9fafb"  # Sidebar / Input-Hintergrund (gray-50)
+textColor = "#111827"                 # gray-900
+font = "sans serif"
