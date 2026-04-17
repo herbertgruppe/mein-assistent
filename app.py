@@ -322,49 +322,277 @@ def cached_find_asana_user(_agent_id: int, name: str, workspace_gid: Optional[st
     return agent.find_user_by_name(name, workspace_gid=workspace_gid)
 
 
-# Konfiguration
+# ============================================================================
+# PAGE CONFIG — Herbert Gruppe Corporate Design
+# ============================================================================
+_PAGE_ICON_PATH = Path(__file__).parent / "assets" / "HG-Logo_RGB_100x900PX.png"
 st.set_page_config(
-    page_title="Mein Assistent",
-    page_icon="🤖",
+    page_title="Mein Assistent – Herbert Gruppe",
+    page_icon=str(_PAGE_ICON_PATH) if _PAGE_ICON_PATH.exists() else "🤖",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS für besseres Design
+# ============================================================================
+# HERBERT GRUPPE DESIGN SYSTEM — globales CSS
+# Siehe HERBERT_DESIGN_SYSTEM.md (im Umfragetool-Repo) fuer die Spec.
+# ============================================================================
 st.markdown("""
 <style>
-    .stApp {
-        max-width: 1400px;
-    }
-    .user-message {
-        background-color: #e3f2fd;
-        padding: 10px 15px;
-        border-radius: 10px;
-        margin: 5px 0;
-    }
-    .assistant-message {
-        background-color: #f5f5f5;
-        padding: 10px 15px;
-        border-radius: 10px;
-        margin: 5px 0;
-    }
-    .agent-header {
-        font-weight: bold;
-        color: #1976d2;
-        margin-top: 10px;
-    }
-    .sidebar-metric {
-        padding: 10px;
-        background-color: #f0f0f0;
-        border-radius: 5px;
-        margin: 5px 0;
-    }
-    .file-table {
-        width: 100%;
-        margin: 10px 0;
-    }
+/* === Farb-Tokens === */
+:root {
+  --brand-50:  #f0f3f8;
+  --brand-100: #d9e0ec;
+  --brand-500: #4064a0;
+  --brand-600: #1B2D4F;   /* Primaer: Marine-Blau */
+  --brand-700: #162540;
+  --brand-800: #111d32;
+  --accent-50:  #fdf2f2;
+  --accent-400: #c94444;
+  --accent-500: #b52020;
+  --accent-600: #9B1A1A;  /* Akzent: Rot */
+  --accent-700: #7d1515;
+  --gray-50:  #f9fafb;
+  --gray-100: #f3f4f6;
+  --gray-200: #e5e7eb;
+  --gray-300: #d1d5db;
+  --gray-500: #6b7280;
+  --gray-700: #374151;
+  --gray-900: #111827;
+}
+
+/* === Sidebar: dunkel, wie Umfragetool === */
+section[data-testid="stSidebar"] {
+  background-color: var(--brand-600) !important;
+  border-right: none;
+}
+section[data-testid="stSidebar"] * {
+  color: rgba(255,255,255,0.85) !important;
+}
+section[data-testid="stSidebar"] h1,
+section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3,
+section[data-testid="stSidebar"] h4 {
+  color: #ffffff !important;
+  font-weight: 600;
+}
+section[data-testid="stSidebar"] .hg-tagline {
+  color: rgba(255,255,255,0.4) !important;
+  font-size: 0.6rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-top: 0.25rem;
+}
+section[data-testid="stSidebar"] hr {
+  border-color: rgba(255,255,255,0.1) !important;
+  margin: 1rem 0;
+}
+/* Sidebar-Links + Buttons: neutral mit Hover-Highlight */
+section[data-testid="stSidebar"] .stButton > button {
+  background-color: transparent !important;
+  color: rgba(255,255,255,0.8) !important;
+  border: 1px solid rgba(255,255,255,0.1) !important;
+  text-align: left !important;
+  padding: 0.5rem 0.75rem !important;
+  border-radius: 0.5rem !important;
+  font-weight: 500 !important;
+  transition: background 0.15s, color 0.15s;
+}
+section[data-testid="stSidebar"] .stButton > button:hover {
+  background-color: rgba(255,255,255,0.08) !important;
+  color: #ffffff !important;
+  border-color: rgba(255,255,255,0.2) !important;
+}
+/* Primary-Button in Sidebar: akzent-rot (z.B. Abmelden/Aktion) */
+section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+  background-color: var(--accent-600) !important;
+  color: #ffffff !important;
+  border-color: var(--accent-600) !important;
+}
+section[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
+  background-color: var(--accent-700) !important;
+}
+
+/* === Haupt-Content === */
+.main .block-container {
+  max-width: 1400px;
+  padding-top: 2rem;
+  padding-bottom: 3rem;
+}
+h1, h2, h3, h4 {
+  color: var(--gray-900);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+h1 { font-size: 1.875rem; margin-bottom: 0.25rem; }
+h2 { font-size: 1.5rem;   margin-top: 1.5rem; }
+h3 { font-size: 1.125rem; }
+
+/* === Cards (hg-card + Rueckwaertskompat alte user-/assistant-message) === */
+.hg-card, .user-message, .assistant-message {
+  background: #ffffff;
+  border: 1px solid var(--gray-200);
+  border-radius: 0.75rem;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 0.75rem;
+}
+.agent-header {
+  font-weight: 600;
+  color: var(--brand-600);
+  margin-top: 0.5rem;
+}
+.sidebar-metric {
+  padding: 0.75rem;
+  background-color: rgba(255,255,255,0.06) !important;
+  border-radius: 0.5rem;
+  margin: 0.375rem 0;
+}
+
+/* === Buttons im Haupt-Content === */
+.stButton > button[kind="primary"] {
+  background-color: var(--brand-600) !important;
+  color: #ffffff !important;
+  border: 1px solid var(--brand-600) !important;
+  border-radius: 0.5rem !important;
+  padding: 0.5rem 1rem !important;
+  font-weight: 500 !important;
+  transition: background 0.15s, border-color 0.15s;
+}
+.stButton > button[kind="primary"]:hover {
+  background-color: var(--brand-700) !important;
+  border-color: var(--brand-700) !important;
+}
+.stButton > button[kind="secondary"] {
+  background-color: #ffffff !important;
+  color: var(--gray-700) !important;
+  border: 1px solid var(--gray-300) !important;
+  border-radius: 0.5rem !important;
+  font-weight: 500 !important;
+}
+.stButton > button[kind="secondary"]:hover {
+  background-color: var(--gray-50) !important;
+  border-color: var(--gray-500) !important;
+}
+/* Danger-Zone: Primary-Button wird rot */
+.hg-danger-zone .stButton > button[kind="primary"] {
+  background-color: var(--accent-600) !important;
+  border-color: var(--accent-600) !important;
+}
+.hg-danger-zone .stButton > button[kind="primary"]:hover {
+  background-color: var(--accent-700) !important;
+  border-color: var(--accent-700) !important;
+}
+
+/* === Inputs === */
+.stTextInput > div > div > input,
+.stTextArea textarea,
+.stNumberInput input,
+.stDateInput input,
+.stSelectbox > div > div {
+  border-radius: 0.5rem !important;
+  border: 1px solid var(--gray-300) !important;
+  font-size: 0.875rem !important;
+}
+.stTextInput > div > div > input:focus,
+.stTextArea textarea:focus {
+  border-color: var(--brand-500) !important;
+  box-shadow: 0 0 0 1px var(--brand-500) !important;
+}
+
+/* === Tabs === */
+.stTabs [data-baseweb="tab-list"] {
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--gray-200);
+}
+.stTabs [data-baseweb="tab"] {
+  padding: 0.5rem 1rem;
+  color: var(--gray-500);
+  font-weight: 500;
+}
+.stTabs [aria-selected="true"] {
+  color: var(--brand-600) !important;
+  border-bottom: 2px solid var(--brand-600) !important;
+}
+
+/* === Expander === */
+.streamlit-expanderHeader, div[data-testid="stExpander"] summary {
+  font-weight: 500;
+  color: var(--gray-700);
+}
+
+/* === Notifications / Info-Boxes === */
+div[data-testid="stNotification"] {
+  border-radius: 0.5rem;
+}
+
+/* === Chat-Messages === */
+div[data-testid="stChatMessage"] {
+  border-radius: 0.75rem;
+  background: #ffffff;
+  border: 1px solid var(--gray-200);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+}
+
+/* === Streamlit-Branding dezent ausblenden === */
+#MainMenu { visibility: hidden; }
+footer { visibility: hidden; }
+header[data-testid="stHeader"] { background: transparent; }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ============================================================================
+# HERBERT DESIGN HELPERS
+# ============================================================================
+from contextlib import contextmanager as _hg_contextmanager
+
+@_hg_contextmanager
+def hg_card():
+    """Context Manager fuer eine Herbert-Card (weisser Hintergrund, abgerundet, subtiler Schatten).
+
+    Verwendung:
+        with hg_card():
+            st.subheader("Letzte Transkripte")
+            st.write("...")
+    """
+    st.markdown('<div class="hg-card">', unsafe_allow_html=True)
+    try:
+        yield
+    finally:
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
+@_hg_contextmanager
+def hg_danger_zone():
+    """Context Manager fuer rote Danger-Buttons. Alle Primary-Buttons
+    innerhalb werden akzent-rot dargestellt statt brand-blau.
+    """
+    st.markdown('<div class="hg-danger-zone">', unsafe_allow_html=True)
+    try:
+        yield
+    finally:
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
+def hg_badge(label: str, color: str = "brand"):
+    """Rendert ein kleines Pill-Badge.
+
+    color: 'brand' | 'accent' | 'success' | 'muted'
+    """
+    palette = {
+        "brand":   ("#d9e0ec", "#1B2D4F"),
+        "accent":  ("#fce4e4", "#9B1A1A"),
+        "success": ("#d1fae5", "#065f46"),
+        "muted":   ("#f3f4f6", "#374151"),
+    }
+    bg, fg = palette.get(color, palette["muted"])
+    st.markdown(
+        f'<span style="display:inline-block; padding:0.125rem 0.625rem; '
+        f'border-radius:9999px; background:{bg}; color:{fg}; '
+        f'font-size:0.75rem; font-weight:500;">{label}</span>',
+        unsafe_allow_html=True,
+    )
 
 
 class StreamlitOrchestrator:
@@ -745,45 +973,23 @@ def reset_chat_session():
 def render_sidebar():
     """Rendert die Sidebar mit Status-Informationen"""
     with st.sidebar:
-        # Herbert Gruppe Logo/Header mit User-Info
+        # Herbert Gruppe Logo (weiss auf brand-600 Hintergrund — vom globalen CSS gesteuert)
         username = st.session_state.get('username', '')
         display_name = st.session_state.get('name', username)
-        st.markdown(f"""
-        <div style="
-            background: linear-gradient(135deg, #003366 0%, #004080 100%);
-            padding: 20px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-            text-align: center;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        ">
-            <h1 style="
-                color: white;
-                font-size: 24px;
-                font-weight: bold;
-                margin: 0;
-                letter-spacing: 2px;
-            ">HERBERT</h1>
-            <p style="
-                color: #FFC107;
-                font-size: 12px;
-                margin: 5px 0 0 0;
-                letter-spacing: 1px;
-            ">INTELLIGENTE LÖSUNGEN</p>
-            <p style="
-                color: rgba(255,255,255,0.8);
-                font-size: 10px;
-                margin: 5px 0 0 0;
-            ">Management Assistent</p>
-            <p style="
-                color: rgba(255,255,255,0.9);
-                font-size: 11px;
-                margin: 8px 0 0 0;
-                border-top: 1px solid rgba(255,255,255,0.2);
-                padding-top: 8px;
-            ">👤 {display_name}</p>
-        </div>
-        """, unsafe_allow_html=True)
+        _logo_path = Path(__file__).parent / "assets" / "Logo Herbert Gruppe white ohne Hintergrund.png"
+        if _logo_path.exists():
+            st.image(str(_logo_path), width=180)
+        st.markdown(
+            '<p class="hg-tagline">MEIN ASSISTENT</p>',
+            unsafe_allow_html=True,
+        )
+        if display_name:
+            st.markdown(
+                f'<p style="color:rgba(255,255,255,0.55); font-size:0.75rem; '
+                f'margin-top:0.75rem;">Angemeldet als <strong style="color:rgba(255,255,255,0.85);">{display_name}</strong></p>',
+                unsafe_allow_html=True,
+            )
+        st.markdown("---")
 
         # Logout Button
         col_chat, col_logout = st.columns([3, 1])
@@ -8045,202 +8251,47 @@ def main():
     user_ctx = st.session_state['user_ctx']
     (user_ctx.data_dir / "agendas").mkdir(parents=True, exist_ok=True)
 
-    # Herbert Gruppe Custom CSS - Firmenfarben und Styling
+    # Kompaktheits-Overrides (Farb-/Layout-Tokens kommen aus dem globalen
+    # CSS-Block oben, der das Herbert-Design-System umsetzt).
     st.markdown("""
     <style>
-        /* Herbert Gruppe Hauptfarben */
-        :root {
-            --herbert-blue: #003366;
-            --herbert-blue-light: #004080;
-            --herbert-orange: #E84E0F;
-            --herbert-grey: #F5F5F5;
-            --herbert-yellow: #FFC107;
-        }
+        /* Streamlit Header + Deko-Balken + Toolbar komplett verstecken */
+        header[data-testid="stHeader"] { display: none !important; height: 0 !important; }
+        div[data-testid="stDecoration"] { display: none !important; }
+        div[data-testid="stToolbar"]    { display: none !important; }
+        #MainMenu { display: none !important; visibility: hidden !important; }
+        footer    { display: none !important; visibility: hidden !important; }
 
-        /* PLATZ-OPTIMIERUNG - MAXIMAL reduzierter Weißraum */
-
-        /* Streamlit Header komplett verstecken */
-        header[data-testid="stHeader"] {
-            display: none !important;
-            height: 0 !important;
-        }
-
-        /* Oberen Padding MINIMAL - praktisch kein Weißraum */
-        .main .block-container {
-            padding-top: 0.25rem !important;
-            padding-bottom: 0.5rem !important;
-            max-width: 100% !important;
-        }
-
-        /* Toolbar oben verstecken */
-        #MainMenu {
-            display: none !important;
-            visibility: hidden !important;
-        }
-
-        /* "Made with Streamlit" Footer verstecken */
-        footer {
-            display: none !important;
-            visibility: hidden !important;
-        }
-
-        /* Seitliche Margins reduzieren */
-        .main .block-container {
+        /* Weniger Weissraum im Haupt-Content — praktisch kein Top-Padding */
+        .main .block-container,
+        section.main > div.block-container,
+        div[data-testid="stMainBlockContainer"] {
+            padding-top: 0.5rem !important;
+            padding-bottom: 1rem !important;
             padding-left: 1.5rem !important;
             padding-right: 1.5rem !important;
+            max-width: 100% !important;
         }
+        [data-testid="stAppViewContainer"] { padding-top: 0 !important; }
+        [data-testid="stAppViewContainer"] > .main { padding-top: 0 !important; }
 
-        /* Tabs ULTRA kompakt */
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 2px !important;
-            padding: 3px !important;
-            margin-bottom: 3px !important;
-            margin-top: 0 !important;
-        }
-
-        .stTabs [data-baseweb="tab"] {
-            padding: 6px 12px !important;
-            margin: 0 !important;
-            font-size: 14px !important;
-        }
-
-        /* Tabs Container - kein Abstand oben */
-        .stTabs {
+        /* Erste H1/H2/H3 im Content ohne margin-top */
+        .main .block-container > div:first-child h1,
+        .main .block-container > div:first-child h2,
+        .main .block-container > div:first-child h3 {
             margin-top: 0 !important;
             padding-top: 0 !important;
         }
 
-        /* Headers kompakter */
-        h1, h2, h3 {
-            margin-top: 0.5rem !important;
-            margin-bottom: 0.5rem !important;
-        }
+        /* Links -> Brand-Blau */
+        a, a:visited { color: var(--brand-500) !important; }
+        a:hover      { color: var(--brand-700) !important; }
 
-        /* Divider kompakter */
-        hr {
-            margin-top: 0.5rem !important;
-            margin-bottom: 0.5rem !important;
-        }
+        /* Metrics -> Brand-Blau */
+        [data-testid="stMetricValue"] { color: var(--brand-600); }
 
-        /* Hauptbereich nach oben */
-        .main {
-            padding-top: 0 !important;
-        }
-
-        /* App View Container */
-        [data-testid="stAppViewContainer"] {
-            padding-top: 0 !important;
-        }
-
-        /* Hauptbereich Hintergrund */
-        .main {
-            background-color: var(--herbert-grey);
-        }
-
-        /* Primary Buttons - Herbert Orange */
-        .stButton > button[kind="primary"] {
-            background-color: var(--herbert-orange) !important;
-            border-color: var(--herbert-orange) !important;
-            color: white !important;
-        }
-
-        .stButton > button[kind="primary"]:hover {
-            background-color: #d14409 !important;
-            border-color: #d14409 !important;
-        }
-
-        /* Secondary Buttons - Herbert Blau */
-        .stButton > button[kind="secondary"] {
-            background-color: var(--herbert-blue) !important;
-            border-color: var(--herbert-blue) !important;
-            color: white !important;
-        }
-
-        .stButton > button[kind="secondary"]:hover {
-            background-color: var(--herbert-blue-light) !important;
-        }
-
-        /* Tabs - Herbert Blau */
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 8px;
-            background-color: white;
-            padding: 10px;
-            border-radius: 10px;
-        }
-
-        .stTabs [data-baseweb="tab"] {
-            background-color: var(--herbert-grey);
-            color: var(--herbert-blue);
-            border-radius: 5px;
-            padding: 10px 20px;
-            font-weight: 500;
-        }
-
-        .stTabs [aria-selected="true"] {
-            background-color: var(--herbert-blue) !important;
-            color: white !important;
-        }
-
-        /* Success Messages - Herbert Orange */
-        .stSuccess {
-            background-color: rgba(232, 78, 15, 0.1);
-            border-left-color: var(--herbert-orange);
-        }
-
-        /* Info Messages - Herbert Blau */
-        .stInfo {
-            background-color: rgba(0, 51, 102, 0.1);
-            border-left-color: var(--herbert-blue);
-        }
-
-        /* Expander - Herbert Styling */
-        .streamlit-expanderHeader {
-            background-color: white;
-            border: 1px solid #e0e0e0;
-            border-radius: 5px;
-            color: var(--herbert-blue);
-            font-weight: 500;
-        }
-
-        .streamlit-expanderHeader:hover {
-            background-color: var(--herbert-grey);
-            border-color: var(--herbert-blue);
-        }
-
-        /* Metrics - Herbert Colors */
-        [data-testid="stMetricValue"] {
-            color: var(--herbert-blue);
-        }
-
-        /* Sidebar Styling */
-        [data-testid="stSidebar"] {
-            background-color: #f8f9fa;
-        }
-
-        /* Links - Herbert Orange */
-        a {
-            color: var(--herbert-orange) !important;
-        }
-
-        a:hover {
-            color: #d14409 !important;
-        }
-
-        /* Progress Bar - Herbert Colors */
-        .stProgress > div > div > div {
-            background-color: var(--herbert-orange);
-        }
-
-        /* Text Input Focus - Herbert Blue */
-        .stTextInput > div > div > input:focus {
-            border-color: var(--herbert-blue);
-            box-shadow: 0 0 0 0.2rem rgba(0, 51, 102, 0.25);
-        }
-
-        /* Headers - Herbert Blue */
-        h1, h2, h3 {
-            color: var(--herbert-blue);
-        }
+        /* Progress Bar -> Brand-Blau */
+        .stProgress > div > div > div { background-color: var(--brand-600); }
     </style>
     """, unsafe_allow_html=True)
 
