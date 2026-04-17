@@ -34,8 +34,15 @@ from user_context import UserContext
 USERS_CONFIG_PATH = Path("config/users_config.yaml")
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def _load_users_config() -> dict:
-    """Lädt die User-Konfiguration aus YAML. Fallback auf Bundled-Datei."""
+    """Lädt die User-Konfiguration aus YAML. Fallback auf Bundled-Datei.
+
+    Performance: 60s-Cache — vermeidet YAML-Parse bei jedem Streamlit-Rerun
+    (wird in main() 2× pro Rerun aufgerufen). Bei Speichern wird der Cache
+    durch _save_users_config() via .clear() sofort invalidiert, sodass
+    Passwort-/Rollen-Änderungen unmittelbar wirksam sind.
+    """
     if USERS_CONFIG_PATH.exists():
         with open(USERS_CONFIG_PATH, 'r', encoding='utf-8') as f:
             return yaml.safe_load(f)
@@ -50,10 +57,12 @@ def _load_users_config() -> dict:
 
 
 def _save_users_config(config: dict):
-    """Speichert die User-Konfiguration."""
+    """Speichert die User-Konfiguration und invalidiert den Load-Cache."""
     USERS_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(USERS_CONFIG_PATH, 'w', encoding='utf-8') as f:
         yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
+    # Cache invalidieren, damit Änderungen sofort sichtbar sind
+    _load_users_config.clear()
 
 
 def _check_initial_setup_needed(config: dict) -> bool:
@@ -259,6 +268,28 @@ def cached_get_asana_user(_asana_agent):
     except Exception as e:
         print(f"[Cache] Fehler beim Laden des Users: {e}")
         return None
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def cached_find_asana_user(_agent_id: int, name: str, workspace_gid: Optional[str] = None):
+    """Cached: Sucht einen Asana-Nutzer nach Namen im Workspace (10 Min Cache).
+
+    Performance: Spart den API-Call get_users_for_workspace bei wiederholten
+    Task-Erstellungen mit gleichem Assignee. Der Agent selbst wird nicht
+    gehasht (per Streamlit-Konvention `_`-Präfix); stattdessen dient seine
+    id() als Cache-Key, damit pro Agent-Instanz (= pro User) ein Eintrag.
+
+    Args:
+        _agent_id: id() des AsanaAgent — wird als Cache-Differentiator genutzt,
+                   aber nicht an den Agent durchgereicht.
+        name: Name des Nutzers (Vorname, Nachname oder Email)
+        workspace_gid: Optionale Workspace GID
+
+    Returns:
+        Dict mit user info {gid, name, email} oder None wenn nicht gefunden.
+    """
+    agent = st.session_state.orchestrator.asana_agent
+    return agent.find_user_by_name(name, workspace_gid=workspace_gid)
 
 
 # Konfiguration
@@ -1242,8 +1273,13 @@ def render_chat_tab():
         """)
 
 
+@st.fragment
 def render_documents_tab():
-    """Rendert den Dokumente-Tab mit Upload-Funktion"""
+    """Rendert den Dokumente-Tab mit Upload-Funktion.
+
+    Performance: @st.fragment verhindert, dass Interaktionen in diesem Tab
+    ein Re-Rendering der übrigen 5 Tabs auslösen.
+    """
     st.header("📁 Dokumente verwalten")
 
     col1, col2 = st.columns([2, 1])
@@ -1405,8 +1441,12 @@ def get_archive_files_grouped(archive_dir: str = "newsletter_archiv") -> dict:
     return grouped_files
 
 
+@st.fragment
 def render_archive_tab():
-    """Rendert den Archiv-Tab mit Berichten und Ordnerverwaltung"""
+    """Rendert den Archiv-Tab mit Berichten und Ordnerverwaltung.
+
+    Performance: @st.fragment isoliert Re-Renders auf diesen Tab.
+    """
     st.header("📚 Berichte-Archiv")
 
     archive_dir = "newsletter_archiv"
@@ -1894,8 +1934,12 @@ def render_connection_status():
                     asana_status.update(label="✅ **Asana**", state="running")
 
 
+@st.fragment
 def render_dashboard_tab():
-    """Rendert den Mein Tag Dashboard-Tab mit optimierter Typografie"""
+    """Rendert den Mein Tag Dashboard-Tab mit optimierter Typografie.
+
+    Performance: @st.fragment isoliert Re-Renders auf diesen Tab.
+    """
 
     # Custom CSS für bessere Lesbarkeit bei langen Texten
     st.markdown("""
@@ -7511,8 +7555,8 @@ def render_transcripts_tab_OLD():
                                                             break
 
                                                     if not found:
-                                                        # Letzter Fallback: API-Call (nur wenn wirklich nicht im Cache)
-                                                        user_info = asana_agent.find_user_by_name(mapped_name)
+                                                        # Letzter Fallback: API-Call (Streamlit-Cache, 10 Min)
+                                                        user_info = cached_find_asana_user(id(asana_agent), mapped_name)
                                                         if user_info:
                                                             assignee_gid = user_info['gid']
                                                             # Cache aktualisieren für nächstes Mal
@@ -7718,8 +7762,12 @@ def render_transcripts_tab_OLD():
                 st.rerun()
 
 
+@st.fragment
 def render_settings_tab():
-    """Einstellungen-Tab: Per-User Credentials für Outlook und Asana."""
+    """Einstellungen-Tab: Per-User Credentials für Outlook und Asana.
+
+    Performance: @st.fragment isoliert Re-Renders auf diesen Tab.
+    """
     st.header("⚙️ Einstellungen")
     user_ctx = st.session_state.get('user_ctx')
     if not user_ctx:
@@ -7830,8 +7878,12 @@ def render_initial_setup(config: dict):
     return
 
 
+@st.fragment
 def render_admin_panel():
-    """Admin-Bereich: User verwalten (nur für Admins)."""
+    """Admin-Bereich: User verwalten (nur für Admins).
+
+    Performance: @st.fragment isoliert Re-Renders auf diesen Tab.
+    """
     config = _load_users_config()
     users = config.get('credentials', {}).get('usernames', {})
 
@@ -8246,9 +8298,12 @@ def delete_wip_item(item: Dict[str, Any], wip_dir: Path):
 
 
 
+@st.fragment
 def render_transcripts_tab():
     """
-    Neue Meeting Manager Struktur mit Liste-basierter Navigation
+    Neue Meeting Manager Struktur mit Liste-basierter Navigation.
+
+    Performance: @st.fragment isoliert Re-Renders auf diesen Tab.
 
     Workflow:
     1. Upload-Bereich (immer oben)
