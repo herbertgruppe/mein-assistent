@@ -8255,20 +8255,33 @@ def main():
     # CSS-Block oben, der das Herbert-Design-System umsetzt).
     st.markdown("""
     <style>
-        /* Streamlit Header komplett verstecken */
+        /* Streamlit Header + Deko-Balken + Toolbar komplett verstecken */
         header[data-testid="stHeader"] { display: none !important; height: 0 !important; }
+        div[data-testid="stDecoration"] { display: none !important; }
+        div[data-testid="stToolbar"]    { display: none !important; }
         #MainMenu { display: none !important; visibility: hidden !important; }
         footer    { display: none !important; visibility: hidden !important; }
 
-        /* Weniger Weissraum im Haupt-Content */
-        .main .block-container {
-            padding-top: 1rem !important;
+        /* Weniger Weissraum im Haupt-Content — praktisch kein Top-Padding */
+        .main .block-container,
+        section.main > div.block-container,
+        div[data-testid="stMainBlockContainer"] {
+            padding-top: 0.5rem !important;
             padding-bottom: 1rem !important;
             padding-left: 1.5rem !important;
             padding-right: 1.5rem !important;
             max-width: 100% !important;
         }
         [data-testid="stAppViewContainer"] { padding-top: 0 !important; }
+        [data-testid="stAppViewContainer"] > .main { padding-top: 0 !important; }
+
+        /* Erste H1/H2/H3 im Content ohne margin-top */
+        .main .block-container > div:first-child h1,
+        .main .block-container > div:first-child h2,
+        .main .block-container > div:first-child h3 {
+            margin-top: 0 !important;
+            padding-top: 0 !important;
+        }
 
         /* Links -> Brand-Blau */
         a, a:visited { color: var(--brand-500) !important; }
