@@ -98,8 +98,15 @@ _bg_jobs_lock = threading.Lock()
 
 def _run_protocol_generation_bg(item_id: str, file_path_str: str, meeting_title: str, llm,
                                  attendees=None, meeting_date=None, agenda_text=None,
-                                 protocol_cache_dir: str = None):
-    """Läuft in einem Background-Thread. Erzeugt das Protokoll ohne den UI-Thread zu blockieren."""
+                                 protocol_cache_dir: str = None,
+                                 wip_dir_str: str = None):
+    """Läuft in einem Background-Thread. Erzeugt das Protokoll ohne den UI-Thread zu blockieren.
+
+    Persistenz-Strategie (wichtig! — darf Browser-Schließen überleben):
+    - Disk-Cache unter STABILEM Key `item_id` (nicht file_path.stem, der sich beim Rename ändert)
+    - Zusätzlich: Protokoll direkt in die WIP-JSON schreiben, falls ein wip_dir_str übergeben wurde.
+      Damit sieht Schritt 2 das Protokoll auch, wenn der UI-Thread nicht mehr läuft (geschlossener Browser).
+    """
     try:
         file_path = Path(file_path_str)
 
@@ -122,10 +129,31 @@ def _run_protocol_generation_bg(item_id: str, file_path_str: str, meeting_title:
 
         protocol = ''.join(protocol_parts)
 
-        # Cache auf Disk schreiben
+        # Cache auf Disk schreiben — STABILER Key (item_id), unabhängig von Rename
         cache_dir = Path(protocol_cache_dir) if protocol_cache_dir else Path("transcripts/protocol_cache")
         cache_dir.mkdir(parents=True, exist_ok=True)
-        (cache_dir / f"{file_path.stem}_protocol.md").write_text(protocol, encoding='utf-8')
+        (cache_dir / f"{item_id}_protocol.md").write_text(protocol, encoding='utf-8')
+        # Zusätzlich unter altem Stem-Key schreiben (Rückwärtskompat, falls UI sie so erwartet)
+        try:
+            (cache_dir / f"{file_path.stem}_protocol.md").write_text(protocol, encoding='utf-8')
+        except Exception:
+            pass
+
+        # WIP-JSON direkt updaten — überlebt geschlossenen Browser
+        if wip_dir_str:
+            try:
+                import json as _json
+                wip_file = Path(wip_dir_str) / f"item_{item_id}.json"
+                if wip_file.exists():
+                    with open(wip_file, 'r', encoding='utf-8') as f:
+                        wip_item = _json.load(f)
+                    if not wip_item.get('protocol'):
+                        wip_item['protocol'] = protocol
+                        wip_item['status'] = 'processing'
+                        with open(wip_file, 'w', encoding='utf-8') as f:
+                            _json.dump(wip_item, f, indent=2, ensure_ascii=False, default=str)
+            except Exception as _e:
+                print(f"[BG-Protocol] WIP-Update fehlgeschlagen: {_e}")
 
         with _bg_jobs_lock:
             _bg_protocol_jobs[item_id]['status'] = 'done'
@@ -139,7 +167,8 @@ def _run_protocol_generation_bg(item_id: str, file_path_str: str, meeting_title:
 
 def start_bg_protocol_generation(item_id: str, file_path_str: str, meeting_title: str, llm, filename: str,
                                    attendees=None, meeting_date=None, agenda_text=None,
-                                   protocol_cache_dir: str = None):
+                                   protocol_cache_dir: str = None,
+                                   wip_dir_str: str = None):
     """Startet die Protokoll-Erstellung in einem Background-Thread."""
     with _bg_jobs_lock:
         _bg_protocol_jobs[item_id] = {
@@ -157,6 +186,7 @@ def start_bg_protocol_generation(item_id: str, file_path_str: str, meeting_title
             'meeting_date': meeting_date,
             'agenda_text': agenda_text,
             'protocol_cache_dir': protocol_cache_dir,
+            'wip_dir_str': wip_dir_str,
         },
         daemon=True
     )
@@ -8984,7 +9014,8 @@ def _start_bg_protocol_for_item(idx: int, selected_event: dict):
         attendees=bg_attendees or None,
         meeting_date=bg_date,
         agenda_text=bg_agenda,
-        protocol_cache_dir=str(_get_user_ctx().protocol_cache)
+        protocol_cache_dir=str(_get_user_ctx().protocol_cache),
+        wip_dir_str=str(_get_user_ctx().wip_dir)
     )
     st.toast("⏳ Protokoll wird im Hintergrund erstellt...", icon="🚀")
 
@@ -9135,14 +9166,21 @@ def render_step_create_protocol(idx: int):
                 st.toast("✅ Hintergrund-Protokoll übernommen!")
 
     # Falls immer noch kein Protokoll: Cache auf Disk prüfen
+    # Stabiler Key ist item['id'] — überlebt Renames in Schritt 1.
+    # Fallback: alter Stem-basierter Key (Rückwärtskompat für vor-Bugfix erzeugte Caches).
     if not item.get('protocol'):
         cache_dir = _get_user_ctx().protocol_cache
-        cache_file = cache_dir / f"{file_path.stem}_protocol.md"
-        if cache_file.exists():
-            item['protocol'] = cache_file.read_text(encoding='utf-8')
-            st.session_state['transcript_queue'][idx] = item
-            save_wip_item(item, wip_dir)
-            st.toast("✅ Protokoll aus Cache geladen!")
+        candidate_files = [
+            cache_dir / f"{item['id']}_protocol.md",
+            cache_dir / f"{file_path.stem}_protocol.md",
+        ]
+        for cache_file in candidate_files:
+            if cache_file.exists():
+                item['protocol'] = cache_file.read_text(encoding='utf-8')
+                st.session_state['transcript_queue'][idx] = item
+                save_wip_item(item, wip_dir)
+                st.toast("✅ Protokoll aus Cache geladen!")
+                break
 
     # Prüfe ob Quelldatei noch existiert (nur wenn noch kein Protokoll erstellt wurde)
     if not item.get('protocol') and not file_path.exists():
