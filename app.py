@@ -10,9 +10,7 @@ import signal
 import time
 import threading
 import yaml
-import bcrypt
 import streamlit as st
-import streamlit_authenticator as stauth
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional, Any
@@ -36,23 +34,31 @@ USERS_CONFIG_PATH = Path("config/users_config.yaml")
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _load_users_config() -> dict:
-    """Lädt die User-Konfiguration aus YAML. Fallback auf Bundled-Datei.
+    """Lädt Rollen-Mapping aus YAML.
 
-    Performance: 60s-Cache — vermeidet YAML-Parse bei jedem Streamlit-Rerun
-    (wird in main() 2× pro Rerun aufgerufen). Bei Speichern wird der Cache
-    durch _save_users_config() via .clear() sofort invalidiert, sodass
-    Passwort-/Rollen-Änderungen unmittelbar wirksam sind.
+    Seit Phase 2.4 (SSO) enthält die Datei nur noch Rollen + optionales
+    Username-Mapping — Passwörter/Sessions liegen vollständig bei Authentik.
+
+    Erwartetes Schema:
+        roles:
+          email@domain: admin|user
+        default_role: user
+        username_map:
+          email@domain: interner_username   # optional
+
+    Cache: 60s TTL. `_save_users_config()` ruft `.clear()` auf, damit
+    Rollen-Änderungen sofort sichtbar sind.
     """
     if USERS_CONFIG_PATH.exists():
         with open(USERS_CONFIG_PATH, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
+            return yaml.safe_load(f) or {}
     # Fallback: Datei aus dem App-Verzeichnis (erster Start)
     bundled = Path("users_config.yaml")
     if bundled.exists():
         USERS_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(bundled, USERS_CONFIG_PATH)
         with open(USERS_CONFIG_PATH, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
+            return yaml.safe_load(f) or {}
     return {}
 
 
@@ -65,14 +71,27 @@ def _save_users_config(config: dict):
     _load_users_config.clear()
 
 
-def _check_initial_setup_needed(config: dict) -> bool:
-    """Prüft ob der initiale Setup (Passwort setzen) nötig ist."""
-    users = config.get('credentials', {}).get('usernames', {})
-    for username, user_data in users.items():
-        pw = user_data.get('password', '')
-        if 'PLACEHOLDER' in str(pw):
-            return True
-    return False
+def get_user_role(email: str) -> str:
+    """Liefert die App-Rolle (admin|user) für eine Authentik-Email."""
+    cfg = _load_users_config()
+    return cfg.get('roles', {}).get((email or '').lower(), cfg.get('default_role', 'user'))
+
+
+def get_username(email: str) -> str:
+    """Mapped Authentik-Email auf den internen Username (UserContext-Schlüssel).
+
+    Priorität: explizite Zuordnung in `username_map:` der users_config.yaml,
+    sonst Fallback auf "alles vor @, Punkte raus, lowercase" — so bleibt
+    z.B. s.herbert@herbert.de → "sherbert" und die bestehenden
+    per-User-Verzeichnisse (/app/users/sherbert/...) bleiben zugreifbar.
+    """
+    email = (email or '').lower()
+    cfg = _load_users_config()
+    mapped = cfg.get('username_map', {}).get(email)
+    if mapped:
+        return mapped
+    local = email.split('@')[0] if '@' in email else email
+    return local.replace('.', '').replace('-', '').replace('+', '') or 'anon'
 
 
 # ============================================================================
@@ -1000,14 +1019,11 @@ def render_sidebar():
                 st.rerun()
         with col_logout:
             if st.button("🚪", help="Abmelden", use_container_width=True):
-                # Logout über streamlit-authenticator
-                authenticator = st.session_state.get('authenticator')
-                if authenticator:
-                    authenticator.logout(location='unrendered')
-                for key in ['authentication_status', 'username', 'name', 'user_ctx', 'authenticator']:
+                # Session-State räumen, dann Authentik-Logout über Streamlit-OIDC
+                for key in ['username', 'email', 'name', 'role', 'user_ctx']:
                     if key in st.session_state:
                         del st.session_state[key]
-                st.rerun()
+                st.logout()
 
         st.markdown("---")
 
@@ -8060,135 +8076,70 @@ def render_settings_tab():
 
     st.markdown("---")
 
-    # Passwort ändern
-    st.subheader("🔑 Passwort ändern")
-    old_pw = st.text_input("Aktuelles Passwort", type="password", key="change_pw_old")
-    new_pw = st.text_input("Neues Passwort", type="password", key="change_pw_new")
-    confirm_pw = st.text_input("Neues Passwort bestätigen", type="password", key="change_pw_confirm")
-
-    if st.button("🔑 Passwort ändern", key="change_pw_btn"):
-        if not old_pw or not new_pw:
-            st.error("Bitte alle Felder ausfüllen.")
-        elif new_pw != confirm_pw:
-            st.error("Neue Passwörter stimmen nicht überein.")
-        elif len(new_pw) < 6:
-            st.error("Passwort muss mindestens 6 Zeichen haben.")
-        else:
-            config = _load_users_config()
-            stored_hash = config['credentials']['usernames'][user_ctx.username]['password']
-            if bcrypt.checkpw(old_pw.encode(), stored_hash.encode()):
-                hashed = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
-                config['credentials']['usernames'][user_ctx.username]['password'] = hashed
-                _save_users_config(config)
-                st.success("✅ Passwort geändert!")
-            else:
-                st.error("❌ Aktuelles Passwort ist falsch.")
-
-
-def render_initial_setup(config: dict):
-    """Zeigt den Initial-Setup-Screen (Passwort setzen) beim ersten Start."""
-    st.title("🔧 Ersteinrichtung")
-    st.info("Willkommen! Bitte setzen Sie Ihr Passwort, um die App zu starten.")
-
-    users = config.get('credentials', {}).get('usernames', {})
-    for username, user_data in users.items():
-        pw = user_data.get('password', '')
-        if 'PLACEHOLDER' not in str(pw):
-            continue
-        st.subheader(f"Passwort für: **{user_data.get('name', username)}** ({username})")
-        new_pw = st.text_input("Neues Passwort", type="password", key=f"setup_pw_{username}")
-        confirm_pw = st.text_input("Passwort bestätigen", type="password", key=f"setup_pw_confirm_{username}")
-
-        if st.button("✅ Passwort setzen", key=f"setup_btn_{username}", type="primary"):
-            if not new_pw or len(new_pw) < 6:
-                st.error("Passwort muss mindestens 6 Zeichen haben.")
-            elif new_pw != confirm_pw:
-                st.error("Passwörter stimmen nicht überein.")
-            else:
-                hashed = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
-                config['credentials']['usernames'][username]['password'] = hashed
-                _save_users_config(config)
-                st.success("✅ Passwort gesetzt! Die App wird neu geladen...")
-                time.sleep(1)
-                st.rerun()
-    return
+    # Hinweis: Passwort-Änderung passiert jetzt im Herbert-Portal
+    st.subheader("🔑 Konto & Passwort")
+    st.info(
+        "Dein Passwort verwaltest du zentral im **Herbert-Portal**. "
+        "Dort kannst du es auch zurücksetzen oder 2-Faktor-Authentifizierung einrichten."
+    )
+    st.link_button(
+        "🌐 Zum Herbert-Portal",
+        "https://auth.herbertgruppe.com/if/user/",
+        use_container_width=False,
+    )
 
 
 @st.fragment
 def render_admin_panel():
-    """Admin-Bereich: User verwalten (nur für Admins).
+    """Admin-Bereich: Rollen verwalten (nur für Admins).
 
+    Seit Phase 2.4 (SSO) werden User selbst in Authentik angelegt; diese
+    Seite mapped nur noch Authentik-Emails auf App-Rollen (admin|user).
     Performance: @st.fragment isoliert Re-Renders auf diesen Tab.
     """
     config = _load_users_config()
-    users = config.get('credentials', {}).get('usernames', {})
+    roles = config.setdefault('roles', {})
+    default_role = config.get('default_role', 'user')
 
-    st.subheader("👥 Benutzerverwaltung")
+    st.subheader("👥 Rollen-Verwaltung")
+    st.caption(
+        "Benutzer-Accounts selbst werden im [Herbert-Portal](https://auth.herbertgruppe.com/if/admin/) "
+        f"angelegt. Hier legst du nur fest, welche App-Rolle eine Email hat. "
+        f"Nicht gelistete User bekommen die Default-Rolle **{default_role}**."
+    )
 
-    # Bestehende User anzeigen
-    for username, user_data in users.items():
-        col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
-        with col1:
-            st.text(f"👤 {user_data.get('name', username)}")
-        with col2:
-            st.text(f"📧 {user_data.get('email', '-')}")
-        with col3:
-            role = user_data.get('role', 'user')
-            st.text(f"🔑 {role}")
-        with col4:
-            if username != st.session_state.get('username'):
-                if st.button("🗑️", key=f"del_user_{username}", help=f"User {username} löschen"):
-                    del config['credentials']['usernames'][username]
-                    _save_users_config(config)
-                    st.success(f"User {username} gelöscht.")
-                    st.rerun()
+    # Bestehende Rollen-Einträge anzeigen
+    if not roles:
+        st.info("Noch keine expliziten Rollen-Zuweisungen.")
+    else:
+        for email, role in sorted(roles.items()):
+            col1, col2, col3 = st.columns([3, 1, 1])
+            with col1:
+                st.text(f"📧 {email}")
+            with col2:
+                st.text(f"🔑 {role}")
+            with col3:
+                if email != st.session_state.get('email'):
+                    if st.button("🗑️", key=f"del_role_{email}", help=f"Rolle für {email} entfernen"):
+                        del config['roles'][email]
+                        _save_users_config(config)
+                        st.success(f"Rollen-Zuweisung für {email} entfernt.")
+                        st.rerun()
 
     st.markdown("---")
 
-    # Neuen User anlegen
-    with st.expander("➕ Neuen Benutzer anlegen"):
-        new_username = st.text_input("Benutzername", key="new_user_username",
-                                      help="Kurzer Name ohne Sonderzeichen")
-        new_name = st.text_input("Voller Name", key="new_user_name")
-        new_email = st.text_input("E-Mail", key="new_user_email")
-        new_pw = st.text_input("Passwort", type="password", key="new_user_pw")
-        new_role = st.selectbox("Rolle", ["user", "admin"], key="new_user_role")
-
-        if st.button("✅ Benutzer anlegen", key="create_user_btn", type="primary"):
-            if not new_username or not new_name or not new_pw:
-                st.error("Benutzername, Name und Passwort sind Pflichtfelder.")
-            elif new_username in users:
-                st.error(f"Benutzername '{new_username}' existiert bereits.")
-            elif len(new_pw) < 6:
-                st.error("Passwort muss mindestens 6 Zeichen haben.")
+    # Neue Rollen-Zuweisung
+    with st.expander("➕ Rolle zuweisen / ändern"):
+        new_email = st.text_input("Email (wie in Authentik)", key="new_role_email")
+        new_role = st.selectbox("Rolle", ["user", "admin"], key="new_role_val")
+        if st.button("✅ Rolle speichern", key="save_role_btn", type="primary"):
+            if not new_email or '@' not in new_email:
+                st.error("Bitte eine gültige Email angeben.")
             else:
-                hashed = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode()
-                config['credentials']['usernames'][new_username] = {
-                    'name': new_name,
-                    'email': new_email,
-                    'password': hashed,
-                    'role': new_role,
-                    'failed_login_attempts': 0,
-                    'logged_in': False,
-                }
+                config.setdefault('roles', {})[new_email.lower()] = new_role
                 _save_users_config(config)
-                # Verzeichnisse für neuen User anlegen
-                UserContext(new_username).ensure_dirs()
-                st.success(f"✅ Benutzer '{new_username}' angelegt!")
+                st.success(f"✅ {new_email} → {new_role}")
                 st.rerun()
-
-    # Passwort zurücksetzen
-    with st.expander("🔑 Passwort zurücksetzen"):
-        reset_user = st.selectbox("Benutzer", list(users.keys()), key="reset_pw_user")
-        reset_pw = st.text_input("Neues Passwort", type="password", key="reset_pw_input")
-        if st.button("🔑 Passwort ändern", key="reset_pw_btn"):
-            if not reset_pw or len(reset_pw) < 6:
-                st.error("Passwort muss mindestens 6 Zeichen haben.")
-            else:
-                hashed = bcrypt.hashpw(reset_pw.encode(), bcrypt.gensalt()).decode()
-                config['credentials']['usernames'][reset_user]['password'] = hashed
-                _save_users_config(config)
-                st.success(f"✅ Passwort für '{reset_user}' geändert.")
 
 
 def main():
@@ -8197,38 +8148,35 @@ def main():
     main_start = time.time()
     print(f"\n[DEBUG] ========== MAIN START @ {main_start} ==========")
 
-    # ---- Authentication Gate ----
-    config = _load_users_config()
-
-    if not config:
-        st.error("⚠️ Keine Benutzerkonfiguration gefunden. Bitte users_config.yaml erstellen.")
-        st.stop()
-
-    # Initial Setup: Passwort setzen beim ersten Start
-    if _check_initial_setup_needed(config):
-        render_initial_setup(config)
-        st.stop()
-
-    authenticator = stauth.Authenticate(
-        config['credentials'],
-        config['cookie']['name'],
-        config['cookie']['key'],
-        config['cookie']['expiry_days']
-    )
-    st.session_state['authenticator'] = authenticator
-
-    authenticator.login(location='main')
-
-    if st.session_state.get("authentication_status") is None:
-        st.info("Bitte melden Sie sich an.")
-        st.stop()
-    elif st.session_state.get("authentication_status") is False:
-        st.error("❌ Benutzername oder Passwort falsch.")
+    # ---- Authentication Gate (Authentik OIDC via st.login) ----
+    if not st.experimental_user.is_logged_in:
+        # Portal-Login-Screen — Logo + ein Button
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            st.markdown(
+                "<div style='text-align:center; padding-top: 3rem;'>"
+                "<h1 style='margin-bottom:0.25rem;'>🤖 Mein Assistent</h1>"
+                "<p style='color:#888; margin-top:0;'>Interner Zugang über das Herbert-Portal</p>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown("<div style='height: 1.5rem'></div>", unsafe_allow_html=True)
+            if st.button("🔐 Mit Herbert-Portal anmelden", type="primary", use_container_width=True):
+                st.login("authentik")
         st.stop()
 
     # ---- Authentifiziert: User-Kontext aufbauen ----
-    username = st.session_state["username"]
-    print(f"[AUTH] User eingeloggt: {username}")
+    email = (st.experimental_user.email or '').lower()
+    display_name = st.experimental_user.name or (email.split('@')[0] if email else 'User')
+    username = get_username(email)
+    role = get_user_role(email)
+
+    print(f"[AUTH] User eingeloggt: {username} ({email}, role={role})")
+
+    st.session_state['username'] = username
+    st.session_state['email'] = email
+    st.session_state['name'] = display_name
+    st.session_state['role'] = role
 
     # UserContext erstellen/laden
     if 'user_ctx' not in st.session_state or st.session_state['user_ctx'].username != username:
@@ -8302,9 +8250,7 @@ def main():
 
     # Hauptbereich mit Tabs - Admin-Tab nur für Admins
     tabs_start = time.time()
-    config = _load_users_config()
-    user_role = config.get('credentials', {}).get('usernames', {}).get(username, {}).get('role', 'user')
-    is_admin = (user_role == 'admin')
+    is_admin = (st.session_state.get('role') == 'admin')
 
     tab_labels = ["📊 Mein Tag", "🎙️ Meeting Manager", "📁 Dokumente", "📚 Archiv", "⚙️ Einstellungen"]
     if is_admin:

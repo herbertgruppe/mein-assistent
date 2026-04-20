@@ -14,6 +14,8 @@ services:
       - auth:/app/auth
       - users_data:/app/users
       - users_config:/app/config
+      # OIDC-Secrets für st.login() — NICHT im Image, read-only gemountet
+      - ./.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
 
 volumes:
   transcripts:

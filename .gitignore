@@ -1,6 +1,9 @@
 # Environment variables
 .env
 
+# Streamlit Secrets (OIDC client_secret, cookie_secret)
+.streamlit/secrets.toml
+
 # Python
 __pycache__/
 *.py[cod]
