@@ -4,7 +4,8 @@ services:
     container_name: mein-assistent
     restart: unless-stopped
     ports:
-      - "8501:8501"
+      # Loopback-only — Traffic zwingend durch nginx/TLS
+      - "127.0.0.1:8501:8501"
     env_file:
       - .env
     volumes:

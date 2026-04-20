@@ -5,6 +5,7 @@ WORKDIR /app
 # System-Abhängigkeiten (inkl. WeasyPrint für PDF-Generierung)
 RUN apt-get update && apt-get install -y \
     build-essential \
+    curl \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
     libgdk-pixbuf-2.0-0 \
