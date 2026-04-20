@@ -8149,7 +8149,7 @@ def main():
     print(f"\n[DEBUG] ========== MAIN START @ {main_start} ==========")
 
     # ---- Authentication Gate (Authentik OIDC via st.login) ----
-    if not st.experimental_user.is_logged_in:
+    if not st.user.is_logged_in:
         # Portal-Login-Screen — Logo + ein Button
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
@@ -8166,8 +8166,8 @@ def main():
         st.stop()
 
     # ---- Authentifiziert: User-Kontext aufbauen ----
-    email = (st.experimental_user.email or '').lower()
-    display_name = st.experimental_user.name or (email.split('@')[0] if email else 'User')
+    email = (st.user.email or '').lower()
+    display_name = st.user.name or (email.split('@')[0] if email else 'User')
     username = get_username(email)
     role = get_user_role(email)
 
