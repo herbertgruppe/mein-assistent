@@ -42,7 +42,7 @@ def render_sidebar():
                 for key in ['username', 'email', 'name', 'role', 'user_ctx']:
                     if key in st.session_state:
                         del st.session_state[key]
-                st.logout()
+                st.logout(redirect_to_provider=True)
 
         st.markdown("---")
 

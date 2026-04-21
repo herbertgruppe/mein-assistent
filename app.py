@@ -63,40 +63,11 @@ def main():
     main_start = time.time()
     print(f"\n[DEBUG] ========== MAIN START @ {main_start} ==========")
 
-    # ---- Authentication Gate (Authentik OIDC via st.login) ----
+    # ---- Authentication Gate ----
+    # nginx Forward Auth stellt sicher, dass nur authentifizierte Nutzer hier ankommen.
+    # st.login() holt die OIDC-Identity (Email, Name) ohne erneuten Login-Dialog.
     if not st.user.is_logged_in:
-        # Login-Screen: dunkler Brand-Hintergrund, zentriertes weißes Card mit Logo
-        st.markdown("""
-        <style>
-        [data-testid="stAppViewContainer"] {
-            background-color: #1B2D4F !important;
-        }
-        [data-testid="stAppViewContainer"] > .main {
-            background: transparent;
-        }
-        .main .block-container {
-            background: transparent !important;
-            padding-top: 6rem;
-        }
-        </style>
-        """, unsafe_allow_html=True)
-
-        _, mid, _ = st.columns([1, 2, 1])
-        with mid:
-            st.markdown('<div class="hg-card" style="text-align:center;">', unsafe_allow_html=True)
-            _logo_claim = Path(__file__).parent / "assets" / "Herbert-Gruppe-Logo-Claim_RGB.jpg"
-            if _logo_claim.exists():
-                st.image(str(_logo_claim), width=260)
-            else:
-                st.markdown("### Herbert Gruppe")
-            st.markdown(
-                '<p style="color:var(--gray-500); margin:0.5rem 0 1.5rem;">Mein Assistent &mdash; Interner Zugang</p>',
-                unsafe_allow_html=True,
-            )
-            st.markdown('<hr style="border-color:var(--gray-200); margin-bottom:1.5rem;">', unsafe_allow_html=True)
-            if st.button("Mit Herbert-Portal anmelden", type="primary", use_container_width=True):
-                st.login("authentik")
-            st.markdown('</div>', unsafe_allow_html=True)
+        st.login("authentik")
         st.stop()
 
     # ---- Authentifiziert: User-Kontext aufbauen ----
