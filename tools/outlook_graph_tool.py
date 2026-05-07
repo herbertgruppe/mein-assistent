@@ -1851,3 +1851,210 @@ class OutlookGraphTool:
             import traceback
             traceback.print_exc()
             return {'success': False, 'error': error_msg}
+
+    # ───────────────────────────────────────────────────────────────────────
+    # Subfolder / Transkripte (für Meeting-Protokoll-Workflow)
+    # ───────────────────────────────────────────────────────────────────────
+    def find_subfolder_id(
+        self,
+        name: str,
+        parent: str = "inbox",
+    ) -> Optional[str]:
+        """
+        Sucht einen Unterordner unter einem Eltern-Ordner und liefert seine ID.
+
+        Args:
+            name: Name des Unterordners (z.B. "Transkripte")
+            parent: ID oder Well-Known-Name des Eltern-Ordners (z.B. "inbox")
+
+        Returns:
+            Folder-ID oder None wenn nicht gefunden
+        """
+        if not self._ensure_valid_token():
+            return None
+
+        try:
+            import requests
+
+            url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{parent}/childFolders"
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+            }
+
+            response = requests.get(url, headers=headers, params={"$top": 100})
+            if response.status_code == 401 and self._refresh_access_token():
+                headers["Authorization"] = f"Bearer {self.access_token}"
+                response = requests.get(url, headers=headers, params={"$top": 100})
+
+            if response.status_code != 200:
+                print(f"[OutlookGraphTool] find_subfolder_id: HTTP {response.status_code}")
+                return None
+
+            for folder in response.json().get("value", []):
+                if folder.get("displayName") == name:
+                    return folder.get("id")
+
+            print(f"[OutlookGraphTool] Unterordner '{name}' unter '{parent}' nicht gefunden")
+            return None
+
+        except Exception as exc:  # noqa: BLE001
+            print(f"[OutlookGraphTool] Fehler in find_subfolder_id: {exc}")
+            return None
+
+    def get_unread_in_folder(
+        self,
+        folder_id: str,
+        max_results: int = 25,
+        include_attachment_meta: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """
+        Liefert ungelesene E-Mails in einem bestimmten Ordner inkl. Anhang-Metadaten.
+
+        Args:
+            folder_id: Folder-ID (aus find_subfolder_id)
+            max_results: Maximale Anzahl Treffer
+            include_attachment_meta: Wenn True, Anhänge mit ID/Name/Größe ausliefern
+
+        Returns:
+            Liste von E-Mail-Dictionaries
+        """
+        if not self._ensure_valid_token():
+            return []
+
+        try:
+            import requests
+
+            url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder_id}/messages"
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+                # Plain-Text-Body statt HTML — kleiner & einfacher zu parsen
+                "Prefer": 'outlook.body-content-type="text"',
+            }
+            select_fields = (
+                "id,subject,from,receivedDateTime,bodyPreview,body,"
+                "hasAttachments,isRead"
+            )
+            params = {
+                "$filter": "isRead eq false",
+                "$top": max_results,
+                "$orderby": "receivedDateTime desc",
+                "$select": select_fields,
+            }
+            if include_attachment_meta:
+                params["$expand"] = "attachments($select=id,name,size,contentType)"
+
+            response = requests.get(url, headers=headers, params=params)
+            if response.status_code == 401 and self._refresh_access_token():
+                headers["Authorization"] = f"Bearer {self.access_token}"
+                response = requests.get(url, headers=headers, params=params)
+
+            if response.status_code != 200:
+                print(
+                    f"[OutlookGraphTool] get_unread_in_folder: "
+                    f"HTTP {response.status_code} — {response.text[:200]}"
+                )
+                return []
+
+            messages = response.json().get("value", [])
+            print(
+                f"[OutlookGraphTool] ✓ {len(messages)} ungelesene Mails "
+                f"in Folder {folder_id[:20]}…"
+            )
+            return messages
+
+        except Exception as exc:  # noqa: BLE001
+            print(f"[OutlookGraphTool] Fehler in get_unread_in_folder: {exc}")
+            return []
+
+    def is_message_in_folder(self, message_id: str, folder_id: str) -> bool:
+        """
+        Prüft ob eine Mail im angegebenen Folder liegt.
+        Wird aus Sicherheitsgründen vor dem Anhang-Download geprüft, damit der
+        API-Endpunkt nicht beliebige Mails ausliefert.
+        """
+        if not self._ensure_valid_token():
+            return False
+
+        try:
+            import requests
+
+            url = f"https://graph.microsoft.com/v1.0/me/messages/{message_id}"
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+            }
+            response = requests.get(
+                url, headers=headers, params={"$select": "parentFolderId"}
+            )
+            if response.status_code == 401 and self._refresh_access_token():
+                headers["Authorization"] = f"Bearer {self.access_token}"
+                response = requests.get(
+                    url, headers=headers, params={"$select": "parentFolderId"}
+                )
+
+            if response.status_code != 200:
+                return False
+
+            return response.json().get("parentFolderId") == folder_id
+
+        except Exception as exc:  # noqa: BLE001
+            print(f"[OutlookGraphTool] Fehler in is_message_in_folder: {exc}")
+            return False
+
+    def download_attachment(
+        self,
+        message_id: str,
+        attachment_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Lädt einen E-Mail-Anhang als Base64-String.
+
+        Returns:
+            Dict mit success, name, content_type, size, content_base64
+        """
+        if not self._ensure_valid_token():
+            return {"success": False, "error": "Nicht authentifiziert"}
+
+        try:
+            import requests
+
+            url = (
+                f"https://graph.microsoft.com/v1.0/me/messages/"
+                f"{message_id}/attachments/{attachment_id}"
+            )
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+            }
+
+            response = requests.get(url, headers=headers)
+            if response.status_code == 401 and self._refresh_access_token():
+                headers["Authorization"] = f"Bearer {self.access_token}"
+                response = requests.get(url, headers=headers)
+
+            if response.status_code != 200:
+                return {
+                    "success": False,
+                    "error": f"HTTP {response.status_code}: {response.text[:300]}",
+                }
+
+            data = response.json()
+            # FileAttachment: contentBytes (base64). Anders bei ItemAttachment / ReferenceAttachment.
+            if data.get("@odata.type") != "#microsoft.graph.fileAttachment":
+                return {
+                    "success": False,
+                    "error": f"Anhang-Typ nicht unterstützt: {data.get('@odata.type')}",
+                }
+
+            return {
+                "success": True,
+                "name": data.get("name"),
+                "content_type": data.get("contentType"),
+                "size": data.get("size"),
+                "content_base64": data.get("contentBytes"),
+            }
+
+        except Exception as exc:  # noqa: BLE001
+            return {"success": False, "error": str(exc)}

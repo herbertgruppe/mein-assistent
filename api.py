@@ -240,9 +240,211 @@ def health():
     return {
         "status": "ok",
         "service": "mein-assistent-api",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "api_key_configured": bool(_API_SECRET_KEY),
     }
+
+
+# ---------------------------------------------------------------------------
+# Transkripte (Outlook-Subfolder)
+# ---------------------------------------------------------------------------
+# Konfigurierbar via .env, Default: "Transkripte" unter Posteingang
+_TRANSCRIPTS_FOLDER_NAME = os.getenv("TRANSCRIPTS_FOLDER_NAME", "Transkripte")
+_TRANSCRIPTS_PARENT = os.getenv("TRANSCRIPTS_PARENT_FOLDER", "inbox")
+
+
+def _get_outlook_tool():
+    """Liefert eine konfigurierte OutlookGraphTool-Instanz mit Sven's Token."""
+    from tools.outlook_graph_tool import OutlookGraphTool
+
+    token_file = str(Path(__file__).resolve().parent / "auth" / "outlook_token.json")
+    return OutlookGraphTool(token_file=token_file)
+
+
+def _resolve_transcripts_folder_id(tool) -> Optional[str]:
+    """Liefert die Folder-ID des Transkripte-Ordners (cached pro Aufruf)."""
+    return tool.find_subfolder_id(
+        name=_TRANSCRIPTS_FOLDER_NAME,
+        parent=_TRANSCRIPTS_PARENT,
+    )
+
+
+class TranscriptAttachment(BaseModel):
+    id: str
+    name: str
+    size: int
+    content_type: str
+
+
+class PendingTranscript(BaseModel):
+    message_id: str
+    subject: str
+    received_at: str
+    sender_name: Optional[str] = None
+    sender_email: Optional[str] = None
+    body_preview: str = ""
+    body_text: str = ""
+    has_attachments: bool = False
+    attachments: List[TranscriptAttachment] = []
+
+
+class PendingTranscriptsResponse(BaseModel):
+    folder: str
+    folder_id: Optional[str] = None
+    count: int
+    transcripts: List[PendingTranscript] = []
+
+
+class AttachmentResponse(BaseModel):
+    success: bool
+    name: Optional[str] = None
+    content_type: Optional[str] = None
+    size: Optional[int] = None
+    content_base64: Optional[str] = None
+    error: Optional[str] = None
+
+
+class SimpleResult(BaseModel):
+    success: bool
+    message: str = ""
+    error: Optional[str] = None
+
+
+@app.get("/api/transcripts/pending", response_model=PendingTranscriptsResponse)
+def list_pending_transcripts(
+    max_results: int = 25,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Liefert alle ungelesenen E-Mails im Outlook-Unterordner „Transkripte"
+    (Default-Pfad: Posteingang/Transkripte) inkl. Anhang-Metadaten.
+
+    Wird vom Cowork-Skill `meeting-protokoll` aufgerufen, um neue Plaud-Aufnahmen
+    automatisch zu erkennen.
+    """
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(
+            status_code=503,
+            detail="Outlook nicht authentifiziert — Token fehlt oder abgelaufen.",
+        )
+
+    folder_id = _resolve_transcripts_folder_id(tool)
+    if not folder_id:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Outlook-Unterordner '{_TRANSCRIPTS_FOLDER_NAME}' unter "
+                f"'{_TRANSCRIPTS_PARENT}' nicht gefunden."
+            ),
+        )
+
+    messages = tool.get_unread_in_folder(folder_id, max_results=max_results)
+
+    transcripts: List[PendingTranscript] = []
+    for msg in messages:
+        sender = msg.get("from", {}).get("emailAddress", {})
+        body_obj = msg.get("body", {}) or {}
+        attachments_meta = [
+            TranscriptAttachment(
+                id=a.get("id", ""),
+                name=a.get("name", ""),
+                size=int(a.get("size") or 0),
+                content_type=a.get("contentType", ""),
+            )
+            for a in (msg.get("attachments") or [])
+        ]
+        transcripts.append(
+            PendingTranscript(
+                message_id=msg.get("id", ""),
+                subject=msg.get("subject", "") or "",
+                received_at=msg.get("receivedDateTime", "") or "",
+                sender_name=sender.get("name"),
+                sender_email=sender.get("address"),
+                body_preview=msg.get("bodyPreview", "") or "",
+                body_text=body_obj.get("content", "") or "",
+                has_attachments=bool(msg.get("hasAttachments")),
+                attachments=attachments_meta,
+            )
+        )
+
+    return PendingTranscriptsResponse(
+        folder=f"{_TRANSCRIPTS_PARENT}/{_TRANSCRIPTS_FOLDER_NAME}",
+        folder_id=folder_id,
+        count=len(transcripts),
+        transcripts=transcripts,
+    )
+
+
+@app.get(
+    "/api/transcripts/{message_id}/attachment/{attachment_id}",
+    response_model=AttachmentResponse,
+)
+def get_transcript_attachment(
+    message_id: str,
+    attachment_id: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Liefert den Inhalt eines E-Mail-Anhangs als Base64.
+
+    Sicherheitscheck: Der Anhang wird nur ausgeliefert, wenn die E-Mail
+    tatsächlich im Transkripte-Ordner liegt. So kann der Endpunkt nicht
+    missbraucht werden, um beliebige E-Mail-Anhänge auszulesen.
+    """
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    folder_id = _resolve_transcripts_folder_id(tool)
+    if not folder_id:
+        raise HTTPException(status_code=404, detail="Transkripte-Ordner nicht gefunden.")
+
+    if not tool.is_message_in_folder(message_id, folder_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Mail liegt nicht im Transkripte-Ordner — Anhang wird nicht ausgeliefert.",
+        )
+
+    result = tool.download_attachment(message_id, attachment_id)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=400, detail=result.get("error", "Anhang konnte nicht geladen werden.")
+        )
+    return AttachmentResponse(**result)
+
+
+@app.post("/api/transcripts/{message_id}/mark-read", response_model=SimpleResult)
+def mark_transcript_read(
+    message_id: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Markiert eine Transkript-Mail als gelesen.
+
+    Sicherheitscheck wie bei get_transcript_attachment: nur Mails im
+    Transkripte-Ordner werden akzeptiert.
+    """
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    folder_id = _resolve_transcripts_folder_id(tool)
+    if not folder_id:
+        raise HTTPException(status_code=404, detail="Transkripte-Ordner nicht gefunden.")
+
+    if not tool.is_message_in_folder(message_id, folder_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Mail liegt nicht im Transkripte-Ordner.",
+        )
+
+    result = tool.mark_as_read(message_id)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=400, detail=result.get("error", "Konnte nicht markiert werden.")
+        )
+    return SimpleResult(success=True, message="Mail als gelesen markiert.")
 
 
 @app.post("/api/process-reviewed-protocol", response_model=ProcessProtocolResponse)
