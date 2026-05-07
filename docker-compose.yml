@@ -18,6 +18,33 @@ services:
       # OIDC-Secrets für st.login() — NICHT im Image, read-only gemountet
       - ./.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
 
+  api:
+    build: .
+    container_name: mein-assistent-api
+    restart: unless-stopped
+    # Streamlit-Default-CMD überschreiben → FastAPI/Uvicorn
+    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8502"]
+    ports:
+      # Loopback-only — Traffic zwingend durch nginx/TLS
+      - "127.0.0.1:8502:8502"
+    env_file:
+      - .env
+    volumes:
+      # Geteilte Volumes mit assistent — gleiches Outlook-Token, gleiche Daten
+      - transcripts:/app/transcripts
+      - input_docs:/app/input_docs
+      - data:/app/data
+      - auth:/app/auth
+      - users_data:/app/users
+      - users_config:/app/config
+    depends_on:
+      - assistent
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8502/api/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+
 volumes:
   transcripts:
   input_docs:

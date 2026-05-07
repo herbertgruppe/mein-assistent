@@ -45,3 +45,8 @@ pyyaml
 # OIDC-Provider-Discovery für st.login (wird transitiv gezogen, aber explizit
 # halten, damit Streamlit den OIDC-Stack korrekt aktiviert)
 Authlib>=1.3.2
+
+# REST-API (api.py) — Endpoint /api/process-reviewed-protocol für Cowork
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart
