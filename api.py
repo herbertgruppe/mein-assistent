@@ -414,6 +414,124 @@ def get_transcript_attachment(
     return AttachmentResponse(**result)
 
 
+# ---------------------------------------------------------------------------
+# Kalender (für Termin-Zuordnung in Teil 1 des Skills)
+# ---------------------------------------------------------------------------
+class CalendarEvent(BaseModel):
+    id: str
+    title: str
+    start: str
+    end: str
+    location: str = ""
+    attendees: List[str] = []
+    preview: str = ""
+    is_all_day: bool = False
+
+
+class CalendarEventsResponse(BaseModel):
+    date: Optional[str] = None
+    start: str
+    end: str
+    count: int
+    events: List[CalendarEvent] = []
+
+
+@app.get("/api/calendar/events", response_model=CalendarEventsResponse)
+def get_calendar_events(
+    date: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    include_all_day: bool = False,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Liefert Outlook-Kalender-Termine für ein Datum oder einen Zeitraum.
+
+    Query-Parameter (alternativ):
+      - date=YYYY-MM-DD             → Termine an diesem Tag (00:00–24:00 lokal/UTC)
+      - start=ISO & end=ISO         → benutzerdefinierter Zeitraum
+      - include_all_day=true|false  → ganztägige Termine einbeziehen (Default: false)
+
+    Wird vom Cowork-Skill `meeting-protokoll` aufgerufen, um aus dem
+    Transkript-Datum den passenden Outlook-Termin zu finden.
+    """
+    from datetime import datetime, timedelta
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    # Zeitraum bestimmen
+    try:
+        if date:
+            day = datetime.strptime(date, "%Y-%m-%d")
+            start_dt = day.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_dt = start_dt + timedelta(days=1)
+            range_label: Optional[str] = date
+        elif start and end:
+            start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+            # Naive datetimes erzwingen (Graph erwartet ISO ohne Offset)
+            if start_dt.tzinfo is not None:
+                start_dt = start_dt.replace(tzinfo=None)
+            if end_dt.tzinfo is not None:
+                end_dt = end_dt.replace(tzinfo=None)
+            range_label = None
+        else:
+            # Default: heute
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            start_dt = today
+            end_dt = today + timedelta(days=1)
+            range_label = today.strftime("%Y-%m-%d")
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Ungültiges Datum/Zeit-Format: {exc}",
+        ) from exc
+
+    if end_dt <= start_dt:
+        raise HTTPException(
+            status_code=400, detail="end muss nach start liegen."
+        )
+
+    raw_events = tool.get_events_for_date_range(start_dt, end_dt)
+
+    events: List[CalendarEvent] = []
+    for ev in raw_events:
+        # Heuristik: ganztägige Termine erkennen (start.dateTime endet auf 00:00)
+        # — aber Format aus get_events_for_date_range ist bereits gefiltert.
+        # Wir lassen den Skill alle nicht-ganztägigen Termine sehen, ganztägige
+        # werden anhand 'is_all_day' kenntlich gemacht.
+        start_str = ev.get("start", "") or ""
+        end_str = ev.get("end", "") or ""
+        is_all_day = (
+            start_str.endswith("T00:00:00.0000000")
+            and end_str.endswith("T00:00:00.0000000")
+        )
+        if is_all_day and not include_all_day:
+            continue
+        events.append(
+            CalendarEvent(
+                id=ev.get("id", ""),
+                title=ev.get("title", "") or "",
+                start=start_str,
+                end=end_str,
+                location=ev.get("location", "") or "",
+                attendees=[a for a in (ev.get("attendees") or []) if a],
+                preview=ev.get("preview", "") or "",
+                is_all_day=is_all_day,
+            )
+        )
+
+    return CalendarEventsResponse(
+        date=range_label,
+        start=start_dt.isoformat(),
+        end=end_dt.isoformat(),
+        count=len(events),
+        events=events,
+    )
+
+
 @app.post("/api/transcripts/{message_id}/mark-read", response_model=SimpleResult)
 def mark_transcript_read(
     message_id: str,
