@@ -14,6 +14,7 @@ from utils.protocol import (
     load_agenda_templates, save_agenda_templates, create_agenda_from_template,
     generate_agenda_with_asana_context, sanitize_filename, convert_markdown_to_pdf
 )
+from agents._tool_allowlist import assert_tools_allowlisted
 
 
 def convert_to_berlin_time(dt):
@@ -478,6 +479,7 @@ Nutze die verfügbaren Tools, um die Fragen des Nutzers zu beantworten. Sei prä
 
                 orch = st.session_state.orchestrator
                 tools = [list_asana_projects, get_project_tasks, get_my_tasks]
+                assert_tools_allowlisted(tools, "MeinTagDashboard")
                 llm_with_tools = orch.research_agent.llm.bind_tools(tools)
 
                 lc_messages = []

@@ -5,6 +5,7 @@ Calendar & Email Agent für Kalender- und E-Mail-Operationen
 import os
 from typing import Dict, Any, List
 from datetime import datetime, timedelta
+from ._tool_allowlist import assert_tools_allowlisted
 from .base_agent import BaseAgent
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 from tools import EmailTool, OutlookGraphTool
@@ -232,6 +233,7 @@ aber keine E-Mail-Adresse angegeben hat. Das Tool findet die E-Mail-Adresse im A
             ]
 
             # Binde Tools an LLM
+            assert_tools_allowlisted(tools, self.name)
             llm_with_tools = self.llm.bind_tools(tools)
 
             # Erstelle System-Prompt
