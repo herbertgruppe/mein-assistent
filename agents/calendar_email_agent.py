@@ -6,6 +6,7 @@ import os
 from typing import Dict, Any, List
 from datetime import datetime, timedelta
 from ._tool_allowlist import assert_tools_allowlisted
+from ._tool_output_sanitizer import sanitize
 from .base_agent import BaseAgent
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 from tools import EmailTool, OutlookGraphTool
@@ -285,9 +286,12 @@ aber keine E-Mail-Adresse angegeben hat. Das Tool findet die E-Mail-Adresse im A
                         else:
                             tool_result = f"Tool {tool_name} nicht gefunden"
 
-                        # Erstelle Tool-Message
+                        # Erstelle Tool-Message — sanitize at the choke-point so
+                        # both happy-path tool output and the error branch below
+                        # are wrapped in <untrusted_tool_output …> before the LLM
+                        # sees them (HBE-189, F2 from HBE-183 security review).
                         tool_message = ToolMessage(
-                            content=str(tool_result),
+                            content=sanitize(str(tool_result), source=f"{self.name}.{tool_name}"),
                             tool_call_id=tool_call["id"]
                         )
                         messages.append(tool_message)
@@ -295,7 +299,10 @@ aber keine E-Mail-Adresse angegeben hat. Das Tool findet die E-Mail-Adresse im A
                     except Exception as e:
                         print(f"[{self.name}] ⚠️ Tool-Fehler: {e}")
                         tool_message = ToolMessage(
-                            content=f"Fehler beim Tool-Aufruf: {str(e)}",
+                            content=sanitize(
+                                f"Fehler beim Tool-Aufruf: {str(e)}",
+                                source=f"{self.name}.{tool_name}",
+                            ),
                             tool_call_id=tool_call["id"]
                         )
                         messages.append(tool_message)
