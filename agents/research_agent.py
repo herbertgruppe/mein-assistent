@@ -4,6 +4,7 @@ Research Agent für Informationsbeschaffung
 
 import os
 from typing import Dict, Any, List
+from ._tool_allowlist import assert_tools_allowlisted
 from .base_agent import BaseAgent
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 from tools import DocumentTool
@@ -163,6 +164,7 @@ Das Tool scannt ALLE Dokumente vollständig mit Chunk-Überlappung (2000 Zeichen
 
             # Binde Tools an das LLM
             if available_tools:
+                assert_tools_allowlisted(available_tools, self.name)
                 llm_with_tools = self.llm.bind_tools(available_tools)
             else:
                 # Kein Tool verfügbar, nutze normales LLM
