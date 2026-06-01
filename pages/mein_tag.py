@@ -1,6 +1,7 @@
 """
 Mein Tag Dashboard-Tab: Kalender, Asana-Aufgaben, Dokumenten-Suche, Meeting-Vorbereitung.
 """
+import html
 import os
 import time
 import streamlit as st
@@ -255,6 +256,8 @@ def render_task_card(task: dict, asana_agent):
                         author = comment.get('author', 'Unbekannt')
                         text = comment.get('text', '')
                         created_at = comment.get('created_at', '')
+                        safe_author = html.escape(str(author))
+                        safe_text = html.escape(str(text)).replace('\n', '<br>')
 
                         time_str = ""
                         if created_at:
@@ -273,8 +276,8 @@ def render_task_card(task: dict, asana_agent):
                                 margin-bottom: 0.75rem;
                                 border-left: 3px solid #4064a0;
                             ">
-                                <strong>{author}</strong> <em style="color: #6b7280; font-size: 0.875em;">{time_str}</em>
-                                <p style="margin-top: 0.375rem; margin-bottom: 0;">{text}</p>
+                                <strong>{safe_author}</strong> <em style="color: #6b7280; font-size: 0.875em;">{time_str}</em>
+                                <p style="margin-top: 0.375rem; margin-bottom: 0;">{safe_text}</p>
                             </div>
                             """,
                             unsafe_allow_html=True
