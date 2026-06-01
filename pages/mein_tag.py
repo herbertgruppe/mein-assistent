@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
+from agents._tool_output_sanitizer import sanitize
 from utils.api_cache import cached_get_asana_projects, cached_get_asana_tasks
 from utils.state import _get_user_ctx
 from utils.protocol import (
@@ -514,7 +515,16 @@ Nutze die verfügbaren Tools, um die Fragen des Nutzers zu beantworten. Sei prä
                         tool_args = tool_call['args']
                         tool_func = next((t for t in tools if t.name == tool_name), None)
                         if tool_func:
-                            tool_result = tool_func.invoke(tool_args)
+                            # Sanitize at the source so both the session_state
+                            # record and the ToolMessage instance below carry
+                            # the wrapped/normalized form before any LLM sees
+                            # them (HBE-189, F2 from HBE-183 — Asana task names
+                            # and notes in shared projects are attacker-
+                            # controllable).
+                            tool_result = sanitize(
+                                str(tool_func.invoke(tool_args)),
+                                source=f"asana_chat.{tool_name}",
+                            )
                             st.session_state['asana_chat_messages'].append({
                                 'role': 'tool',
                                 'content': tool_result,
