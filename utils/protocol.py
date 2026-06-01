@@ -384,6 +384,74 @@ def generate_agenda_with_asana_context(
     return agenda_content
 
 
+def extract_protocol_from_transcript_streaming(
+    transcript_text: str,
+    meeting_title: str,
+    llm,
+    attendees: Optional[List[str]] = None,
+    meeting_date: Optional[str] = None,
+    agenda_text: Optional[str] = None,
+):
+    """Generiert ein Besprechungsprotokoll aus einem Transkript via LLM-Streaming.
+
+    Yields einzelne Text-Chunks (str) des Protokolls zur Live-Anzeige.
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    attendees_str = ""
+    if attendees:
+        attendees_str = f"\n**Teilnehmer:** {', '.join(attendees)}"
+
+    date_str = ""
+    if meeting_date:
+        date_str = f"\n**Datum:** {meeting_date}"
+
+    agenda_section = ""
+    if agenda_text:
+        agenda_section = f"\n\n## Tagesordnung\n{agenda_text}"
+
+    system_prompt = """Du bist ein professioneller Protokollant für die Herbert Gruppe.
+Erstelle aus dem folgenden Meeting-Transkript ein strukturiertes Besprechungsprotokoll auf Deutsch.
+
+Das Protokoll soll folgende Abschnitte enthalten:
+1. **Kopfdaten** (Titel, Datum, Teilnehmer)
+2. **Zusammenfassung** (2–4 Sätze, Kernaussage des Meetings)
+3. **Besprochene Themen** (gegliedert nach Themenblöcken)
+4. **Entscheidungen** (klare Bullet-Liste der getroffenen Beschlüsse)
+5. **Aufgaben & Nächste Schritte** (Format: - **Person**: Aufgabe [Fälligkeitsdatum falls erwähnt])
+6. **Offene Punkte** (falls vorhanden)
+
+Regeln:
+- Schreibe präzise und sachlich
+- Formuliere in vollständigen Sätzen
+- Halte Fachbegriffe bei
+- Gib keine Zeitstempel oder Sprecher-Labels aus dem Transkript wider
+- Verwende Markdown-Formatierung
+- Sprache: Deutsch"""
+
+    user_content = f"""# Meeting: {meeting_title}{date_str}{attendees_str}{agenda_section}
+
+## Transkript
+{transcript_text}
+
+---
+Erstelle jetzt das strukturierte Besprechungsprotokoll:"""
+
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_content),
+    ]
+
+    for chunk in llm.stream(messages):
+        if hasattr(chunk, "content") and chunk.content:
+            yield chunk.content
+
+
+# ---------------------------------------------------------------------------
+# Asana-Integration
+# ---------------------------------------------------------------------------
+
+
 def create_protocol_task_in_asana(
     asana_agent,
     project_gid: str,
