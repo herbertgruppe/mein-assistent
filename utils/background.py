@@ -27,7 +27,7 @@ def _run_protocol_generation_bg(item_id: str, file_path_str: str, meeting_title:
     """
     try:
         # Lazy import um Circular Imports zu vermeiden
-        from agents import extract_protocol_from_transcript_streaming
+        from utils.protocol import extract_protocol_from_transcript_streaming
 
         file_path = Path(file_path_str)
 

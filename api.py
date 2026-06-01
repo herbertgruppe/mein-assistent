@@ -231,6 +231,52 @@ def _safe_filename(name: str, max_len: int = 80) -> str:
     return cleaned[:max_len] if cleaned else "Protokoll"
 
 
+def _strip_obsidian_syntax(md: str) -> str:
+    """
+    Konvertiert Obsidian-spezifische Syntax in Standard-Markdown.
+
+    Hintergrund: Das Markdown im Vault enthält Wikilinks und ggf. Callouts.
+    WeasyPrint (PDF-Generierung) und Asana-Notes verstehen diese Syntax nicht
+    und würden sie als Literaltext anzeigen. Daher hier vor jeder Weiterverarbeitung
+    in Standard-Markdown konvertieren — die Vault-Version bleibt unverändert.
+
+    Behandelt:
+      - ![[bild.png]]              -> entfernt (Embeds können nicht aufgelöst werden)
+      - [[pfad/datei.md|Anzeige]]  -> Anzeige
+      - [[pfad/datei.md]]          -> datei (Basename, ohne .md)
+      - [[Name]]                   -> Name
+      - > [!type] Titel            -> > **Titel**  (Callout zu Quote-Block)
+    """
+    if not md:
+        return md
+
+    # 1) Embed-Wikilinks (Bilder/Audio/etc.) entfernen — nicht renderbar im PDF
+    md = re.sub(r"!\[\[[^\]\n]+\]\]", "", md)
+
+    # 2) Wikilinks mit Alias: [[pfad|Anzeige]] -> Anzeige
+    md = re.sub(r"\[\[[^\]\|\n]+\|([^\]\n]+)\]\]", r"\1", md)
+
+    # 3) Wikilinks ohne Alias: [[Pfad/Name.md]] oder [[Name]] -> Basename ohne .md
+    def _basename(match: "re.Match[str]") -> str:
+        target = match.group(1).strip()
+        name = target.rsplit("/", 1)[-1]
+        if name.endswith(".md"):
+            name = name[:-3]
+        return name
+
+    md = re.sub(r"\[\[([^\]\|\n]+)\]\]", _basename, md)
+
+    # 4) Callouts: > [!type] Titel  ->  > **Titel** (Quote-Block bleibt)
+    md = re.sub(
+        r"^(\s*>\s*)\[!\w+\][+-]?\s*(.*)$",
+        r"\1**\2**",
+        md,
+        flags=re.MULTILINE,
+    )
+
+    return md
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -240,7 +286,7 @@ def health():
     return {
         "status": "ok",
         "service": "mein-assistent-api",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "api_key_configured": bool(_API_SECRET_KEY),
     }
 
@@ -251,6 +297,7 @@ def health():
 # Konfigurierbar via .env, Default: "Transkripte" unter Posteingang
 _TRANSCRIPTS_FOLDER_NAME = os.getenv("TRANSCRIPTS_FOLDER_NAME", "Transkripte")
 _TRANSCRIPTS_PARENT = os.getenv("TRANSCRIPTS_PARENT_FOLDER", "inbox")
+_TRANSCRIPTS_ARCHIVE_FOLDER = os.getenv("TRANSCRIPTS_ARCHIVE_FOLDER", "Transkripte erledigt")
 
 
 def _get_outlook_tool():
@@ -565,6 +612,76 @@ def mark_transcript_read(
     return SimpleResult(success=True, message="Mail als gelesen markiert.")
 
 
+@app.post("/api/transcripts/{message_id}/archive", response_model=SimpleResult)
+def archive_transcript(
+    message_id: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Verschiebt eine Transkript-Mail in den Archiv-Unterordner.
+
+    Zielordner (konfigurierbar via TRANSCRIPTS_ARCHIVE_FOLDER): "Transkripte erledigt"
+    Erwartet als Unterordner UNTER dem Transkripte-Ordner.
+
+    Wird vom Meeting-Protokoll-Workflow am Ende von Teil 2 aufgerufen, statt nur
+    die Mail als gelesen zu markieren — so kann sie nicht versehentlich erneut
+    in den pending-Topf rutschen.
+
+    Sicherheitscheck wie bei mark-read: nur Mails im Transkripte-Ordner werden
+    akzeptiert.
+    """
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    folder_id = _resolve_transcripts_folder_id(tool)
+    if not folder_id:
+        raise HTTPException(status_code=404, detail="Transkripte-Ordner nicht gefunden.")
+
+    if not tool.is_message_in_folder(message_id, folder_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Mail liegt nicht im Transkripte-Ordner.",
+        )
+
+    # Gezielte Suche: Archiv-Ordner als Subfolder DES Transkripte-Ordners (deterministisch,
+    # robust gegen Schwester-Ordner mit ähnlichem Namen)
+    archive_folder_id = tool.find_subfolder_id(
+        name=_TRANSCRIPTS_ARCHIVE_FOLDER,
+        parent=folder_id,
+    )
+    if not archive_folder_id:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Archiv-Unterordner '{_TRANSCRIPTS_ARCHIVE_FOLDER}' unter "
+                f"'{_TRANSCRIPTS_FOLDER_NAME}' nicht gefunden. "
+                f"Bitte in Outlook anlegen."
+            ),
+        )
+
+    # Direkter Graph-API-Move (umgeht move_to_folder's flache Heuristik)
+    import requests as _rq
+    move_url = f"https://graph.microsoft.com/v1.0/me/messages/{message_id}/move"
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Content-Type": "application/json",
+    }
+    move_resp = _rq.post(
+        move_url, headers=headers, json={"destinationId": archive_folder_id}, timeout=30
+    )
+    if move_resp.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Graph-API move fehlgeschlagen: HTTP {move_resp.status_code} — {move_resp.text[:200]}",
+        )
+
+    return SimpleResult(
+        success=True,
+        message=f"Mail in '{_TRANSCRIPTS_FOLDER_NAME}/{_TRANSCRIPTS_ARCHIVE_FOLDER}' verschoben.",
+    )
+
+
 @app.post("/api/process-reviewed-protocol", response_model=ProcessProtocolResponse)
 def process_reviewed_protocol(
     req: ProcessProtocolRequest,
@@ -590,6 +707,10 @@ def process_reviewed_protocol(
 
     safe_name = _safe_filename(req.meeting_name)
 
+    # Obsidian-Syntax (Wikilinks, Callouts) für PDF/Outlook strippen.
+    # Die Vault-Version bleibt unverändert — hier nur die Außenwelt-Version.
+    clean_md = _strip_obsidian_syntax(req.markdown)
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         pdf_path = tmp / f"Protokoll_{safe_name}.pdf"
@@ -604,7 +725,7 @@ def process_reviewed_protocol(
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"PDF-Dekodierung fehlgeschlagen: {exc}")
         else:
-            pdf_generated = _markdown_to_pdf_standalone(req.markdown, pdf_path)
+            pdf_generated = _markdown_to_pdf_standalone(clean_md, pdf_path)
             if not pdf_generated:
                 errors.append("PDF-Generierung aus Markdown fehlgeschlagen")
 

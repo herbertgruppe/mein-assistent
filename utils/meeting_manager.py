@@ -1351,9 +1351,6 @@ def render_transcripts_tab():
     if 'show_archive' not in st.session_state:
         st.session_state['show_archive'] = False
 
-    if 'processed_upload_ids' not in st.session_state:
-        st.session_state['processed_upload_ids'] = set()
-
     # -------------------------------------------------------------------------
     # Verarbeite hochgeladene Files
     # -------------------------------------------------------------------------
@@ -1362,13 +1359,6 @@ def render_transcripts_tab():
         updated_files = []
 
         for uploaded_file in uploaded_files:
-            # Jede Streamlit-UploadedFile bekommt eine eindeutige file_id pro
-            # Upload-Aktion. Bereits verarbeitete Uploads überspringen, damit
-            # der Handler nicht bei jedem Rerun das Item (inkl. selected_event)
-            # zurücksetzt.
-            if uploaded_file.file_id in st.session_state['processed_upload_ids']:
-                continue
-
             file_path = processed_dir / uploaded_file.name
 
             existing_idx = None
@@ -1421,8 +1411,6 @@ def render_transcripts_tab():
                 st.session_state['transcript_queue'].append(new_item)
                 newly_uploaded.append(uploaded_file.name)
                 save_wip_item(new_item, wip_dir)
-
-            st.session_state['processed_upload_ids'].add(uploaded_file.file_id)
 
         if newly_uploaded:
             st.success(f"✅ {len(newly_uploaded)} neue Transkript(e) hochgeladen!")
