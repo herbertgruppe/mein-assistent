@@ -115,8 +115,15 @@ def _install_stub_modules() -> None:
         class _Stub:
             pass
 
+        # Mirror the full public API of ``tools/__init__.py``. This stub
+        # lives in ``sys.modules`` for the rest of the pytest process, so
+        # later-collected modules (e.g. ``test_tool_allowlist.py`` →
+        # ``agents.research_agent`` → ``from tools import DocumentTool``)
+        # must still resolve every name the real package exports (HBE-255).
         tools_pkg.EmailTool = _Stub
         tools_pkg.OutlookGraphTool = _Stub
+        tools_pkg.AsanaTool = _Stub
+        tools_pkg.DocumentTool = _Stub
         sys.modules["tools"] = tools_pkg
 
 
