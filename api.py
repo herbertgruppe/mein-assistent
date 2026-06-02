@@ -464,13 +464,31 @@ def get_transcript_attachment(
 # ---------------------------------------------------------------------------
 # Kalender (für Termin-Zuordnung in Teil 1 des Skills)
 # ---------------------------------------------------------------------------
+class CalendarAttendee(BaseModel):
+    """Pro-Person-Status eines Termin-Teilnehmers.
+
+    Werte werden 1:1 von MS Graph durchgereicht. Siehe API_SETUP.md
+    Abschnitt „Attendee-Semantik" für die Bedeutung der einzelnen Felder.
+    """
+    name: str = ""
+    email: str = ""
+    # MS Graph responseStatus.response: accepted | declined | tentative |
+    # notResponded | none — zusätzlich "organizer" für den Termin-Organisator.
+    response: str = "none"
+    # MS Graph attendeeType: required | optional | resource
+    type: str = "required"
+
+
 class CalendarEvent(BaseModel):
     id: str
     title: str
     start: str
     end: str
     location: str = ""
-    attendees: List[str] = []
+    attendees: List[CalendarAttendee] = []
+    # Backwards-Compat: einfache Namensliste für ältere Konsumenten.
+    # Neue Konsumenten sollen `attendees[].name` verwenden.
+    attendee_names: List[str] = []
     preview: str = ""
     is_all_day: bool = False
 
@@ -557,6 +575,26 @@ def get_calendar_events(
         )
         if is_all_day and not include_all_day:
             continue
+        raw_attendees = ev.get("attendees") or []
+        attendees: List[CalendarAttendee] = []
+        for a in raw_attendees:
+            if isinstance(a, dict):
+                if not (a.get("name") or a.get("email")):
+                    continue
+                attendees.append(
+                    CalendarAttendee(
+                        name=a.get("name") or "",
+                        email=a.get("email") or "",
+                        response=a.get("response") or "none",
+                        type=a.get("type") or "required",
+                    )
+                )
+            elif isinstance(a, str) and a:
+                # Fallback falls das Tool noch das alte String-Format liefert.
+                attendees.append(CalendarAttendee(name=a))
+        attendee_names = ev.get("attendee_names") or [
+            a.name for a in attendees if a.name
+        ]
         events.append(
             CalendarEvent(
                 id=ev.get("id", ""),
@@ -564,7 +602,8 @@ def get_calendar_events(
                 start=start_str,
                 end=end_str,
                 location=ev.get("location", "") or "",
-                attendees=[a for a in (ev.get("attendees") or []) if a],
+                attendees=attendees,
+                attendee_names=[n for n in attendee_names if n],
                 preview=ev.get("preview", "") or "",
                 is_all_day=is_all_day,
             )

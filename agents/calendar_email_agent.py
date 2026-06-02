@@ -497,7 +497,13 @@ Um Kalender-Termine abzurufen, müssen Sie sich zuerst mit Ihrem Microsoft-Konto
                 if event.get('location'):
                     result += f"   📍 {event.get('location')}\n"
                 if event.get('attendees'):
-                    result += f"   👥 {', '.join(event.get('attendees', []))}\n"
+                    names = event.get('attendee_names') or [
+                        (a.get('name') or a.get('email') or '') if isinstance(a, dict) else str(a)
+                        for a in event.get('attendees', [])
+                    ]
+                    names = [n for n in names if n]
+                    if names:
+                        result += f"   👥 {', '.join(names)}\n"
                 result += f"   🆔 ID: `{event.get('id')}`\n\n"
 
             return result

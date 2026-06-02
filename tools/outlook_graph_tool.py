@@ -7,6 +7,48 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 
 
+def _format_attendees(event: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Wandelt MS Graph attendees + organizer in Pro-Person-Struktur um.
+
+    Liefert pro Eintrag {name, email, response, type}, wobei `response`
+    die MS-Graph-Werte 1:1 durchreicht: accepted, declined, tentative,
+    notResponded, none — plus der Organizer als response="organizer".
+    Für vergangene Termine ist responseStatus oft "none"/leer (kein Bug).
+    """
+    formatted: List[Dict[str, str]] = []
+    organizer_email = ""
+    organizer_obj = event.get("organizer") or {}
+    organizer_addr = organizer_obj.get("emailAddress") or {}
+    organizer_email = (organizer_addr.get("address") or "").lower()
+
+    organizer_emitted = False
+    for attendee in event.get("attendees") or []:
+        addr = attendee.get("emailAddress") or {}
+        email = addr.get("address") or ""
+        name = addr.get("name") or ""
+        response = (attendee.get("status") or {}).get("response") or "none"
+        att_type = attendee.get("type") or "required"
+        if organizer_email and email.lower() == organizer_email:
+            response = "organizer"
+            organizer_emitted = True
+        formatted.append({
+            "name": name,
+            "email": email,
+            "response": response,
+            "type": att_type,
+        })
+
+    if organizer_email and not organizer_emitted:
+        formatted.insert(0, {
+            "name": organizer_addr.get("name") or "",
+            "email": organizer_addr.get("address") or "",
+            "response": "organizer",
+            "type": "required",
+        })
+
+    return formatted
+
+
 class OutlookGraphTool:
     """Tool für Microsoft Graph API - Outlook Kalender"""
 
@@ -479,7 +521,7 @@ class OutlookGraphTool:
             params = {
                 "startDateTime": today_start.isoformat() + "Z",
                 "endDateTime": today_end.isoformat() + "Z",
-                "$select": "subject,start,end,location,attendees,bodyPreview",
+                "$select": "subject,start,end,location,attendees,organizer,bodyPreview",
                 "$orderby": "start/dateTime",
                 "$top": 50
             }
@@ -503,6 +545,7 @@ class OutlookGraphTool:
                 start = event.get("start", {})
                 end = event.get("end", {})
                 location_obj = event.get("location", {})
+                attendees_struct = _format_attendees(event)
 
                 formatted_event = {
                     "id": event.get("id"),
@@ -510,10 +553,8 @@ class OutlookGraphTool:
                     "start": start.get("dateTime", ""),
                     "end": end.get("dateTime", ""),
                     "location": location_obj.get("displayName", ""),
-                    "attendees": [
-                        attendee.get("emailAddress", {}).get("name", "")
-                        for attendee in event.get("attendees", [])
-                    ],
+                    "attendees": attendees_struct,
+                    "attendee_names": [a["name"] for a in attendees_struct if a.get("name")],
                     "preview": event.get("bodyPreview", "")[:200]
                 }
                 formatted_events.append(formatted_event)
@@ -553,7 +594,7 @@ class OutlookGraphTool:
             params = {
                 "startDateTime": start_date.isoformat() + "Z",
                 "endDateTime": end_date.isoformat() + "Z",
-                "$select": "subject,start,end,location,attendees,bodyPreview",
+                "$select": "subject,start,end,location,attendees,organizer,bodyPreview",
                 "$orderby": "start/dateTime",
                 "$top": 100
             }
@@ -577,6 +618,7 @@ class OutlookGraphTool:
                 start = event.get("start", {})
                 end = event.get("end", {})
                 location_obj = event.get("location", {})
+                attendees_struct = _format_attendees(event)
 
                 formatted_event = {
                     "id": event.get("id"),
@@ -584,10 +626,8 @@ class OutlookGraphTool:
                     "start": start.get("dateTime", ""),
                     "end": end.get("dateTime", ""),
                     "location": location_obj.get("displayName", ""),
-                    "attendees": [
-                        attendee.get("emailAddress", {}).get("name", "")
-                        for attendee in event.get("attendees", [])
-                    ],
+                    "attendees": attendees_struct,
+                    "attendee_names": [a["name"] for a in attendees_struct if a.get("name")],
                     "preview": event.get("bodyPreview", "")[:200]
                 }
                 formatted_events.append(formatted_event)
