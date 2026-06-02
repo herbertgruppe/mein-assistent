@@ -2,6 +2,7 @@
 Protokoll-Hilfsfunktionen: Namensextraktion, Task-Extraktion, PDF-Konvertierung,
 Agenda-Template-Verwaltung und Asana-Protokoll-Erstellung.
 """
+import re
 import shutil
 import streamlit as st
 from datetime import datetime
@@ -79,90 +80,171 @@ def extract_all_person_names(protocol_text: str, tasks: List[Dict[str, Any]]) ->
     return sorted(list(all_names))
 
 
-def extract_tasks_from_protocol_text(protocol_text: str, llm) -> List[Dict[str, Any]]:
+_TASK_HEADER_RE = re.compile(
+    r"^\s*"
+    r"(?:#{1,6}\s+|\d+\.\s+|\*\*\s*)?"
+    r"(?:Aufgaben(?:\s*(?:&|und)\s*Nächste\s+Schritte)?|Weitere\s+Schritte|Nächste\s+Schritte)"
+    r"[\s:*]*$",
+    re.IGNORECASE,
+)
+_MD_HEADING_RE = re.compile(r"^\s*#{1,6}\s+")
+_BULLET_RE = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
+_BOLD_NAME_RE = re.compile(r"^\*\*\s*([^*]+?)\s*\*\*\s*:\s*(.+)$")
+_PLAIN_NAME_RE = re.compile(r"^([^:\n]{1,80}?)\s*:\s*(.+)$")
+_LEGACY_DUE_RE = re.compile(
+    r"\s*[-—–]\s*F(?:ä|ae)llig\s*:\s*(.+?)\s*$", re.IGNORECASE
+)
+_BRACKET_DATE_RE = re.compile(r"\s*\[([^\]]+)\]\s*$")
+_ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+_DE_DATE_RE = re.compile(r"^(\d{1,2})\.(\d{1,2})\.(\d{2,4})$")
+
+# Placeholder strings the LLM may emit instead of a real name — must not become an assignee.
+_NAME_BLACKLIST = {
+    "", "?", "[?]", "tbd", "todo", "n/a", "na",
+    "alle", "team", "person", "[name]", "name",
+    "datum", "ort", "zeit", "wer",
+}
+
+
+def _try_parse_due_date(raw):
+    """Parse ISO (YYYY-MM-DD) or German (DD.MM.YYYY/YY) dates. Returns YYYY-MM-DD or None."""
+    if not raw:
+        return None
+    raw = raw.strip().rstrip(".").strip()
+    m = _ISO_DATE_RE.match(raw)
+    if m:
+        y, mo, d = m.groups()
+        try:
+            return datetime(int(y), int(mo), int(d)).strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+    m = _DE_DATE_RE.match(raw)
+    if m:
+        d, mo, y = m.groups()
+        if len(y) == 2:
+            y = "20" + y
+        try:
+            return datetime(int(y), int(mo), int(d)).strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+    return None
+
+
+def _clean_assignee(name):
+    if name is None:
+        return None
+    name = name.strip().strip("*").strip()
+    if name.lower() in _NAME_BLACKLIST:
+        return None
+    return name or None
+
+
+def _parse_task_bullet(content):
+    """Parse one bullet's text into a task dict, or None if it's not a Person:Task line."""
+    content = content.strip()
+    if not content:
+        return None
+
+    m = _BOLD_NAME_RE.match(content)
+    if m:
+        name_raw, rest = m.group(1), m.group(2)
+    else:
+        m = _PLAIN_NAME_RE.match(content)
+        if not m:
+            return None
+        name_raw, rest = m.group(1), m.group(2)
+
+    assignee = _clean_assignee(name_raw)
+    rest = rest.strip()
+
+    due_raw = None
+    m_due = _LEGACY_DUE_RE.search(rest)
+    if m_due:
+        due_raw = m_due.group(1).strip().rstrip("*").strip()
+        rest = rest[: m_due.start()].strip()
+    else:
+        m_br = _BRACKET_DATE_RE.search(rest)
+        if m_br:
+            due_raw = m_br.group(1).strip()
+            rest = rest[: m_br.start()].strip()
+
+    task = rest.strip().rstrip(".").strip()
+    if not task:
+        return None
+
+    due_date = _try_parse_due_date(due_raw)
+    description = task
+    if due_raw and not due_date:
+        # Couldn't parse the date string — keep the raw hint in description so the user sees it.
+        description = f"{task} (Fällig: {due_raw})"
+
+    title = task if len(task) <= 80 else task[:77].rstrip() + "..."
+
+    return {
+        "title": title,
+        "description": description,
+        "due_date": due_date,
+        "assignee": assignee,
+    }
+
+
+def extract_tasks_from_protocol_text(protocol_text: str, llm=None) -> List[Dict[str, Any]]:
     """
-    Extrahiert Aufgaben aus dem "Weitere Schritte" Abschnitt des Protokolls.
+    Extrahiert Aufgaben deterministisch aus dem Protokoll-Markdown — kein LLM-Call.
+
+    Inline-pro-TOP (HBE-290): `**Aufgaben:**`-Blöcke direkt unter jedem Thema mit Bullets
+    `- Vorname Nachname: Aufgabe [Datum]`. Mehrere Blöcke pro Protokoll sind normal.
+
+    Legacy-Sammelblock: `**Aufgaben & Nächste Schritte**` / `**Weitere Schritte**` mit
+    `- **Name**: Aufgabe - Fällig: Datum` wird ebenfalls erkannt.
 
     Args:
-        protocol_text: Vollständiger Protokoll-Text (editiert vom Nutzer)
-        llm: LLM-Instanz für Parsing
+        protocol_text: Vollständiger Protokoll-Text (Markdown, editiert vom Nutzer)
+        llm: Ignoriert. Signatur bleibt für Rückwärtskompat mit bestehenden Callsites
+             (HBE-289 Schritt 2: ersetzt LLM-Call durch deterministischen Regex-Parser,
+             spart ~30 s LLM-Zeit + den zweiten API-Call komplett).
 
     Returns:
-        Liste von Dicts mit Aufgaben (title, description, due_date, assignee)
+        Liste von Dicts {title, description, due_date, assignee}.
     """
-    from langchain_core.messages import HumanMessage, SystemMessage
-    import json
-    import re
+    del llm  # nicht mehr genutzt, siehe Docstring
 
-    system_prompt = """Du bist ein Assistent, der aus Meeting-Protokollen Aufgaben extrahiert.
+    tasks: List[Dict[str, Any]] = []
+    if not protocol_text:
+        return tasks
 
-Analysiere den Protokoll-Text und extrahiere ALLE Aufgaben aus dem Protokoll.
+    in_block = False
+    for line in protocol_text.splitlines():
+        if _TASK_HEADER_RE.match(line):
+            in_block = True
+            continue
 
-Aufgaben können im Protokoll in mehreren Formen auftauchen:
-- Inline-pro-TOP: unter `**Aufgaben:**`-Blöcken direkt unter einem Themenblock (mehrere solcher Blöcke pro Protokoll möglich) im Format `- Vorname Nachname: Aufgabenbeschreibung [Fälligkeitsdatum falls erwähnt]`
-- Sammelblock am Ende (Legacy): unter `**Aufgaben & Nächste Schritte**` oder `**Weitere Schritte**` im Format `- **[Name oder [?]]**: [Aufgabenbeschreibung] - Fällig: [Datum oder [?]]`
+        if not in_block:
+            continue
 
-Sammle ALLE Aufgaben aus ALLEN solcher Blöcke ein (nicht nur einen). Behandle Inline- und Sammelblock-Format gleichwertig.
+        if _MD_HEADING_RE.match(line):
+            in_block = False
+            continue
 
-Gib die Aufgaben im folgenden JSON-Format zurück:
+        stripped = line.strip()
+        if stripped.startswith("**") and not _BULLET_RE.match(line):
+            in_block = False
+            continue
 
-[
-  {
-    "title": "Kurzer Aufgabentitel (max 80 Zeichen)",
-    "description": "Detaillierte Beschreibung",
-    "due_date": "YYYY-MM-DD oder null",
-    "assignee": "Name der zuständigen Person oder null"
-  }
-]"""
+        m = _BULLET_RE.match(line)
+        if m:
+            parsed = _parse_task_bullet(m.group(1))
+            if parsed:
+                tasks.append(parsed)
+            continue
 
-    user_prompt = f"""Extrahiere alle Aufgaben aus diesem Protokoll:
+        if stripped == "":
+            continue
 
-{protocol_text}"""
+        # Free-text line inside what looked like a task block — block has ended.
+        in_block = False
 
-    try:
-        response = llm.invoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_prompt)
-        ])
-
-        content = response.content
-
-        tasks_json = None
-        start_match = re.search(r'\[\s*[\{\]]', content)
-        if start_match:
-            start = start_match.start()
-            depth = 0
-            in_string = False
-            escape_next = False
-            for i in range(start, len(content)):
-                c = content[i]
-                if escape_next:
-                    escape_next = False
-                    continue
-                if c == '\\' and in_string:
-                    escape_next = True
-                    continue
-                if c == '"':
-                    in_string = not in_string
-                    continue
-                if in_string:
-                    continue
-                if c == '[':
-                    depth += 1
-                elif c == ']':
-                    depth -= 1
-                    if depth == 0:
-                        tasks_json = content[start:i + 1]
-                        break
-
-        if tasks_json:
-            tasks = json.loads(tasks_json)
-            return tasks
-        else:
-            return []
-
-    except Exception as e:
-        raise RuntimeError(f"Fehler beim Extrahieren der Tasks aus Protokoll: {e}") from e
+    return tasks
 
 
 def sanitize_filename(name: str, max_length: int = 100) -> str:
