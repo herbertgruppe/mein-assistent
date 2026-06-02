@@ -96,10 +96,13 @@ def extract_tasks_from_protocol_text(protocol_text: str, llm) -> List[Dict[str, 
 
     system_prompt = """Du bist ein Assistent, der aus Meeting-Protokollen Aufgaben extrahiert.
 
-Analysiere den Protokoll-Text und extrahiere ALLE Aufgaben aus den "Weitere Schritte" Abschnitten.
+Analysiere den Protokoll-Text und extrahiere ALLE Aufgaben aus dem Protokoll.
 
-Format im Protokoll ist typischerweise:
-- **[Name oder [?]]**: [Aufgabenbeschreibung] - Fällig: [Datum oder [?]]
+Aufgaben können im Protokoll in mehreren Formen auftauchen:
+- Inline-pro-TOP: unter `**Aufgaben:**`-Blöcken direkt unter einem Themenblock (mehrere solcher Blöcke pro Protokoll möglich) im Format `- Vorname Nachname: Aufgabenbeschreibung [Fälligkeitsdatum falls erwähnt]`
+- Sammelblock am Ende (Legacy): unter `**Aufgaben & Nächste Schritte**` oder `**Weitere Schritte**` im Format `- **[Name oder [?]]**: [Aufgabenbeschreibung] - Fällig: [Datum oder [?]]`
+
+Sammle ALLE Aufgaben aus ALLEN solcher Blöcke ein (nicht nur einen). Behandle Inline- und Sammelblock-Format gleichwertig.
 
 Gib die Aufgaben im folgenden JSON-Format zurück:
 
@@ -413,20 +416,24 @@ def extract_protocol_from_transcript_streaming(
     system_prompt = """Du bist ein professioneller Protokollant für die Herbert Gruppe.
 Erstelle aus dem folgenden Meeting-Transkript ein strukturiertes Besprechungsprotokoll auf Deutsch.
 
-Das Protokoll soll folgende Abschnitte enthalten:
-1. **Kopfdaten** (Titel, Datum, Teilnehmer)
-2. **Zusammenfassung** (2–4 Sätze, Kernaussage des Meetings)
-3. **Besprochene Themen** (gegliedert nach Themenblöcken)
-4. **Entscheidungen** (klare Bullet-Liste der getroffenen Beschlüsse)
-5. **Aufgaben & Nächste Schritte** (Format: - **Person**: Aufgabe [Fälligkeitsdatum falls erwähnt])
-6. **Offene Punkte** (falls vorhanden)
+Struktur:
+1. Kopfdaten (Titel, Datum, Teilnehmer)
+2. Zusammenfassung (2-4 Sätze, Kernaussage des Meetings)
+3. Besprochene Themen — pro Themenblock:
+   - Kurzer Kontext (so viel Detail wie nötig für das Verständnis der Entscheidung — alle Fakten, Zahlen und Beispiele aus dem Transkript)
+   - **Entscheidungen:** direkt unter dem Thema (Bullet-Liste, nur wenn Beschlüsse gefallen)
+   - **Aufgaben:** direkt unter dem Thema im Format: - Vorname Nachname: Aufgabe [Fälligkeitsdatum falls erwähnt]
+4. Offene Punkte (Sammelblock am Ende, nur falls vorhanden)
 
 Regeln:
-- Schreibe präzise und sachlich
-- Formuliere in vollständigen Sätzen
-- Halte Fachbegriffe bei
-- Gib keine Zeitstempel oder Sprecher-Labels aus dem Transkript wider
-- Verwende Markdown-Formatierung
+- Vollständig — kein Längen-Limit, die Länge folgt dem Inhalt
+- Inline-pro-TOP-Stil: KEINE separaten Sammelblöcke "Entscheidungen" oder "Aufgaben" am Ende — alles steht direkt unter dem jeweiligen Thema
+- Smalltalk, Begrüßung und Verabschiedung weglassen
+- Diskussionsdetails dürfen rein, wenn sie für das Verständnis der Entscheidung wichtig sind
+- Personen immer mit Vor- und Nachname nennen (auch in Aufgaben)
+- Keine Zeitstempel oder Sprecher-Labels aus dem Transkript wiedergeben
+- Fachbegriffe und Zahlen 1:1 aus dem Transkript übernehmen
+- Markdown-Formatierung
 - Sprache: Deutsch"""
 
     user_content = f"""# Meeting: {meeting_title}{date_str}{attendees_str}{agenda_section}
