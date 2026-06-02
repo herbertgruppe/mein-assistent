@@ -54,7 +54,7 @@ class ResearchAgent(BaseAgent):
         try:
             if self.llm_provider == "anthropic":
                 from langchain_anthropic import ChatAnthropic
-                model = os.getenv("RESEARCH_MODEL", "claude-3-5-sonnet-latest")
+                model = os.getenv("RESEARCH_MODEL", "claude-haiku-4-5")
                 return ChatAnthropic(
                     api_key=self.api_key,
                     model=model,
