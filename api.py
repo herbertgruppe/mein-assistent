@@ -104,52 +104,52 @@ class ProcessProtocolResponse(BaseModel):
 # ---------------------------------------------------------------------------
 _PDF_CSS = """
 @page {
-    margin: 2cm 2cm;
+    margin: 1.8cm 2cm;
     @bottom-right {
         content: "Seite " counter(page) " / " counter(pages);
         font-family: Arial, Helvetica, sans-serif;
-        font-size: 9pt;
+        font-size: 8pt;
         color: #888;
     }
 }
 body {
     font-family: Arial, Helvetica, sans-serif;
-    font-size: 11pt;
-    line-height: 1.55;
+    font-size: 10pt;
+    line-height: 1.3;
     color: #222;
 }
 h1 {
     color: #1F4E79;
-    font-size: 18pt;
+    font-size: 16pt;
     border-bottom: 2px solid #1F4E79;
-    padding-bottom: 6px;
+    padding-bottom: 4px;
     margin-top: 0;
-    margin-bottom: 16px;
+    margin-bottom: 10px;
 }
 h2 {
     color: #1F4E79;
-    font-size: 14pt;
-    margin-top: 22px;
-    margin-bottom: 10px;
+    font-size: 13pt;
+    margin-top: 14px;
+    margin-bottom: 6px;
     border-bottom: 1px solid #cdd9e8;
-    padding-bottom: 4px;
+    padding-bottom: 3px;
 }
 h3 {
     color: #2e5d8c;
-    font-size: 12pt;
-    margin-top: 16px;
-    margin-bottom: 8px;
+    font-size: 11pt;
+    margin-top: 10px;
+    margin-bottom: 5px;
 }
-p { margin: 6px 0; }
+p { margin: 4px 0; }
 table {
     border-collapse: collapse;
     width: 100%;
-    margin-bottom: 14px;
+    margin-bottom: 8px;
     font-size: 10pt;
 }
 th, td {
     border: 1px solid #cdd9e8;
-    padding: 6px 9px;
+    padding: 3px 6px;
     text-align: left;
     vertical-align: top;
 }
@@ -159,28 +159,39 @@ th {
     font-weight: bold;
 }
 tr:nth-child(even) td { background: #f3f7fc; }
-ul, ol { margin: 6px 0 12px 22px; }
-li { margin-bottom: 3px; }
+ul, ol { margin: 3px 0 6px 20px; }
+li { margin-bottom: 1px; }
 strong { color: #1a3a5c; }
 em { color: #444; }
 hr {
     border: none;
     border-top: 1px solid #cdd9e8;
-    margin: 18px 0;
+    margin: 10px 0;
 }
 code {
     background: #f0f5fb;
-    padding: 1px 4px;
+    padding: 1px 3px;
     border-radius: 3px;
     font-family: 'Courier New', monospace;
-    font-size: 10pt;
+    font-size: 9pt;
 }
+pre {
+    background: #f0f5fb;
+    padding: 6px 8px;
+    border-radius: 3px;
+    font-family: 'Courier New', monospace;
+    font-size: 9pt;
+    line-height: 1.3;
+    margin: 6px 0;
+}
+pre code { background: transparent; padding: 0; }
 blockquote {
     border-left: 3px solid #1F4E79;
-    margin: 10px 0 10px 0;
-    padding: 4px 14px;
+    margin: 6px 0;
+    padding: 3px 10px;
     color: #555;
     background: #f6f9fc;
+    font-size: 9pt;
 }
 a { color: #1F4E79; text-decoration: none; }
 """
