@@ -1,0 +1,40 @@
+# .github/risk-rules.yml
+# Risk classification rules for code-approval automation.
+# Code Reviewer Agent reads this file first; LLM classification is fallback only.
+version: 1
+rules:
+  - if_paths_match:
+      - "docs/**"
+      - "README*"
+      - "**/*.md"
+    risk: LOW
+  - if_paths_match:
+      - "**/__tests__/**"
+      - "**/*.test.ts"
+      - "**/*.spec.ts"
+      - "**/test_*.py"
+    risk: LOW
+  - if_paths_match:
+      - "package-lock.json"
+      - "yarn.lock"
+      - "poetry.lock"
+    risk: LOW
+  - if_paths_match:
+      - "nginx/**"
+      - "**/docker-compose*.yml"
+      - "Dockerfile"
+      - "**/Dockerfile*"
+      - "**/.env*"
+      - ".streamlit/secrets*"
+      - "**/migrations/**"
+      - "**/auth/**"
+      - "utils/auth*"
+      - "**/sso/**"
+      - "**/crypto/**"
+      - "**/security/**"
+      - ".github/workflows/**"
+    risk: HIGH
+  - if_diff_size_gt: 500
+    risk_min: MEDIUM
+  - default:
+      risk: MEDIUM
