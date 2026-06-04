@@ -1,0 +1,28 @@
+# CODEOWNERS — HIGH-Risk-Pfade erzwingen Sven-Approval (via Branch-Protection)
+# Andere Pfade dürfen vom herbert-consult-reviewer-Bot approved werden
+# Referenz: HBE-316 risk-rules.yml, HBE-320
+
+# Auth, SSO, Crypto
+**/auth/**               @svenherbert
+utils/auth.py            @svenherbert
+**/sso/**                @svenherbert
+**/crypto/**             @svenherbert
+**/security/**           @svenherbert
+
+# Plaud API Integration (mein-assistent-spezifisch)
+api.py                   @svenherbert
+utils/api_cache.py       @svenherbert
+
+# Infrastruktur
+**/docker-compose*.yml   @svenherbert
+Dockerfile               @svenherbert
+**/.env*                 @svenherbert
+.streamlit/secrets*.toml @svenherbert
+
+# Datenbank
+migrations/**            @svenherbert
+database/**              @svenherbert
+
+# CI/CD und CODEOWNERS selbst
+.github/workflows/**     @svenherbert
+.github/CODEOWNERS       @svenherbert
