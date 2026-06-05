@@ -1,0 +1,22 @@
+name: PR Review via Paperclip
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+jobs:
+  trigger-code-reviewer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Paperclip review issue
+        env:
+          PAPERCLIP_API_URL: ${{ vars.PAPERCLIP_API_URL }}
+          PAPERCLIP_API_KEY: ${{ secrets.PAPERCLIP_API_KEY }}
+        run: |
+          curl -sS -f -X POST "$PAPERCLIP_API_URL/api/companies/9df4976b-9ac8-4e8f-a156-c06c7fa40cdc/issues" \
+            -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"title\": \"PR Review: ${{ github.event.pull_request.title }} (#${{ github.event.pull_request.number }})\",
+              \"description\": \"Review PR: ${{ github.event.pull_request.html_url }}\n\n- Repo: ${{ github.repository }}\n- Author: ${{ github.event.pull_request.user.login }}\n- Head SHA: ${{ github.event.pull_request.head.sha }}\n- Base: ${{ github.event.pull_request.base.ref }}\n\nKlassifiziere, reviewe, entscheide gemaess AGENTS.md.\",
+              \"assigneeAgentId\": \"f2cdbdbc-f456-4ac7-bba6-178ef7422748\",
+              \"priority\": \"medium\"
+            }"
