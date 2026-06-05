@@ -22,7 +22,7 @@ watchdog
 
 # Web Interface
 # >= 1.42: bringt st.login() / st.logout() / st.experimental_user für OIDC
-streamlit>=1.42,<2.0
+streamlit>=1.58.0,<2.0
 
 # PDF-Generierung aus Markdown-Protokollen
 markdown
@@ -48,5 +48,5 @@ Authlib>=1.7.2
 
 # REST-API (api.py) — Endpoint /api/process-reviewed-protocol für Cowork
 fastapi>=0.115
-uvicorn[standard]>=0.30
+uvicorn[standard]>=0.49.0
 python-multipart
