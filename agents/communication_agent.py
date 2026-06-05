@@ -4,6 +4,8 @@ Communication Agent für E-Mail-Versand und Kommunikation
 
 import os
 from typing import Dict, Any
+from ._tool_allowlist import assert_tools_allowlisted
+from ._tool_output_sanitizer import sanitize
 from .base_agent import BaseAgent
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 from tools import EmailTool
@@ -136,7 +138,9 @@ Nutze dieses Tool nur, wenn der Nutzer explizit eine E-Mail versenden möchte.""
             )
 
             # Binde Tool an LLM
-            llm_with_tools = self.llm.bind_tools([email_send_tool])
+            tools = [email_send_tool]
+            assert_tools_allowlisted(tools, self.name)
+            llm_with_tools = self.llm.bind_tools(tools)
 
             # Erstelle System-Prompt
             system_prompt = self._create_system_prompt()
@@ -195,9 +199,12 @@ Nutze dieses Tool nur, wenn der Nutzer explizit eine E-Mail versenden möchte.""
                         else:
                             tool_result = f"Tool {tool_name} nicht verfügbar"
 
-                        # Erstelle Tool-Message
+                        # Erstelle Tool-Message — sanitize at the choke-point so
+                        # both happy-path tool output and the error branch below
+                        # are wrapped in <untrusted_tool_output …> before the LLM
+                        # sees them (HBE-189, F3 from HBE-183 security review).
                         tool_message = ToolMessage(
-                            content=str(tool_result),
+                            content=sanitize(str(tool_result), source=f"{self.name}.{tool_name}"),
                             tool_call_id=tool_call["id"]
                         )
                         messages.append(tool_message)
@@ -206,7 +213,10 @@ Nutze dieses Tool nur, wenn der Nutzer explizit eine E-Mail versenden möchte.""
                     except Exception as e:
                         print(f"[{self.name}] ⚠️ Tool-Fehler: {e}")
                         tool_message = ToolMessage(
-                            content=f"Fehler beim Tool-Aufruf: {str(e)}",
+                            content=sanitize(
+                                f"Fehler beim Tool-Aufruf: {str(e)}",
+                                source=f"{self.name}.{tool_name}",
+                            ),
                             tool_call_id=tool_call["id"]
                         )
                         messages.append(tool_message)

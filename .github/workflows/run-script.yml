@@ -1,0 +1,109 @@
+name: Run script on mein-assistent
+
+# Manual entry point for one-off maintenance scripts that live inside the
+# mein-assistent backend container. Uses the paperclip-engineering force-command
+# wrapper on 46.225.132.135 (HBE-267) authenticated via the org-secret
+# HETZNER_DEPLOY_KEY (HBE-269).
+#
+# NOTE on wrapper compatibility
+# -----------------------------
+# The current paperclip-engineering wrapper's `run-script` subcommand executes
+# `docker exec <backend> node /app/scripts/<file>.js`, i.e. it assumes a Node.js
+# runtime inside the container. mein-assistent is a Python/Streamlit app
+# (container `mein-assistent-api`, FastAPI/Uvicorn) without `node` on PATH.
+# Until the wrapper grows a Python entry point (or this repo gains a Node-side
+# helper), invocations from this workflow will exit non-zero at the
+# `docker exec ... node ...` step. The file is still kept in place so that
+# mein-assistent matches the HBE-269 convention exactly and so a future wrapper
+# upgrade is a one-line change here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      script:
+        description: 'Script filename in /app/scripts/ (e.g. hello.js)'
+        required: true
+        type: string
+      args:
+        description: 'Space-separated arguments passed to the script'
+        required: false
+        default: ''
+        type: string
+      dry_run:
+        description: 'Dry-run (forwards --dry-run to the script)'
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: mein-assistent-run-script-${{ inputs.script }}
+  cancel-in-progress: false
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Prepare SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.HETZNER_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          sed -i -e '$a\' ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 -H 46.225.132.135 >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keygen -lf ~/.ssh/id_ed25519
+
+      - name: Pre-run pg_dump snapshot
+        run: |
+          # mein-assistent's persistence is filesystem + Streamlit state, not a
+          # shared Postgres database. The wrapper's `pg-backup` targets the
+          # central postgres container; calling it with a non-existing db is a
+          # no-op snapshot of nothing useful. The step is kept for parity with
+          # umfragetool/run-script.yml but is intentionally non-fatal.
+          set +e
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes \
+            paperclip-engineering@46.225.132.135 'pg-backup mein_assistent' \
+            > /tmp/pg-backup.log 2>&1
+          rc=$?
+          set -e
+          {
+            echo "## mein-assistent pg_dump snapshot (rc=$rc)"
+            echo ""
+            echo '```'
+            cat /tmp/pg-backup.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run script in backend container
+        env:
+          SCRIPT: ${{ inputs.script }}
+          ARGS: ${{ inputs.args }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          extra=""
+          if [ "$DRY_RUN" = "true" ]; then
+            extra="--dry-run"
+          fi
+          # shellcheck disable=SC2086
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes \
+            paperclip-engineering@46.225.132.135 \
+            "run-script mein-assistent $SCRIPT $extra $ARGS --skip-backup" \
+            | tee /tmp/run-script.log
+          {
+            echo "## mein-assistent run-script"
+            echo ""
+            echo "- script: \`$SCRIPT\`"
+            echo "- args: \`$ARGS\`"
+            echo "- dry_run: \`$DRY_RUN\`"
+            echo ""
+            echo '```'
+            tail -n 200 /tmp/run-script.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up SSH key
+        if: always()
+        run: shred -u ~/.ssh/id_ed25519 2>/dev/null || rm -f ~/.ssh/id_ed25519
