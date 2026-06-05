@@ -3,13 +3,63 @@ Calendar & Email Agent für Kalender- und E-Mail-Operationen
 """
 
 import os
-from typing import Dict, Any, List
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timedelta
 from ._tool_allowlist import assert_tools_allowlisted
 from ._tool_output_sanitizer import sanitize
 from .base_agent import BaseAgent
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 from tools import EmailTool, OutlookGraphTool
+
+
+_ATTACHMENT_ALLOWED_ROOTS: Tuple[str, ...] = ("input_docs", "data/protocols")
+
+
+def _validate_attachment_path(
+    p: str,
+    allowed_roots: Tuple[str, ...] = _ATTACHMENT_ALLOWED_ROOTS,
+    base_dir: Optional[Path] = None,
+) -> Tuple[bool, Optional[Path], Optional[str]]:
+    """Path-sandbox for add_event_attachment (HBE-177, §5.3 audit).
+
+    Resolves ``p`` and rejects it unless it lives inside one of ``allowed_roots``
+    (themselves resolved against ``base_dir`` — the process CWD by default).
+    Returns ``(ok, resolved_path, error_message)``. On reject, ``resolved_path``
+    is ``None`` and the caller must NOT issue a Graph API call.
+    """
+    if not isinstance(p, str) or not p.strip():
+        return False, None, "Attachment-Pfad fehlt oder ist leer."
+
+    base = (base_dir or Path.cwd()).resolve()
+    resolved_roots = []
+    for root in allowed_roots:
+        root_path = Path(root)
+        if not root_path.is_absolute():
+            root_path = base / root_path
+        resolved_roots.append(root_path.resolve())
+
+    try:
+        candidate = Path(p)
+        if not candidate.is_absolute():
+            candidate = base / candidate
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError) as exc:
+        return False, None, f"Attachment-Pfad konnte nicht aufgelöst werden: {exc}"
+
+    for root in resolved_roots:
+        try:
+            resolved.relative_to(root)
+            return True, resolved, None
+        except ValueError:
+            continue
+
+    allowed = ", ".join(str(r) for r in resolved_roots)
+    return (
+        False,
+        None,
+        f"Attachment-Pfad ausserhalb der erlaubten Verzeichnisse: {p!r} (erlaubt: {allowed}).",
+    )
 
 
 class CalendarEmailAgent(BaseAgent):
@@ -497,7 +547,13 @@ Um Kalender-Termine abzurufen, müssen Sie sich zuerst mit Ihrem Microsoft-Konto
                 if event.get('location'):
                     result += f"   📍 {event.get('location')}\n"
                 if event.get('attendees'):
-                    result += f"   👥 {', '.join(event.get('attendees', []))}\n"
+                    names = event.get('attendee_names') or [
+                        (a.get('name') or a.get('email') or '') if isinstance(a, dict) else str(a)
+                        for a in event.get('attendees', [])
+                    ]
+                    names = [n for n in names if n]
+                    if names:
+                        result += f"   👥 {', '.join(names)}\n"
                 result += f"   🆔 ID: `{event.get('id')}`\n\n"
 
             return result
@@ -611,10 +667,14 @@ Der Entwurf ist jetzt in Ihrem Outlook verfügbar und kann dort bearbeitet und v
 
     def _add_event_attachment_wrapper(self, event_id: str, file_path: str, file_name: str = None) -> str:
         """Wrapper für add_event_attachment"""
+        ok, resolved, sandbox_err = _validate_attachment_path(file_path)
+        if not ok:
+            return f"✗ Fehler beim Anhängen: {sandbox_err}"
+
         try:
             result = self.outlook_tool.add_attachment_to_event(
                 event_id=event_id,
-                file_path=file_path,
+                file_path=str(resolved),
                 file_name=file_name
             )
 

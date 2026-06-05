@@ -21,8 +21,9 @@ import base64
 import os
 import re
 import tempfile
+from datetime import date, datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Security
@@ -344,6 +345,18 @@ class PendingTranscript(BaseModel):
     body_text: str = ""
     has_attachments: bool = False
     attachments: List[TranscriptAttachment] = []
+    meeting_time_hint: Optional[str] = Field(
+        None,
+        description=(
+            "Aus Betreff/Body extrahierter Meeting-Startzeitstempel als naives "
+            "ISO-Local (YYYY-MM-DDTHH:MM:SS). `null` wenn nicht eindeutig parsbar. "
+            "Unterscheidet sich von `received_at` (Mail-Eingang, UTC)."
+        ),
+    )
+    meeting_time_end_hint: Optional[str] = Field(
+        None,
+        description="Endzeitstempel des Meetings, falls eine Zeit-Range erkannt wurde.",
+    )
 
 
 class PendingTranscriptsResponse(BaseModel):
@@ -366,6 +379,104 @@ class SimpleResult(BaseModel):
     success: bool
     message: str = ""
     error: Optional[str] = None
+
+
+# Datums-Heuristiken für Plaud-Mail-Betreff (z. B. „04-17 Besprechung 09:30-11:00")
+_RE_ISO_DATE = re.compile(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b")
+_RE_DE_DATE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})?")
+_RE_MD_DATE = re.compile(r"(?<!\d)(\d{1,2})-(\d{1,2})(?!\d)")
+_RE_TIME_RANGE = re.compile(r"\b(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})\b")
+_RE_TIME_SINGLE = re.compile(r"\b(\d{1,2}):(\d{2})\b")
+
+
+def _fallback_year_from_received(received_at: str) -> int:
+    """Liefert das Jahr aus `received_at` (ISO/UTC), Fallback: aktuelles Jahr."""
+    if received_at:
+        try:
+            return datetime.fromisoformat(received_at.replace("Z", "+00:00")).year
+        except ValueError:
+            pass
+    return datetime.now().year
+
+
+def _extract_meeting_time_hint(
+    subject: str,
+    body: str,
+    received_at: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Heuristische Extraktion einer Meeting-Zeit aus dem Mail-Betreff (Fallback: Body).
+
+    Erkennt Datums-Muster (`YYYY-MM-DD`, `DD.MM.[YYYY]`, `MM-DD`) und Zeit-Muster
+    (`HH:MM`, `HH:MM-HH:MM`). Fehlt das Jahr, wird es aus `received_at` abgeleitet.
+
+    Rückgabe: `(start_iso, end_iso)` als naive Local-ISO-Strings, jeweils `None`
+    wenn nicht eindeutig parsbar. `end_iso` nur belegt, wenn eine Zeit-Range
+    erkannt wurde.
+    """
+    fallback_year = _fallback_year_from_received(received_at)
+
+    # Subject bevorzugen; nur in Body schauen, wenn Subject leer wäre.
+    sources = [subject or "", body or ""]
+
+    for text in sources:
+        if not text:
+            continue
+
+        # 1) Datum bestimmen — ISO zuerst (verhindert MM-DD-Treffer in YYYY-MM-DD)
+        year: Optional[int] = None
+        month: Optional[int] = None
+        day: Optional[int] = None
+
+        m = _RE_ISO_DATE.search(text)
+        if m:
+            year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        else:
+            m = _RE_DE_DATE.search(text)
+            if m:
+                day, month = int(m.group(1)), int(m.group(2))
+                year_part = m.group(3)
+                if year_part:
+                    year = int(year_part)
+                    if year < 100:
+                        year += 2000
+                else:
+                    year = fallback_year
+            else:
+                m = _RE_MD_DATE.search(text)
+                if m:
+                    month, day = int(m.group(1)), int(m.group(2))
+                    year = fallback_year
+
+        if year is None or month is None or day is None:
+            continue
+        try:
+            date(year, month, day)
+        except ValueError:
+            continue
+
+        # 2) Zeit bestimmen — Range bevorzugt
+        sh = sm = eh = em = None
+        m = _RE_TIME_RANGE.search(text)
+        if m:
+            sh, sm, eh, em = (int(m.group(i)) for i in (1, 2, 3, 4))
+        else:
+            m = _RE_TIME_SINGLE.search(text)
+            if m:
+                sh, sm = int(m.group(1)), int(m.group(2))
+
+        if sh is None or sm is None:
+            continue
+        if not (0 <= sh < 24 and 0 <= sm < 60):
+            continue
+
+        start_iso = f"{year:04d}-{month:02d}-{day:02d}T{sh:02d}:{sm:02d}:00"
+        end_iso: Optional[str] = None
+        if eh is not None and em is not None and 0 <= eh < 24 and 0 <= em < 60:
+            end_iso = f"{year:04d}-{month:02d}-{day:02d}T{eh:02d}:{em:02d}:00"
+        return start_iso, end_iso
+
+    return None, None
 
 
 @app.get("/api/transcripts/pending", response_model=PendingTranscriptsResponse)
@@ -412,17 +523,25 @@ def list_pending_transcripts(
             )
             for a in (msg.get("attachments") or [])
         ]
+        subject = msg.get("subject", "") or ""
+        received_at = msg.get("receivedDateTime", "") or ""
+        body_text = body_obj.get("content", "") or ""
+        meeting_start, meeting_end = _extract_meeting_time_hint(
+            subject, body_text, received_at
+        )
         transcripts.append(
             PendingTranscript(
                 message_id=msg.get("id", ""),
-                subject=msg.get("subject", "") or "",
-                received_at=msg.get("receivedDateTime", "") or "",
+                subject=subject,
+                received_at=received_at,
                 sender_name=sender.get("name"),
                 sender_email=sender.get("address"),
                 body_preview=msg.get("bodyPreview", "") or "",
-                body_text=body_obj.get("content", "") or "",
+                body_text=body_text,
                 has_attachments=bool(msg.get("hasAttachments")),
                 attachments=attachments_meta,
+                meeting_time_hint=meeting_start,
+                meeting_time_end_hint=meeting_end,
             )
         )
 
@@ -475,13 +594,31 @@ def get_transcript_attachment(
 # ---------------------------------------------------------------------------
 # Kalender (für Termin-Zuordnung in Teil 1 des Skills)
 # ---------------------------------------------------------------------------
+class CalendarAttendee(BaseModel):
+    """Pro-Person-Status eines Termin-Teilnehmers.
+
+    Werte werden 1:1 von MS Graph durchgereicht. Siehe API_SETUP.md
+    Abschnitt „Attendee-Semantik" für die Bedeutung der einzelnen Felder.
+    """
+    name: str = ""
+    email: str = ""
+    # MS Graph responseStatus.response: accepted | declined | tentative |
+    # notResponded | none — zusätzlich "organizer" für den Termin-Organisator.
+    response: str = "none"
+    # MS Graph attendeeType: required | optional | resource
+    type: str = "required"
+
+
 class CalendarEvent(BaseModel):
     id: str
     title: str
     start: str
     end: str
     location: str = ""
-    attendees: List[str] = []
+    attendees: List[CalendarAttendee] = []
+    # Backwards-Compat: einfache Namensliste für ältere Konsumenten.
+    # Neue Konsumenten sollen `attendees[].name` verwenden.
+    attendee_names: List[str] = []
     preview: str = ""
     is_all_day: bool = False
 
@@ -568,6 +705,26 @@ def get_calendar_events(
         )
         if is_all_day and not include_all_day:
             continue
+        raw_attendees = ev.get("attendees") or []
+        attendees: List[CalendarAttendee] = []
+        for a in raw_attendees:
+            if isinstance(a, dict):
+                if not (a.get("name") or a.get("email")):
+                    continue
+                attendees.append(
+                    CalendarAttendee(
+                        name=a.get("name") or "",
+                        email=a.get("email") or "",
+                        response=a.get("response") or "none",
+                        type=a.get("type") or "required",
+                    )
+                )
+            elif isinstance(a, str) and a:
+                # Fallback falls das Tool noch das alte String-Format liefert.
+                attendees.append(CalendarAttendee(name=a))
+        attendee_names = ev.get("attendee_names") or [
+            a.name for a in attendees if a.name
+        ]
         events.append(
             CalendarEvent(
                 id=ev.get("id", ""),
@@ -575,7 +732,8 @@ def get_calendar_events(
                 start=start_str,
                 end=end_str,
                 location=ev.get("location", "") or "",
-                attendees=[a for a in (ev.get("attendees") or []) if a],
+                attendees=attendees,
+                attendee_names=[n for n in attendee_names if n],
                 preview=ev.get("preview", "") or "",
                 is_all_day=is_all_day,
             )
