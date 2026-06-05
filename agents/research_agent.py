@@ -4,6 +4,7 @@ Research Agent für Informationsbeschaffung
 
 import os
 from typing import Dict, Any, List
+from ._tool_allowlist import assert_tools_allowlisted
 from .base_agent import BaseAgent
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 from tools import DocumentTool
@@ -53,7 +54,7 @@ class ResearchAgent(BaseAgent):
         try:
             if self.llm_provider == "anthropic":
                 from langchain_anthropic import ChatAnthropic
-                model = os.getenv("RESEARCH_MODEL", "claude-3-5-sonnet-latest")
+                model = os.getenv("RESEARCH_MODEL", "claude-haiku-4-5")
                 return ChatAnthropic(
                     api_key=self.api_key,
                     model=model,
@@ -163,6 +164,7 @@ Das Tool scannt ALLE Dokumente vollständig mit Chunk-Überlappung (2000 Zeichen
 
             # Binde Tools an das LLM
             if available_tools:
+                assert_tools_allowlisted(available_tools, self.name)
                 llm_with_tools = self.llm.bind_tools(available_tools)
             else:
                 # Kein Tool verfügbar, nutze normales LLM
