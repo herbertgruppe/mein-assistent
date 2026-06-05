@@ -1,6 +1,7 @@
 """
 Mein Tag Dashboard-Tab: Kalender, Asana-Aufgaben, Dokumenten-Suche, Meeting-Vorbereitung.
 """
+import html
 import os
 import time
 import streamlit as st
@@ -8,12 +9,14 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
+from agents._tool_output_sanitizer import sanitize
 from utils.api_cache import cached_get_asana_projects, cached_get_asana_tasks
 from utils.state import _get_user_ctx
 from utils.protocol import (
     load_agenda_templates, save_agenda_templates, create_agenda_from_template,
     generate_agenda_with_asana_context, sanitize_filename, convert_markdown_to_pdf
 )
+from agents._tool_allowlist import assert_tools_allowlisted
 
 
 def convert_to_berlin_time(dt):
@@ -255,6 +258,8 @@ def render_task_card(task: dict, asana_agent):
                         author = comment.get('author', 'Unbekannt')
                         text = comment.get('text', '')
                         created_at = comment.get('created_at', '')
+                        safe_author = html.escape(str(author))
+                        safe_text = html.escape(str(text)).replace('\n', '<br>')
 
                         time_str = ""
                         if created_at:
@@ -273,8 +278,8 @@ def render_task_card(task: dict, asana_agent):
                                 margin-bottom: 0.75rem;
                                 border-left: 3px solid #4064a0;
                             ">
-                                <strong>{author}</strong> <em style="color: #6b7280; font-size: 0.875em;">{time_str}</em>
-                                <p style="margin-top: 0.375rem; margin-bottom: 0;">{text}</p>
+                                <strong>{safe_author}</strong> <em style="color: #6b7280; font-size: 0.875em;">{time_str}</em>
+                                <p style="margin-top: 0.375rem; margin-bottom: 0;">{safe_text}</p>
                             </div>
                             """,
                             unsafe_allow_html=True
@@ -478,6 +483,7 @@ Nutze die verfügbaren Tools, um die Fragen des Nutzers zu beantworten. Sei prä
 
                 orch = st.session_state.orchestrator
                 tools = [list_asana_projects, get_project_tasks, get_my_tasks]
+                assert_tools_allowlisted(tools, "MeinTagDashboard")
                 llm_with_tools = orch.research_agent.llm.bind_tools(tools)
 
                 lc_messages = []
@@ -509,7 +515,16 @@ Nutze die verfügbaren Tools, um die Fragen des Nutzers zu beantworten. Sei prä
                         tool_args = tool_call['args']
                         tool_func = next((t for t in tools if t.name == tool_name), None)
                         if tool_func:
-                            tool_result = tool_func.invoke(tool_args)
+                            # Sanitize at the source so both the session_state
+                            # record and the ToolMessage instance below carry
+                            # the wrapped/normalized form before any LLM sees
+                            # them (HBE-189, F2 from HBE-183 — Asana task names
+                            # and notes in shared projects are attacker-
+                            # controllable).
+                            tool_result = sanitize(
+                                str(tool_func.invoke(tool_args)),
+                                source=f"asana_chat.{tool_name}",
+                            )
                             st.session_state['asana_chat_messages'].append({
                                 'role': 'tool',
                                 'content': tool_result,

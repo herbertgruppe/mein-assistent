@@ -21,8 +21,9 @@ import base64
 import os
 import re
 import tempfile
+from datetime import date, datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Security
@@ -104,52 +105,52 @@ class ProcessProtocolResponse(BaseModel):
 # ---------------------------------------------------------------------------
 _PDF_CSS = """
 @page {
-    margin: 2cm 2cm;
+    margin: 1.8cm 2cm;
     @bottom-right {
         content: "Seite " counter(page) " / " counter(pages);
         font-family: Arial, Helvetica, sans-serif;
-        font-size: 9pt;
+        font-size: 8pt;
         color: #888;
     }
 }
 body {
     font-family: Arial, Helvetica, sans-serif;
-    font-size: 11pt;
-    line-height: 1.55;
+    font-size: 10pt;
+    line-height: 1.3;
     color: #222;
 }
 h1 {
     color: #1F4E79;
-    font-size: 18pt;
+    font-size: 16pt;
     border-bottom: 2px solid #1F4E79;
-    padding-bottom: 6px;
+    padding-bottom: 4px;
     margin-top: 0;
-    margin-bottom: 16px;
+    margin-bottom: 10px;
 }
 h2 {
     color: #1F4E79;
-    font-size: 14pt;
-    margin-top: 22px;
-    margin-bottom: 10px;
+    font-size: 13pt;
+    margin-top: 14px;
+    margin-bottom: 6px;
     border-bottom: 1px solid #cdd9e8;
-    padding-bottom: 4px;
+    padding-bottom: 3px;
 }
 h3 {
     color: #2e5d8c;
-    font-size: 12pt;
-    margin-top: 16px;
-    margin-bottom: 8px;
+    font-size: 11pt;
+    margin-top: 10px;
+    margin-bottom: 5px;
 }
-p { margin: 6px 0; }
+p { margin: 4px 0; }
 table {
     border-collapse: collapse;
     width: 100%;
-    margin-bottom: 14px;
+    margin-bottom: 8px;
     font-size: 10pt;
 }
 th, td {
     border: 1px solid #cdd9e8;
-    padding: 6px 9px;
+    padding: 3px 6px;
     text-align: left;
     vertical-align: top;
 }
@@ -159,28 +160,39 @@ th {
     font-weight: bold;
 }
 tr:nth-child(even) td { background: #f3f7fc; }
-ul, ol { margin: 6px 0 12px 22px; }
-li { margin-bottom: 3px; }
+ul, ol { margin: 3px 0 6px 20px; }
+li { margin-bottom: 1px; }
 strong { color: #1a3a5c; }
 em { color: #444; }
 hr {
     border: none;
     border-top: 1px solid #cdd9e8;
-    margin: 18px 0;
+    margin: 10px 0;
 }
 code {
     background: #f0f5fb;
-    padding: 1px 4px;
+    padding: 1px 3px;
     border-radius: 3px;
     font-family: 'Courier New', monospace;
-    font-size: 10pt;
+    font-size: 9pt;
 }
+pre {
+    background: #f0f5fb;
+    padding: 6px 8px;
+    border-radius: 3px;
+    font-family: 'Courier New', monospace;
+    font-size: 9pt;
+    line-height: 1.3;
+    margin: 6px 0;
+}
+pre code { background: transparent; padding: 0; }
 blockquote {
     border-left: 3px solid #1F4E79;
-    margin: 10px 0 10px 0;
-    padding: 4px 14px;
+    margin: 6px 0;
+    padding: 3px 10px;
     color: #555;
     background: #f6f9fc;
+    font-size: 9pt;
 }
 a { color: #1F4E79; text-decoration: none; }
 """
@@ -231,6 +243,52 @@ def _safe_filename(name: str, max_len: int = 80) -> str:
     return cleaned[:max_len] if cleaned else "Protokoll"
 
 
+def _strip_obsidian_syntax(md: str) -> str:
+    """
+    Konvertiert Obsidian-spezifische Syntax in Standard-Markdown.
+
+    Hintergrund: Das Markdown im Vault enthält Wikilinks und ggf. Callouts.
+    WeasyPrint (PDF-Generierung) und Asana-Notes verstehen diese Syntax nicht
+    und würden sie als Literaltext anzeigen. Daher hier vor jeder Weiterverarbeitung
+    in Standard-Markdown konvertieren — die Vault-Version bleibt unverändert.
+
+    Behandelt:
+      - ![[bild.png]]              -> entfernt (Embeds können nicht aufgelöst werden)
+      - [[pfad/datei.md|Anzeige]]  -> Anzeige
+      - [[pfad/datei.md]]          -> datei (Basename, ohne .md)
+      - [[Name]]                   -> Name
+      - > [!type] Titel            -> > **Titel**  (Callout zu Quote-Block)
+    """
+    if not md:
+        return md
+
+    # 1) Embed-Wikilinks (Bilder/Audio/etc.) entfernen — nicht renderbar im PDF
+    md = re.sub(r"!\[\[[^\]\n]+\]\]", "", md)
+
+    # 2) Wikilinks mit Alias: [[pfad|Anzeige]] -> Anzeige
+    md = re.sub(r"\[\[[^\]\|\n]+\|([^\]\n]+)\]\]", r"\1", md)
+
+    # 3) Wikilinks ohne Alias: [[Pfad/Name.md]] oder [[Name]] -> Basename ohne .md
+    def _basename(match: "re.Match[str]") -> str:
+        target = match.group(1).strip()
+        name = target.rsplit("/", 1)[-1]
+        if name.endswith(".md"):
+            name = name[:-3]
+        return name
+
+    md = re.sub(r"\[\[([^\]\|\n]+)\]\]", _basename, md)
+
+    # 4) Callouts: > [!type] Titel  ->  > **Titel** (Quote-Block bleibt)
+    md = re.sub(
+        r"^(\s*>\s*)\[!\w+\][+-]?\s*(.*)$",
+        r"\1**\2**",
+        md,
+        flags=re.MULTILINE,
+    )
+
+    return md
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -240,7 +298,7 @@ def health():
     return {
         "status": "ok",
         "service": "mein-assistent-api",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "api_key_configured": bool(_API_SECRET_KEY),
     }
 
@@ -251,6 +309,7 @@ def health():
 # Konfigurierbar via .env, Default: "Transkripte" unter Posteingang
 _TRANSCRIPTS_FOLDER_NAME = os.getenv("TRANSCRIPTS_FOLDER_NAME", "Transkripte")
 _TRANSCRIPTS_PARENT = os.getenv("TRANSCRIPTS_PARENT_FOLDER", "inbox")
+_TRANSCRIPTS_ARCHIVE_FOLDER = os.getenv("TRANSCRIPTS_ARCHIVE_FOLDER", "Transkripte erledigt")
 
 
 def _get_outlook_tool():
@@ -286,6 +345,18 @@ class PendingTranscript(BaseModel):
     body_text: str = ""
     has_attachments: bool = False
     attachments: List[TranscriptAttachment] = []
+    meeting_time_hint: Optional[str] = Field(
+        None,
+        description=(
+            "Aus Betreff/Body extrahierter Meeting-Startzeitstempel als naives "
+            "ISO-Local (YYYY-MM-DDTHH:MM:SS). `null` wenn nicht eindeutig parsbar. "
+            "Unterscheidet sich von `received_at` (Mail-Eingang, UTC)."
+        ),
+    )
+    meeting_time_end_hint: Optional[str] = Field(
+        None,
+        description="Endzeitstempel des Meetings, falls eine Zeit-Range erkannt wurde.",
+    )
 
 
 class PendingTranscriptsResponse(BaseModel):
@@ -308,6 +379,104 @@ class SimpleResult(BaseModel):
     success: bool
     message: str = ""
     error: Optional[str] = None
+
+
+# Datums-Heuristiken für Plaud-Mail-Betreff (z. B. „04-17 Besprechung 09:30-11:00")
+_RE_ISO_DATE = re.compile(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b")
+_RE_DE_DATE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})?")
+_RE_MD_DATE = re.compile(r"(?<!\d)(\d{1,2})-(\d{1,2})(?!\d)")
+_RE_TIME_RANGE = re.compile(r"\b(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})\b")
+_RE_TIME_SINGLE = re.compile(r"\b(\d{1,2}):(\d{2})\b")
+
+
+def _fallback_year_from_received(received_at: str) -> int:
+    """Liefert das Jahr aus `received_at` (ISO/UTC), Fallback: aktuelles Jahr."""
+    if received_at:
+        try:
+            return datetime.fromisoformat(received_at.replace("Z", "+00:00")).year
+        except ValueError:
+            pass
+    return datetime.now().year
+
+
+def _extract_meeting_time_hint(
+    subject: str,
+    body: str,
+    received_at: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Heuristische Extraktion einer Meeting-Zeit aus dem Mail-Betreff (Fallback: Body).
+
+    Erkennt Datums-Muster (`YYYY-MM-DD`, `DD.MM.[YYYY]`, `MM-DD`) und Zeit-Muster
+    (`HH:MM`, `HH:MM-HH:MM`). Fehlt das Jahr, wird es aus `received_at` abgeleitet.
+
+    Rückgabe: `(start_iso, end_iso)` als naive Local-ISO-Strings, jeweils `None`
+    wenn nicht eindeutig parsbar. `end_iso` nur belegt, wenn eine Zeit-Range
+    erkannt wurde.
+    """
+    fallback_year = _fallback_year_from_received(received_at)
+
+    # Subject bevorzugen; nur in Body schauen, wenn Subject leer wäre.
+    sources = [subject or "", body or ""]
+
+    for text in sources:
+        if not text:
+            continue
+
+        # 1) Datum bestimmen — ISO zuerst (verhindert MM-DD-Treffer in YYYY-MM-DD)
+        year: Optional[int] = None
+        month: Optional[int] = None
+        day: Optional[int] = None
+
+        m = _RE_ISO_DATE.search(text)
+        if m:
+            year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        else:
+            m = _RE_DE_DATE.search(text)
+            if m:
+                day, month = int(m.group(1)), int(m.group(2))
+                year_part = m.group(3)
+                if year_part:
+                    year = int(year_part)
+                    if year < 100:
+                        year += 2000
+                else:
+                    year = fallback_year
+            else:
+                m = _RE_MD_DATE.search(text)
+                if m:
+                    month, day = int(m.group(1)), int(m.group(2))
+                    year = fallback_year
+
+        if year is None or month is None or day is None:
+            continue
+        try:
+            date(year, month, day)
+        except ValueError:
+            continue
+
+        # 2) Zeit bestimmen — Range bevorzugt
+        sh = sm = eh = em = None
+        m = _RE_TIME_RANGE.search(text)
+        if m:
+            sh, sm, eh, em = (int(m.group(i)) for i in (1, 2, 3, 4))
+        else:
+            m = _RE_TIME_SINGLE.search(text)
+            if m:
+                sh, sm = int(m.group(1)), int(m.group(2))
+
+        if sh is None or sm is None:
+            continue
+        if not (0 <= sh < 24 and 0 <= sm < 60):
+            continue
+
+        start_iso = f"{year:04d}-{month:02d}-{day:02d}T{sh:02d}:{sm:02d}:00"
+        end_iso: Optional[str] = None
+        if eh is not None and em is not None and 0 <= eh < 24 and 0 <= em < 60:
+            end_iso = f"{year:04d}-{month:02d}-{day:02d}T{eh:02d}:{em:02d}:00"
+        return start_iso, end_iso
+
+    return None, None
 
 
 @app.get("/api/transcripts/pending", response_model=PendingTranscriptsResponse)
@@ -354,17 +523,25 @@ def list_pending_transcripts(
             )
             for a in (msg.get("attachments") or [])
         ]
+        subject = msg.get("subject", "") or ""
+        received_at = msg.get("receivedDateTime", "") or ""
+        body_text = body_obj.get("content", "") or ""
+        meeting_start, meeting_end = _extract_meeting_time_hint(
+            subject, body_text, received_at
+        )
         transcripts.append(
             PendingTranscript(
                 message_id=msg.get("id", ""),
-                subject=msg.get("subject", "") or "",
-                received_at=msg.get("receivedDateTime", "") or "",
+                subject=subject,
+                received_at=received_at,
                 sender_name=sender.get("name"),
                 sender_email=sender.get("address"),
                 body_preview=msg.get("bodyPreview", "") or "",
-                body_text=body_obj.get("content", "") or "",
+                body_text=body_text,
                 has_attachments=bool(msg.get("hasAttachments")),
                 attachments=attachments_meta,
+                meeting_time_hint=meeting_start,
+                meeting_time_end_hint=meeting_end,
             )
         )
 
@@ -417,13 +594,31 @@ def get_transcript_attachment(
 # ---------------------------------------------------------------------------
 # Kalender (für Termin-Zuordnung in Teil 1 des Skills)
 # ---------------------------------------------------------------------------
+class CalendarAttendee(BaseModel):
+    """Pro-Person-Status eines Termin-Teilnehmers.
+
+    Werte werden 1:1 von MS Graph durchgereicht. Siehe API_SETUP.md
+    Abschnitt „Attendee-Semantik" für die Bedeutung der einzelnen Felder.
+    """
+    name: str = ""
+    email: str = ""
+    # MS Graph responseStatus.response: accepted | declined | tentative |
+    # notResponded | none — zusätzlich "organizer" für den Termin-Organisator.
+    response: str = "none"
+    # MS Graph attendeeType: required | optional | resource
+    type: str = "required"
+
+
 class CalendarEvent(BaseModel):
     id: str
     title: str
     start: str
     end: str
     location: str = ""
-    attendees: List[str] = []
+    attendees: List[CalendarAttendee] = []
+    # Backwards-Compat: einfache Namensliste für ältere Konsumenten.
+    # Neue Konsumenten sollen `attendees[].name` verwenden.
+    attendee_names: List[str] = []
     preview: str = ""
     is_all_day: bool = False
 
@@ -510,6 +705,26 @@ def get_calendar_events(
         )
         if is_all_day and not include_all_day:
             continue
+        raw_attendees = ev.get("attendees") or []
+        attendees: List[CalendarAttendee] = []
+        for a in raw_attendees:
+            if isinstance(a, dict):
+                if not (a.get("name") or a.get("email")):
+                    continue
+                attendees.append(
+                    CalendarAttendee(
+                        name=a.get("name") or "",
+                        email=a.get("email") or "",
+                        response=a.get("response") or "none",
+                        type=a.get("type") or "required",
+                    )
+                )
+            elif isinstance(a, str) and a:
+                # Fallback falls das Tool noch das alte String-Format liefert.
+                attendees.append(CalendarAttendee(name=a))
+        attendee_names = ev.get("attendee_names") or [
+            a.name for a in attendees if a.name
+        ]
         events.append(
             CalendarEvent(
                 id=ev.get("id", ""),
@@ -517,7 +732,8 @@ def get_calendar_events(
                 start=start_str,
                 end=end_str,
                 location=ev.get("location", "") or "",
-                attendees=[a for a in (ev.get("attendees") or []) if a],
+                attendees=attendees,
+                attendee_names=[n for n in attendee_names if n],
                 preview=ev.get("preview", "") or "",
                 is_all_day=is_all_day,
             )
@@ -565,6 +781,76 @@ def mark_transcript_read(
     return SimpleResult(success=True, message="Mail als gelesen markiert.")
 
 
+@app.post("/api/transcripts/{message_id}/archive", response_model=SimpleResult)
+def archive_transcript(
+    message_id: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Verschiebt eine Transkript-Mail in den Archiv-Unterordner.
+
+    Zielordner (konfigurierbar via TRANSCRIPTS_ARCHIVE_FOLDER): "Transkripte erledigt"
+    Erwartet als Unterordner UNTER dem Transkripte-Ordner.
+
+    Wird vom Meeting-Protokoll-Workflow am Ende von Teil 2 aufgerufen, statt nur
+    die Mail als gelesen zu markieren — so kann sie nicht versehentlich erneut
+    in den pending-Topf rutschen.
+
+    Sicherheitscheck wie bei mark-read: nur Mails im Transkripte-Ordner werden
+    akzeptiert.
+    """
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    folder_id = _resolve_transcripts_folder_id(tool)
+    if not folder_id:
+        raise HTTPException(status_code=404, detail="Transkripte-Ordner nicht gefunden.")
+
+    if not tool.is_message_in_folder(message_id, folder_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Mail liegt nicht im Transkripte-Ordner.",
+        )
+
+    # Gezielte Suche: Archiv-Ordner als Subfolder DES Transkripte-Ordners (deterministisch,
+    # robust gegen Schwester-Ordner mit ähnlichem Namen)
+    archive_folder_id = tool.find_subfolder_id(
+        name=_TRANSCRIPTS_ARCHIVE_FOLDER,
+        parent=folder_id,
+    )
+    if not archive_folder_id:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Archiv-Unterordner '{_TRANSCRIPTS_ARCHIVE_FOLDER}' unter "
+                f"'{_TRANSCRIPTS_FOLDER_NAME}' nicht gefunden. "
+                f"Bitte in Outlook anlegen."
+            ),
+        )
+
+    # Direkter Graph-API-Move (umgeht move_to_folder's flache Heuristik)
+    import requests as _rq
+    move_url = f"https://graph.microsoft.com/v1.0/me/messages/{message_id}/move"
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Content-Type": "application/json",
+    }
+    move_resp = _rq.post(
+        move_url, headers=headers, json={"destinationId": archive_folder_id}, timeout=30
+    )
+    if move_resp.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Graph-API move fehlgeschlagen: HTTP {move_resp.status_code} — {move_resp.text[:200]}",
+        )
+
+    return SimpleResult(
+        success=True,
+        message=f"Mail in '{_TRANSCRIPTS_FOLDER_NAME}/{_TRANSCRIPTS_ARCHIVE_FOLDER}' verschoben.",
+    )
+
+
 @app.post("/api/process-reviewed-protocol", response_model=ProcessProtocolResponse)
 def process_reviewed_protocol(
     req: ProcessProtocolRequest,
@@ -590,6 +876,10 @@ def process_reviewed_protocol(
 
     safe_name = _safe_filename(req.meeting_name)
 
+    # Obsidian-Syntax (Wikilinks, Callouts) für PDF/Outlook strippen.
+    # Die Vault-Version bleibt unverändert — hier nur die Außenwelt-Version.
+    clean_md = _strip_obsidian_syntax(req.markdown)
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         pdf_path = tmp / f"Protokoll_{safe_name}.pdf"
@@ -604,7 +894,7 @@ def process_reviewed_protocol(
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"PDF-Dekodierung fehlgeschlagen: {exc}")
         else:
-            pdf_generated = _markdown_to_pdf_standalone(req.markdown, pdf_path)
+            pdf_generated = _markdown_to_pdf_standalone(clean_md, pdf_path)
             if not pdf_generated:
                 errors.append("PDF-Generierung aus Markdown fehlgeschlagen")
 

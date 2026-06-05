@@ -38,94 +38,6 @@ def _convert_to_berlin_time(dt):
         return dt
 
 
-TRANSCRIPT_PREVIEW_CHAR_LIMIT = 1500
-
-
-@st.cache_data(ttl=600, show_spinner=False)
-def _read_transcript_text(file_path_str: str, mtime: float) -> str:
-    """Liest Transkript-Text aus PDF oder Plain-Text. mtime erzwingt Cache-Invalidierung bei Datei-Änderung."""
-    file_path = Path(file_path_str)
-    if not file_path.exists():
-        return ""
-    if file_path.suffix.lower() == '.pdf':
-        try:
-            from langchain_community.document_loaders import PyPDFLoader
-            loader = PyPDFLoader(str(file_path))
-            pages = loader.load()
-            return "\n\n".join([page.page_content for page in pages])
-        except Exception as e:
-            return f"[Fehler beim Lesen der PDF: {e}]"
-    try:
-        return file_path.read_text(encoding='utf-8')
-    except UnicodeDecodeError:
-        try:
-            return file_path.read_text(encoding='latin-1')
-        except Exception as e:
-            return f"[Fehler beim Lesen der Datei: {e}]"
-    except Exception as e:
-        return f"[Fehler beim Lesen der Datei: {e}]"
-
-
-def _render_transcript_preview(idx: int, file_path: Path) -> None:
-    """Zeigt eine Vorschau des Transkripts unter dem Termin-Picker (HBE-287).
-
-    Erste 1.500 Zeichen monospace + scrollbar; Toggle fuer Volltext.
-    Vermeidet Tab-Wechsel nach Plaud waehrend der Termin-Zuordnung.
-    """
-    if not file_path or not str(file_path):
-        return
-    try:
-        mtime = file_path.stat().st_mtime if file_path.exists() else 0.0
-    except Exception:
-        mtime = 0.0
-
-    text = _read_transcript_text(str(file_path), mtime)
-    if not text or not text.strip():
-        st.caption("📄 Transkript-Vorschau: (Datei leer oder nicht lesbar)")
-        return
-
-    total_chars = len(text)
-    show_full_key = f"transcript_preview_full_{idx}"
-    show_full = st.session_state.get(show_full_key, False) and total_chars > TRANSCRIPT_PREVIEW_CHAR_LIMIT
-
-    if total_chars <= TRANSCRIPT_PREVIEW_CHAR_LIMIT:
-        label = f"📄 Transkript-Vorschau ({total_chars:,} Zeichen)"
-    elif show_full:
-        label = f"📄 Transkript-Vorschau (Volltext, {total_chars:,} Zeichen)"
-    else:
-        label = (
-            f"📄 Transkript-Vorschau (erste {TRANSCRIPT_PREVIEW_CHAR_LIMIT:,} "
-            f"von {total_chars:,} Zeichen)"
-        )
-
-    display_text = text if show_full else text[:TRANSCRIPT_PREVIEW_CHAR_LIMIT]
-
-    with st.expander(label, expanded=True):
-        st.text_area(
-            "Transkript-Vorschau",
-            value=display_text,
-            height=260,
-            disabled=True,
-            label_visibility="collapsed",
-            key=f"transcript_preview_text_{idx}_{'full' if show_full else 'short'}",
-        )
-        if total_chars > TRANSCRIPT_PREVIEW_CHAR_LIMIT:
-            if show_full:
-                if st.button(
-                    "↑ Kurzfassung zeigen",
-                    key=f"transcript_preview_short_btn_{idx}",
-                ):
-                    st.session_state[show_full_key] = False
-                    st.rerun()
-            else:
-                if st.button(
-                    "⤓ Volltext anzeigen",
-                    key=f"transcript_preview_more_btn_{idx}",
-                ):
-                    st.session_state[show_full_key] = True
-                    st.rerun()
-
-
 def save_wip_item(item: Dict[str, Any], wip_dir: Path):
     """Speichert ein WIP-Item persistent."""
     try:
@@ -1262,9 +1174,6 @@ def render_inline_termin_assignment(idx: int):
                     key=f"event_select_{idx}"
                 )
 
-                # HBE-287: Transkript-Vorschau direkt am Termin-Picker, um Plaud-Tab-Wechsel zu vermeiden.
-                _render_transcript_preview(idx, file_path)
-
                 if selected_option != "— Bitte wählen —" and selected_option in event_dict:
                     selected_event = event_dict[selected_option]
 
@@ -1442,9 +1351,6 @@ def render_transcripts_tab():
     if 'show_archive' not in st.session_state:
         st.session_state['show_archive'] = False
 
-    if 'processed_upload_ids' not in st.session_state:
-        st.session_state['processed_upload_ids'] = set()
-
     # -------------------------------------------------------------------------
     # Verarbeite hochgeladene Files
     # -------------------------------------------------------------------------
@@ -1453,13 +1359,6 @@ def render_transcripts_tab():
         updated_files = []
 
         for uploaded_file in uploaded_files:
-            # Jede Streamlit-UploadedFile bekommt eine eindeutige file_id pro
-            # Upload-Aktion. Bereits verarbeitete Uploads überspringen, damit
-            # der Handler nicht bei jedem Rerun das Item (inkl. selected_event)
-            # zurücksetzt.
-            if uploaded_file.file_id in st.session_state['processed_upload_ids']:
-                continue
-
             file_path = processed_dir / uploaded_file.name
 
             existing_idx = None
@@ -1512,8 +1411,6 @@ def render_transcripts_tab():
                 st.session_state['transcript_queue'].append(new_item)
                 newly_uploaded.append(uploaded_file.name)
                 save_wip_item(new_item, wip_dir)
-
-            st.session_state['processed_upload_ids'].add(uploaded_file.file_id)
 
         if newly_uploaded:
             st.success(f"✅ {len(newly_uploaded)} neue Transkript(e) hochgeladen!")
