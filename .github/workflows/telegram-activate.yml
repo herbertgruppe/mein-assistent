@@ -2,7 +2,7 @@ name: Telegram-Bridge aktivieren (HBE-402)
 
 # Manueller Trigger nach .env-Update auf dem Server.
 # Voraussetzungen:
-#   1. GitHub Secrets gesetzt: TELEGRAM_BOT_TOKEN, PAPERCLIP_API_KEY_MA
+#   1. GitHub Secrets gesetzt: TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, PAPERCLIP_API_KEY_MA
 #   2. /opt/mein-assistent/.env auf Hetzner enthält alle Telegram-/Paperclip-Vars
 #   3. HETZNER_DEPLOY_KEY (paperclip-engineering) als Org-Secret vorhanden
 #
@@ -71,7 +71,7 @@ jobs:
       - name: Register Telegram webhook
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_WEBHOOK_SECRET: FPIGr-10ABoWq6ad_aGMppS68AKcsKXNPZTCmeaS9CU
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
           RESPONSE=$(curl -s -X POST \
