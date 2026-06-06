@@ -80,6 +80,7 @@ def _load_api_module():
             return deco
 
         post = get
+        on_event = get
 
     def _security(*a, **kw):
         return None
@@ -88,9 +89,13 @@ def _load_api_module():
         def __init__(self, *a, **kw):
             super().__init__(kw.get("detail") or (a[1] if len(a) > 1 else ""))
 
+    class _Request:
+        pass
+
     fastapi_mod.FastAPI = _App
     fastapi_mod.HTTPException = _HTTPException
     fastapi_mod.Security = _security
+    fastapi_mod.Request = _Request
     stubs["fastapi"] = fastapi_mod
 
     sec_mod = types.ModuleType("fastapi.security")

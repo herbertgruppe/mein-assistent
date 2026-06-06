@@ -10,6 +10,11 @@ Aufgaben des Endpunkts:
   3. Kategorie „Protokoll" am Outlook-Termin setzen
   4. Betreff-Prefix „📄 " am Outlook-Termin setzen
 
+Telegram-Bridge (HBE-402):
+  POST /api/telegram/lena/webhook  — Empfängt Telegram-Updates, erstellt Paperclip-Issues für Lena
+  POST /api/telegram/lena/send    — Sendet Telegram-Nachricht an einen Chat (intern, X-API-Key)
+  Background-Job                  — Pollt Paperclip-Comments auf TELEGRAM_REPLY: Prefix, sendet via Telegram
+
 Auth:    X-API-Key Header (API_SECRET_KEY aus .env)
 Port:    8502 (loopback, hinter nginx mit /api/-Proxy)
 Token:   /app/auth/outlook_token.json (Docker-Volume `auth`)
@@ -18,19 +23,26 @@ Lokaler Start:
     uvicorn api:app --host 127.0.0.1 --port 8502 --reload
 """
 import base64
+import hmac
+import logging
 import os
 import re
+import sqlite3
 import tempfile
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+import requests as _http
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Security
+from fastapi import FastAPI, HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +77,179 @@ def verify_api_key(key: str = Security(_API_KEY_HEADER)) -> str:
     if key != _API_SECRET_KEY:
         raise HTTPException(status_code=403, detail="Ungültiger API Key")
     return key
+
+
+# ---------------------------------------------------------------------------
+# Telegram-Bridge (HBE-402)
+# ---------------------------------------------------------------------------
+_TG_BOT_TOKEN        = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+_TG_WEBHOOK_SECRET   = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+_PC_API_URL          = os.getenv("PAPERCLIP_API_URL_MA", "https://paperclip.herbertgruppe.com").strip()
+_PC_API_KEY          = os.getenv("PAPERCLIP_API_KEY_MA", "").strip()
+_PC_COMPANY_ID       = os.getenv("PAPERCLIP_COMPANY_ID_MA", "").strip()
+_PC_LENA_AGENT_ID    = os.getenv("PAPERCLIP_LENA_AGENT_ID", "").strip()
+
+if os.getenv("TELEGRAM_BOT_TOKEN") and not os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip():
+    raise RuntimeError(
+        "TELEGRAM_WEBHOOK_SECRET muss gesetzt sein wenn TELEGRAM_BOT_TOKEN konfiguriert ist. "
+        "Ohne das Secret ist der Webhook für beliebige Caller offen. "
+        "Generierung: python3 -c \"import secrets; print(secrets.token_urlsafe(32))\""
+    )
+
+_TELEGRAM_DB_PATH = Path(__file__).resolve().parent / "data" / "telegram.db"
+
+
+@contextmanager
+def _telegram_db():
+    """SQLite context manager for Telegram bridge state."""
+    _TELEGRAM_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(_TELEGRAM_DB_PATH))
+    conn.row_factory = sqlite3.Row
+    conn.execute("""CREATE TABLE IF NOT EXISTS pending_issues (
+        issue_id   TEXT PRIMARY KEY,
+        chat_id    TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS processed_comments (
+        comment_id TEXT PRIMARY KEY,
+        processed_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.commit()
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _tg_send_message(chat_id: str, text: str) -> bool:
+    """Send a message via Telegram Bot API. Returns True on success."""
+    if not _TG_BOT_TOKEN:
+        return False
+    try:
+        resp = _http.post(
+            f"https://api.telegram.org/bot{_TG_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=10,
+        )
+        return resp.ok
+    except _http.exceptions.RequestException as exc:
+        # Use type name only — str(exc) would include the full URL with the BOT_TOKEN
+        logger.warning("[telegram] sendMessage failed: %s", type(exc).__name__)
+        return False
+    except Exception:
+        logger.warning("[telegram] sendMessage failed: unexpected error", exc_info=False)
+        return False
+
+
+def _pc_create_issue(chat_id: str, message_id: int, username: str, text: str) -> Optional[str]:
+    """Create a high-priority Paperclip issue assigned to Lena. Returns issue ID or None."""
+    if not (_PC_API_URL and _PC_API_KEY):
+        logger.warning("[telegram] PAPERCLIP_API_KEY_MA not set — skipping Paperclip issue creation")
+        return None
+    short = text[:50] + ("…" if len(text) > 50 else "")
+    description = (
+        f"Telegram-Nachricht von @{username}\n\n"
+        f"**Nachricht:**\n{text}\n\n"
+        "---\n"
+        f"TELEGRAM_CHAT_ID: {chat_id}\n"
+        f"TELEGRAM_MESSAGE_ID: {message_id}\n"
+    )
+    try:
+        resp = _http.post(
+            f"{_PC_API_URL}/api/companies/{_PC_COMPANY_ID}/issues",
+            json={
+                "title": f"Telegram von {username}: {short}",
+                "description": description,
+                "assigneeAgentId": _PC_LENA_AGENT_ID,
+                "priority": "high",
+            },
+            headers={"Authorization": f"Bearer {_PC_API_KEY}"},
+            timeout=15,
+        )
+    except _http.exceptions.RequestException as exc:
+        logger.warning("[telegram] Paperclip request error: %s", type(exc).__name__)
+        return None
+    except Exception:
+        logger.warning("[telegram] Paperclip request error: unexpected error", exc_info=False)
+        return None
+    if resp.status_code in (200, 201):
+        return resp.json().get("id")
+    logger.warning("[telegram] Paperclip issue creation failed: %s %s", resp.status_code, resp.text[:300])
+    return None
+
+
+def _poll_telegram_replies() -> None:
+    """
+    APScheduler background job (every 60 s).
+    Scans Paperclip comments on tracked issues for TELEGRAM_REPLY: prefix
+    and forwards the reply text to Telegram.
+    """
+    if not (_TG_BOT_TOKEN and _PC_API_URL and _PC_API_KEY):
+        return
+    with _telegram_db() as db:
+        rows = db.execute("SELECT issue_id, chat_id FROM pending_issues").fetchall()
+        rows = [(r["issue_id"], r["chat_id"]) for r in rows]
+
+    for issue_id, chat_id in rows:
+        try:
+            resp = _http.get(
+                f"{_PC_API_URL}/api/issues/{issue_id}/comments",
+                headers={"Authorization": f"Bearer {_PC_API_KEY}"},
+                timeout=15,
+            )
+        except Exception as exc:
+            logger.error("[telegram] comment fetch error for %s: %s", issue_id, exc)
+            continue
+
+        if resp.status_code == 404:
+            # Issue no longer exists — stop tracking it
+            with _telegram_db() as db:
+                db.execute("DELETE FROM pending_issues WHERE issue_id = ?", (issue_id,))
+            continue
+        if not resp.ok:
+            continue
+
+        data = resp.json()
+        comments = data if isinstance(data, list) else data.get("items", data.get("comments", []))
+
+        for comment in comments:
+            cid = str(comment.get("id", ""))
+            body = (comment.get("body") or comment.get("content") or "").strip()
+            if not body.startswith("TELEGRAM_REPLY:"):
+                continue
+            with _telegram_db() as db:
+                if db.execute(
+                    "SELECT 1 FROM processed_comments WHERE comment_id = ?", (cid,)
+                ).fetchone():
+                    continue
+            reply_text = body[len("TELEGRAM_REPLY:"):].strip()
+            if _tg_send_message(chat_id, reply_text):
+                with _telegram_db() as db:
+                    db.execute(
+                        "INSERT OR IGNORE INTO processed_comments (comment_id) VALUES (?)", (cid,)
+                    )
+
+
+# ── APScheduler lifespan hooks ────────────────────────────────────────────────
+_tg_scheduler = None
+
+
+@app.on_event("startup")  # type: ignore[attr-defined]
+def _start_tg_scheduler() -> None:
+    global _tg_scheduler
+    if _TG_BOT_TOKEN and _PC_API_KEY:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        _tg_scheduler = BackgroundScheduler(daemon=True)
+        _tg_scheduler.add_job(_poll_telegram_replies, "interval", seconds=60, id="tg_poll")
+        _tg_scheduler.start()
+        logger.info("[telegram] reply-poll scheduler started (60 s interval)")
+
+
+@app.on_event("shutdown")  # type: ignore[attr-defined]
+def _stop_tg_scheduler() -> None:
+    if _tg_scheduler and _tg_scheduler.running:
+        _tg_scheduler.shutdown(wait=False)
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +564,37 @@ class SimpleResult(BaseModel):
     success: bool
     message: str = ""
     error: Optional[str] = None
+
+
+# Telegram-Bridge models
+class _TgChat(BaseModel):
+    id: int
+    type: str = ""
+
+
+class _TgUser(BaseModel):
+    id: int
+    username: Optional[str] = None
+    first_name: str = ""
+
+
+class _TgMsg(BaseModel):
+    message_id: int
+    chat: _TgChat
+    from_: Optional[_TgUser] = Field(None, alias="from")
+    text: Optional[str] = None
+
+    model_config = {"populate_by_name": True}
+
+
+class TelegramUpdate(BaseModel):
+    update_id: int
+    message: Optional[_TgMsg] = None
+
+
+class TelegramSendRequest(BaseModel):
+    chat_id: str = Field(..., description="Telegram Chat-ID (Empfänger)")
+    text: str = Field(..., description="Nachrichtentext")
 
 
 # Datums-Heuristiken für Plaud-Mail-Betreff (z. B. „04-17 Besprechung 09:30-11:00")
@@ -948,3 +1164,312 @@ def process_reviewed_protocol(
         errors=errors,
         message="OK" if overall_success else f"{len(errors)} Fehler aufgetreten",
     )
+
+
+# ---------------------------------------------------------------------------
+# Lena – E-Mail-Endpoints (PA Sven, Phase 2)
+# ---------------------------------------------------------------------------
+
+class LenaEmailAddress(BaseModel):
+    name: str = ""
+    email: str
+
+
+class LenaInboxMessage(BaseModel):
+    message_id: str
+    subject: str
+    from_name: str = ""
+    from_email: str = ""
+    received_at: str
+    is_read: bool = False
+    importance: str = "normal"
+    body_preview: str = ""
+    has_attachments: bool = False
+
+
+class LenaInboxResponse(BaseModel):
+    count: int
+    messages: List[LenaInboxMessage]
+
+
+class LenaDraftRequest(BaseModel):
+    to: List[LenaEmailAddress]
+    cc: List[LenaEmailAddress] = []
+    subject: str
+    body_html: str = ""
+    body_text: str = ""
+    reply_to_message_id: Optional[str] = None
+
+
+class LenaDraftResponse(BaseModel):
+    draft_id: str
+    subject: str
+    created_at: str
+
+
+class LenaSendMailRequest(BaseModel):
+    to: List[LenaEmailAddress]
+    subject: str
+    body_text: str
+    body_html: Optional[str] = None
+    reply_to: Optional[str] = None
+
+
+class LenaSendMailResponse(BaseModel):
+    success: bool
+    message_id: str = ""
+
+
+_SMTP_HOST = "smtps.udag.de"
+_SMTP_PORT = 587
+_SMTP_USER = os.getenv("SMTP_USER", "").strip()
+_SMTP_FROM = os.getenv("SMTP_FROM", "").strip()
+
+
+@app.get("/api/lena/mail/inbox", response_model=LenaInboxResponse)
+def lena_mail_inbox(
+    limit: int = 20,
+    folder: str = "inbox",
+    unread_only: bool = False,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Liest die letzten N Mails aus dem Posteingang (Svens Outlook via Graph API).
+
+    Query-Parameter:
+      - limit        Maximale Anzahl Nachrichten (Default: 20)
+      - folder       Outlook-Ordner-Name oder well-known-ID (Default: "inbox")
+      - unread_only  Nur ungelesene Mails zurückgeben (Default: false)
+    """
+    import requests as _rq
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages"
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Content-Type": "application/json",
+    }
+    params: dict = {
+        "$top": limit,
+        "$orderby": "receivedDateTime desc",
+        "$select": "id,subject,from,receivedDateTime,isRead,importance,bodyPreview,hasAttachments",
+    }
+    if unread_only:
+        params["$filter"] = "isRead eq false"
+
+    resp = _rq.get(url, headers=headers, params=params, timeout=30)
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler: HTTP {resp.status_code} — {resp.text[:300]}",
+        )
+
+    messages: List[LenaInboxMessage] = []
+    for m in resp.json().get("value", []):
+        sender = m.get("from", {}).get("emailAddress", {})
+        messages.append(
+            LenaInboxMessage(
+                message_id=m.get("id", ""),
+                subject=m.get("subject", "") or "",
+                from_name=sender.get("name", "") or "",
+                from_email=sender.get("address", "") or "",
+                received_at=m.get("receivedDateTime", "") or "",
+                is_read=bool(m.get("isRead", False)),
+                importance=m.get("importance", "normal") or "normal",
+                body_preview=m.get("bodyPreview", "") or "",
+                has_attachments=bool(m.get("hasAttachments", False)),
+            )
+        )
+
+    return LenaInboxResponse(count=len(messages), messages=messages)
+
+
+@app.post("/api/lena/mail/draft", response_model=LenaDraftResponse)
+def lena_mail_draft(
+    req: LenaDraftRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Erstellt einen Entwurf im Drafts-Ordner von Sven.
+
+    Lena erstellt Entwürfe, Sven genehmigt und sendet sie selbst.
+    Bei reply_to_message_id wird der Entwurf als Antwort auf die angegebene Mail erstellt.
+    """
+    import requests as _rq
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Content-Type": "application/json",
+    }
+
+    def _recipients(addrs: List[LenaEmailAddress]) -> List[dict]:
+        return [
+            {"emailAddress": {"name": a.name, "address": a.email}}
+            for a in addrs
+        ]
+
+    body_content = req.body_html if req.body_html else req.body_text
+    body_type = "HTML" if req.body_html else "Text"
+
+    if req.reply_to_message_id:
+        # Create reply draft linked to original message for proper threading
+        url = f"https://graph.microsoft.com/v1.0/me/messages/{req.reply_to_message_id}/createReply"
+        payload = {
+            "message": {
+                "subject": req.subject,
+                "body": {"contentType": body_type, "content": body_content},
+                "toRecipients": _recipients(req.to),
+                "ccRecipients": _recipients(req.cc),
+            }
+        }
+    else:
+        url = "https://graph.microsoft.com/v1.0/me/messages"
+        payload = {
+            "subject": req.subject,
+            "body": {"contentType": body_type, "content": body_content},
+            "toRecipients": _recipients(req.to),
+            "ccRecipients": _recipients(req.cc),
+        }
+
+    resp = _rq.post(url, headers=headers, json=payload, timeout=30)
+    if resp.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler: HTTP {resp.status_code} — {resp.text[:300]}",
+        )
+
+    draft = resp.json()
+    return LenaDraftResponse(
+        draft_id=draft.get("id", ""),
+        subject=draft.get("subject", req.subject),
+        created_at=draft.get("createdDateTime", "") or "",
+    )
+
+
+@app.post("/api/lena/send-mail", response_model=LenaSendMailResponse)
+def lena_send_mail(
+    req: LenaSendMailRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Sendet eine Mail via SMTP STARTTLS.
+
+    SMTP-Config: smtps.udag.de:587. Credentials aus Env-Vars SMTP_USER, SMTP_FROM, SMTP_PASSWORD.
+    """
+    import smtplib
+    import uuid
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+
+    smtp_password = os.getenv("SMTP_PASSWORD", "").strip()
+    if not smtp_password:
+        raise HTTPException(status_code=500, detail="SMTP_PASSWORD nicht konfiguriert.")
+
+    if req.body_html:
+        msg: MIMEMultipart | MIMEText = MIMEMultipart("alternative")
+        msg.attach(MIMEText(req.body_text or "", "plain", "utf-8"))
+        msg.attach(MIMEText(req.body_html, "html", "utf-8"))
+    else:
+        msg = MIMEText(req.body_text or "", "plain", "utf-8")
+
+    message_id = f"<{uuid.uuid4()}@herbertgruppe.com>"
+    msg["Message-ID"] = message_id
+    msg["From"] = _SMTP_FROM
+    msg["To"] = ", ".join(
+        f"{a.name} <{a.email}>" if a.name else a.email for a in req.to
+    )
+    msg["Subject"] = req.subject
+    if req.reply_to:
+        msg["Reply-To"] = req.reply_to
+
+    to_addrs = [a.email for a in req.to]
+
+    try:
+        with smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=30) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
+            smtp.login(_SMTP_USER, smtp_password)
+            smtp.sendmail(_SMTP_FROM, to_addrs, msg.as_string())
+    except smtplib.SMTPException as exc:
+        raise HTTPException(status_code=502, detail=f"SMTP-Fehler: {exc}") from exc
+
+    return LenaSendMailResponse(success=True, message_id=message_id)
+
+
+# ---------------------------------------------------------------------------
+# Telegram-Bridge Endpoints (HBE-402)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/telegram/lena/webhook")
+async def telegram_lena_webhook(req: Request):
+    """
+    Telegram-Webhook für @HBE_Lena_bot.
+
+    Auth: X-Telegram-Bot-Api-Secret-Token Header (gesetzt beim Webhook-Register).
+    Kein X-API-Key — Telegram ruft diesen Endpoint direkt auf.
+    Erstellt ein Paperclip-Issue (Assignee: Lena, Priority: high) pro Text-Nachricht.
+    Antwortet immer HTTP 200 damit Telegram den Aufruf nicht wiederholt.
+    """
+    incoming_secret = req.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not _TG_WEBHOOK_SECRET:
+        logger.warning("Telegram webhook received but TELEGRAM_WEBHOOK_SECRET is not set — rejecting.")
+        return {"ok": True}
+    if not hmac.compare_digest(incoming_secret, _TG_WEBHOOK_SECRET):
+        logger.warning(
+            "Telegram webhook auth failure: secret mismatch (client=%s)",
+            req.client.host if req.client else "unknown",
+        )
+        return {"ok": True}
+
+    try:
+        body = await req.json()
+        update = TelegramUpdate(**body)
+    except Exception:
+        return {"ok": True}
+
+    msg = update.message
+    if not msg or not msg.text:
+        return {"ok": True}
+
+    user = msg.from_ or _TgUser(id=0)
+    username = user.username or user.first_name or "Unbekannt"
+    chat_id = str(msg.chat.id)
+
+    issue_id = _pc_create_issue(
+        chat_id=chat_id,
+        message_id=msg.message_id,
+        username=username,
+        text=msg.text,
+    )
+    if issue_id:
+        with _telegram_db() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO pending_issues (issue_id, chat_id) VALUES (?, ?)",
+                (issue_id, chat_id),
+            )
+
+    return {"ok": True}
+
+
+@app.post("/api/telegram/lena/send", response_model=SimpleResult)
+def telegram_lena_send(
+    req: TelegramSendRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Interne Schnittstelle: sendet eine Telegram-Nachricht an einen bestimmten Chat.
+    Erfordert X-API-Key. Wird von Lena (via Paperclip-Skill) oder manuell aufgerufen.
+    """
+    if not _TG_BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN nicht konfiguriert.")
+    if not _tg_send_message(req.chat_id, req.text):
+        raise HTTPException(status_code=502, detail="Telegram sendMessage fehlgeschlagen.")
+    return SimpleResult(success=True, message=f"Nachricht an Chat {req.chat_id} gesendet.")
