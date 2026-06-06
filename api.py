@@ -90,9 +90,10 @@ _PC_COMPANY_ID       = os.getenv("PAPERCLIP_COMPANY_ID_MA", "9df4976b-9ac8-4e8f-
 _PC_LENA_AGENT_ID    = os.getenv("PAPERCLIP_LENA_AGENT_ID", "7517114f-e731-4df5-96cf-a044719e9318").strip()
 
 if os.getenv("TELEGRAM_BOT_TOKEN") and not os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip():
-    logger.warning(
-        "[telegram] TELEGRAM_BOT_TOKEN is set but TELEGRAM_WEBHOOK_SECRET is missing. "
-        "Webhook signature verification is DISABLED — set TELEGRAM_WEBHOOK_SECRET."
+    raise RuntimeError(
+        "TELEGRAM_WEBHOOK_SECRET muss gesetzt sein wenn TELEGRAM_BOT_TOKEN konfiguriert ist. "
+        "Ohne das Secret ist der Webhook für beliebige Caller offen. "
+        "Generierung: python3 -c \"import secrets; print(secrets.token_urlsafe(32))\""
     )
 
 _TELEGRAM_DB_PATH = Path(__file__).resolve().parent / "data" / "telegram.db"
