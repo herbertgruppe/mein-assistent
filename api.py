@@ -85,8 +85,8 @@ _TG_BOT_TOKEN        = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 _TG_WEBHOOK_SECRET   = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
 _PC_API_URL          = os.getenv("PAPERCLIP_API_URL_MA", "https://paperclip.herbertgruppe.com").strip()
 _PC_API_KEY          = os.getenv("PAPERCLIP_API_KEY_MA", "").strip()
-_PC_COMPANY_ID       = os.getenv("PAPERCLIP_COMPANY_ID_MA", "9df4976b-9ac8-4e8f-a156-c06c7fa40cdc").strip()
-_PC_LENA_AGENT_ID    = os.getenv("PAPERCLIP_LENA_AGENT_ID", "7517114f-e731-4df5-96cf-a044719e9318").strip()
+_PC_COMPANY_ID       = os.getenv("PAPERCLIP_COMPANY_ID_MA", "").strip()
+_PC_LENA_AGENT_ID    = os.getenv("PAPERCLIP_LENA_AGENT_ID", "").strip()
 
 if os.getenv("TELEGRAM_BOT_TOKEN") and not os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip():
     raise RuntimeError(
@@ -1212,8 +1212,8 @@ class LenaSendMailResponse(BaseModel):
 
 _SMTP_HOST = "smtps.udag.de"
 _SMTP_PORT = 587
-_SMTP_USER = "herbertgruppe-com-0001"
-_SMTP_FROM = "h-beratung@herbertgruppe.com"
+_SMTP_USER = os.getenv("SMTP_USER", "").strip()
+_SMTP_FROM = os.getenv("SMTP_FROM", "").strip()
 
 
 @app.get("/api/lena/mail/inbox", response_model=LenaInboxResponse)
@@ -1349,10 +1349,9 @@ def lena_send_mail(
     _key: str = Security(verify_api_key),
 ):
     """
-    Sendet eine Mail als h-beratung@herbertgruppe.com via SMTP STARTTLS.
+    Sendet eine Mail via SMTP STARTTLS.
 
-    SMTP-Config: smtps.udag.de:587, User herbertgruppe-com-0001.
-    Passwort aus Env-Var SMTP_PASSWORD.
+    SMTP-Config: smtps.udag.de:587. Credentials aus Env-Vars SMTP_USER, SMTP_FROM, SMTP_PASSWORD.
     """
     import smtplib
     import uuid
