@@ -102,6 +102,7 @@ _TELEGRAM_DB_PATH = Path(__file__).resolve().parent / "data" / "telegram.db"
 @contextmanager
 def _telegram_db():
     """SQLite context manager for Telegram bridge state."""
+    _TELEGRAM_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(_TELEGRAM_DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("""CREATE TABLE IF NOT EXISTS pending_issues (
@@ -133,14 +134,14 @@ def _tg_send_message(chat_id: str, text: str) -> bool:
         )
         return resp.ok
     except Exception as exc:
-        print(f"[telegram] sendMessage failed: {exc}")
+        logger.error("[telegram] sendMessage failed: %s", exc)
         return False
 
 
 def _pc_create_issue(chat_id: str, message_id: int, username: str, text: str) -> Optional[str]:
     """Create a high-priority Paperclip issue assigned to Lena. Returns issue ID or None."""
     if not (_PC_API_URL and _PC_API_KEY):
-        print("[telegram] PAPERCLIP_API_KEY_MA not set — skipping Paperclip issue creation")
+        logger.warning("[telegram] PAPERCLIP_API_KEY_MA not set — skipping Paperclip issue creation")
         return None
     short = text[:50] + ("…" if len(text) > 50 else "")
     description = (
@@ -163,11 +164,11 @@ def _pc_create_issue(chat_id: str, message_id: int, username: str, text: str) ->
             timeout=15,
         )
     except Exception as exc:
-        print(f"[telegram] Paperclip request error: {exc}")
+        logger.error("[telegram] Paperclip request error: %s", exc)
         return None
     if resp.status_code in (200, 201):
         return resp.json().get("id")
-    print(f"[telegram] Paperclip issue creation failed: {resp.status_code} {resp.text[:300]}")
+    logger.warning("[telegram] Paperclip issue creation failed: %s %s", resp.status_code, resp.text[:300])
     return None
 
 
@@ -191,7 +192,7 @@ def _poll_telegram_replies() -> None:
                 timeout=15,
             )
         except Exception as exc:
-            print(f"[telegram] comment fetch error for {issue_id}: {exc}")
+            logger.error("[telegram] comment fetch error for %s: %s", issue_id, exc)
             continue
 
         if resp.status_code == 404:
@@ -235,7 +236,7 @@ def _start_tg_scheduler() -> None:
         _tg_scheduler = BackgroundScheduler(daemon=True)
         _tg_scheduler.add_job(_poll_telegram_replies, "interval", seconds=60, id="tg_poll")
         _tg_scheduler.start()
-        print("[telegram] reply-poll scheduler started (60 s interval)")
+        logger.info("[telegram] reply-poll scheduler started (60 s interval)")
 
 
 @app.on_event("shutdown")  # type: ignore[attr-defined]
