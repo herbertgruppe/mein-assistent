@@ -21,6 +21,9 @@ rules:
       - "poetry.lock"
     risk: LOW
   - if_paths_match:
+      - ".github/workflows/**"
+    risk: MEDIUM
+  - if_paths_match:
       - "nginx/**"
       - "**/docker-compose*.yml"
       - "Dockerfile"
@@ -33,7 +36,6 @@ rules:
       - "**/sso/**"
       - "**/crypto/**"
       - "**/security/**"
-      - ".github/workflows/**"
     risk: HIGH
   - if_diff_size_gt: 500
     risk_min: MEDIUM
