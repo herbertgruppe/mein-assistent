@@ -23,6 +23,7 @@ Lokaler Start:
     uvicorn api:app --host 127.0.0.1 --port 8502 --reload
 """
 import base64
+import logging
 import os
 import re
 import sqlite3
@@ -39,6 +40,8 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +87,12 @@ _PC_API_URL          = os.getenv("PAPERCLIP_API_URL_MA", "https://paperclip.herb
 _PC_API_KEY          = os.getenv("PAPERCLIP_API_KEY_MA", "").strip()
 _PC_COMPANY_ID       = os.getenv("PAPERCLIP_COMPANY_ID_MA", "9df4976b-9ac8-4e8f-a156-c06c7fa40cdc").strip()
 _PC_LENA_AGENT_ID    = os.getenv("PAPERCLIP_LENA_AGENT_ID", "7517114f-e731-4df5-96cf-a044719e9318").strip()
+
+if os.getenv("TELEGRAM_BOT_TOKEN") and not os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip():
+    raise RuntimeError(
+        "TELEGRAM_WEBHOOK_SECRET must be set when TELEGRAM_BOT_TOKEN is configured. "
+        "Set it to a random secret string and register it with Telegram."
+    )
 
 _TELEGRAM_DB_PATH = Path(__file__).resolve().parent / "data" / "telegram.db"
 
@@ -1401,8 +1410,10 @@ async def telegram_lena_webhook(req: Request):
     Antwortet immer HTTP 200 damit Telegram den Aufruf nicht wiederholt.
     """
     incoming_secret = req.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-    if _TG_WEBHOOK_SECRET and incoming_secret != _TG_WEBHOOK_SECRET:
-        # Wrong secret — silently accept (200) to avoid Telegram retries leaking info
+    if not _TG_WEBHOOK_SECRET:
+        logger.warning("Telegram webhook received but TELEGRAM_WEBHOOK_SECRET is not set — rejecting.")
+        return {"ok": True}
+    if incoming_secret != _TG_WEBHOOK_SECRET:
         return {"ok": True}
 
     try:
