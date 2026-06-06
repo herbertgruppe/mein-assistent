@@ -133,8 +133,12 @@ def _tg_send_message(chat_id: str, text: str) -> bool:
             timeout=10,
         )
         return resp.ok
-    except Exception as exc:
-        logger.error("[telegram] sendMessage failed: %s", exc)
+    except _http.exceptions.RequestException as exc:
+        # Use type name only — str(exc) would include the full URL with the BOT_TOKEN
+        logger.warning("[telegram] sendMessage failed: %s", type(exc).__name__)
+        return False
+    except Exception:
+        logger.warning("[telegram] sendMessage failed: unexpected error", exc_info=False)
         return False
 
 
@@ -163,8 +167,11 @@ def _pc_create_issue(chat_id: str, message_id: int, username: str, text: str) ->
             headers={"Authorization": f"Bearer {_PC_API_KEY}"},
             timeout=15,
         )
-    except Exception as exc:
-        logger.error("[telegram] Paperclip request error: %s", exc)
+    except _http.exceptions.RequestException as exc:
+        logger.warning("[telegram] Paperclip request error: %s", type(exc).__name__)
+        return None
+    except Exception:
+        logger.warning("[telegram] Paperclip request error: unexpected error", exc_info=False)
         return None
     if resp.status_code in (200, 201):
         return resp.json().get("id")
