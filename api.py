@@ -948,3 +948,242 @@ def process_reviewed_protocol(
         errors=errors,
         message="OK" if overall_success else f"{len(errors)} Fehler aufgetreten",
     )
+
+
+# ---------------------------------------------------------------------------
+# Lena – E-Mail-Endpoints (PA Sven, Phase 2)
+# ---------------------------------------------------------------------------
+
+class LenaEmailAddress(BaseModel):
+    name: str = ""
+    email: str
+
+
+class LenaInboxMessage(BaseModel):
+    message_id: str
+    subject: str
+    from_name: str = ""
+    from_email: str = ""
+    received_at: str
+    is_read: bool = False
+    importance: str = "normal"
+    body_preview: str = ""
+    has_attachments: bool = False
+
+
+class LenaInboxResponse(BaseModel):
+    count: int
+    messages: List[LenaInboxMessage]
+
+
+class LenaDraftRequest(BaseModel):
+    to: List[LenaEmailAddress]
+    cc: List[LenaEmailAddress] = []
+    subject: str
+    body_html: str = ""
+    body_text: str = ""
+    reply_to_message_id: Optional[str] = None
+
+
+class LenaDraftResponse(BaseModel):
+    draft_id: str
+    subject: str
+    created_at: str
+
+
+class LenaSendMailRequest(BaseModel):
+    to: List[LenaEmailAddress]
+    subject: str
+    body_text: str
+    body_html: Optional[str] = None
+    reply_to: Optional[str] = None
+
+
+class LenaSendMailResponse(BaseModel):
+    success: bool
+    message_id: str = ""
+
+
+_SMTP_HOST = "smtps.udag.de"
+_SMTP_PORT = 587
+_SMTP_USER = "herbertgruppe-com-0001"
+_SMTP_FROM = "h-beratung@herbertgruppe.com"
+
+
+@app.get("/api/lena/mail/inbox", response_model=LenaInboxResponse)
+def lena_mail_inbox(
+    limit: int = 20,
+    folder: str = "inbox",
+    unread_only: bool = False,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Liest die letzten N Mails aus dem Posteingang (Svens Outlook via Graph API).
+
+    Query-Parameter:
+      - limit        Maximale Anzahl Nachrichten (Default: 20)
+      - folder       Outlook-Ordner-Name oder well-known-ID (Default: "inbox")
+      - unread_only  Nur ungelesene Mails zurückgeben (Default: false)
+    """
+    import requests as _rq
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages"
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Content-Type": "application/json",
+    }
+    params: dict = {
+        "$top": limit,
+        "$orderby": "receivedDateTime desc",
+        "$select": "id,subject,from,receivedDateTime,isRead,importance,bodyPreview,hasAttachments",
+    }
+    if unread_only:
+        params["$filter"] = "isRead eq false"
+
+    resp = _rq.get(url, headers=headers, params=params, timeout=30)
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler: HTTP {resp.status_code} — {resp.text[:300]}",
+        )
+
+    messages: List[LenaInboxMessage] = []
+    for m in resp.json().get("value", []):
+        sender = m.get("from", {}).get("emailAddress", {})
+        messages.append(
+            LenaInboxMessage(
+                message_id=m.get("id", ""),
+                subject=m.get("subject", "") or "",
+                from_name=sender.get("name", "") or "",
+                from_email=sender.get("address", "") or "",
+                received_at=m.get("receivedDateTime", "") or "",
+                is_read=bool(m.get("isRead", False)),
+                importance=m.get("importance", "normal") or "normal",
+                body_preview=m.get("bodyPreview", "") or "",
+                has_attachments=bool(m.get("hasAttachments", False)),
+            )
+        )
+
+    return LenaInboxResponse(count=len(messages), messages=messages)
+
+
+@app.post("/api/lena/mail/draft", response_model=LenaDraftResponse)
+def lena_mail_draft(
+    req: LenaDraftRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Erstellt einen Entwurf im Drafts-Ordner von Sven.
+
+    Lena erstellt Entwürfe, Sven genehmigt und sendet sie selbst.
+    Bei reply_to_message_id wird der Entwurf als Antwort auf die angegebene Mail erstellt.
+    """
+    import requests as _rq
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Content-Type": "application/json",
+    }
+
+    def _recipients(addrs: List[LenaEmailAddress]) -> List[dict]:
+        return [
+            {"emailAddress": {"name": a.name, "address": a.email}}
+            for a in addrs
+        ]
+
+    body_content = req.body_html if req.body_html else req.body_text
+    body_type = "HTML" if req.body_html else "Text"
+
+    if req.reply_to_message_id:
+        # Create reply draft linked to original message for proper threading
+        url = f"https://graph.microsoft.com/v1.0/me/messages/{req.reply_to_message_id}/createReply"
+        payload = {
+            "message": {
+                "subject": req.subject,
+                "body": {"contentType": body_type, "content": body_content},
+                "toRecipients": _recipients(req.to),
+                "ccRecipients": _recipients(req.cc),
+            }
+        }
+    else:
+        url = "https://graph.microsoft.com/v1.0/me/messages"
+        payload = {
+            "subject": req.subject,
+            "body": {"contentType": body_type, "content": body_content},
+            "toRecipients": _recipients(req.to),
+            "ccRecipients": _recipients(req.cc),
+        }
+
+    resp = _rq.post(url, headers=headers, json=payload, timeout=30)
+    if resp.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler: HTTP {resp.status_code} — {resp.text[:300]}",
+        )
+
+    draft = resp.json()
+    return LenaDraftResponse(
+        draft_id=draft.get("id", ""),
+        subject=draft.get("subject", req.subject),
+        created_at=draft.get("createdDateTime", "") or "",
+    )
+
+
+@app.post("/api/lena/send-mail", response_model=LenaSendMailResponse)
+def lena_send_mail(
+    req: LenaSendMailRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Sendet eine Mail als h-beratung@herbertgruppe.com via SMTP STARTTLS.
+
+    SMTP-Config: smtps.udag.de:587, User herbertgruppe-com-0001.
+    Passwort aus Env-Var SMTP_PASSWORD.
+    """
+    import smtplib
+    import uuid
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+
+    smtp_password = os.getenv("SMTP_PASSWORD", "").strip()
+    if not smtp_password:
+        raise HTTPException(status_code=500, detail="SMTP_PASSWORD nicht konfiguriert.")
+
+    if req.body_html:
+        msg: MIMEMultipart | MIMEText = MIMEMultipart("alternative")
+        msg.attach(MIMEText(req.body_text or "", "plain", "utf-8"))
+        msg.attach(MIMEText(req.body_html, "html", "utf-8"))
+    else:
+        msg = MIMEText(req.body_text or "", "plain", "utf-8")
+
+    message_id = f"<{uuid.uuid4()}@herbertgruppe.com>"
+    msg["Message-ID"] = message_id
+    msg["From"] = _SMTP_FROM
+    msg["To"] = ", ".join(
+        f"{a.name} <{a.email}>" if a.name else a.email for a in req.to
+    )
+    msg["Subject"] = req.subject
+    if req.reply_to:
+        msg["Reply-To"] = req.reply_to
+
+    to_addrs = [a.email for a in req.to]
+
+    try:
+        with smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=30) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
+            smtp.login(_SMTP_USER, smtp_password)
+            smtp.sendmail(_SMTP_FROM, to_addrs, msg.as_string())
+    except smtplib.SMTPException as exc:
+        raise HTTPException(status_code=502, detail=f"SMTP-Fehler: {exc}") from exc
+
+    return LenaSendMailResponse(success=True, message_id=message_id)
