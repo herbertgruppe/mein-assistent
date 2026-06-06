@@ -10,6 +10,11 @@ Aufgaben des Endpunkts:
   3. Kategorie „Protokoll" am Outlook-Termin setzen
   4. Betreff-Prefix „📄 " am Outlook-Termin setzen
 
+Telegram-Bridge (HBE-402):
+  POST /api/telegram/lena/webhook  — Empfängt Telegram-Updates, erstellt Paperclip-Issues für Lena
+  POST /api/telegram/lena/send    — Sendet Telegram-Nachricht an einen Chat (intern, X-API-Key)
+  Background-Job                  — Pollt Paperclip-Comments auf TELEGRAM_REPLY: Prefix, sendet via Telegram
+
 Auth:    X-API-Key Header (API_SECRET_KEY aus .env)
 Port:    8502 (loopback, hinter nginx mit /api/-Proxy)
 Token:   /app/auth/outlook_token.json (Docker-Volume `auth`)
@@ -20,13 +25,16 @@ Lokaler Start:
 import base64
 import os
 import re
+import sqlite3
 import tempfile
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+import requests as _http
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Security
+from fastapi import FastAPI, HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
@@ -65,6 +73,164 @@ def verify_api_key(key: str = Security(_API_KEY_HEADER)) -> str:
     if key != _API_SECRET_KEY:
         raise HTTPException(status_code=403, detail="Ungültiger API Key")
     return key
+
+
+# ---------------------------------------------------------------------------
+# Telegram-Bridge (HBE-402)
+# ---------------------------------------------------------------------------
+_TG_BOT_TOKEN        = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+_TG_WEBHOOK_SECRET   = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+_PC_API_URL          = os.getenv("PAPERCLIP_API_URL_MA", "https://paperclip.herbertgruppe.com").strip()
+_PC_API_KEY          = os.getenv("PAPERCLIP_API_KEY_MA", "").strip()
+_PC_COMPANY_ID       = os.getenv("PAPERCLIP_COMPANY_ID_MA", "9df4976b-9ac8-4e8f-a156-c06c7fa40cdc").strip()
+_PC_LENA_AGENT_ID    = os.getenv("PAPERCLIP_LENA_AGENT_ID", "7517114f-e731-4df5-96cf-a044719e9318").strip()
+
+_TELEGRAM_DB_PATH = Path(__file__).resolve().parent / "data" / "telegram.db"
+
+
+@contextmanager
+def _telegram_db():
+    """SQLite context manager for Telegram bridge state."""
+    conn = sqlite3.connect(str(_TELEGRAM_DB_PATH))
+    conn.row_factory = sqlite3.Row
+    conn.execute("""CREATE TABLE IF NOT EXISTS pending_issues (
+        issue_id   TEXT PRIMARY KEY,
+        chat_id    TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS processed_comments (
+        comment_id TEXT PRIMARY KEY,
+        processed_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.commit()
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _tg_send_message(chat_id: str, text: str) -> bool:
+    """Send a message via Telegram Bot API. Returns True on success."""
+    if not _TG_BOT_TOKEN:
+        return False
+    try:
+        resp = _http.post(
+            f"https://api.telegram.org/bot{_TG_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=10,
+        )
+        return resp.ok
+    except Exception as exc:
+        print(f"[telegram] sendMessage failed: {exc}")
+        return False
+
+
+def _pc_create_issue(chat_id: str, message_id: int, username: str, text: str) -> Optional[str]:
+    """Create a high-priority Paperclip issue assigned to Lena. Returns issue ID or None."""
+    if not (_PC_API_URL and _PC_API_KEY):
+        print("[telegram] PAPERCLIP_API_KEY_MA not set — skipping Paperclip issue creation")
+        return None
+    short = text[:50] + ("…" if len(text) > 50 else "")
+    description = (
+        f"Telegram-Nachricht von @{username}\n\n"
+        f"**Nachricht:**\n{text}\n\n"
+        "---\n"
+        f"TELEGRAM_CHAT_ID: {chat_id}\n"
+        f"TELEGRAM_MESSAGE_ID: {message_id}\n"
+    )
+    try:
+        resp = _http.post(
+            f"{_PC_API_URL}/api/companies/{_PC_COMPANY_ID}/issues",
+            json={
+                "title": f"Telegram von {username}: {short}",
+                "description": description,
+                "assigneeAgentId": _PC_LENA_AGENT_ID,
+                "priority": "high",
+            },
+            headers={"Authorization": f"Bearer {_PC_API_KEY}"},
+            timeout=15,
+        )
+    except Exception as exc:
+        print(f"[telegram] Paperclip request error: {exc}")
+        return None
+    if resp.status_code in (200, 201):
+        return resp.json().get("id")
+    print(f"[telegram] Paperclip issue creation failed: {resp.status_code} {resp.text[:300]}")
+    return None
+
+
+def _poll_telegram_replies() -> None:
+    """
+    APScheduler background job (every 60 s).
+    Scans Paperclip comments on tracked issues for TELEGRAM_REPLY: prefix
+    and forwards the reply text to Telegram.
+    """
+    if not (_TG_BOT_TOKEN and _PC_API_URL and _PC_API_KEY):
+        return
+    with _telegram_db() as db:
+        rows = db.execute("SELECT issue_id, chat_id FROM pending_issues").fetchall()
+        rows = [(r["issue_id"], r["chat_id"]) for r in rows]
+
+    for issue_id, chat_id in rows:
+        try:
+            resp = _http.get(
+                f"{_PC_API_URL}/api/issues/{issue_id}/comments",
+                headers={"Authorization": f"Bearer {_PC_API_KEY}"},
+                timeout=15,
+            )
+        except Exception as exc:
+            print(f"[telegram] comment fetch error for {issue_id}: {exc}")
+            continue
+
+        if resp.status_code == 404:
+            # Issue no longer exists — stop tracking it
+            with _telegram_db() as db:
+                db.execute("DELETE FROM pending_issues WHERE issue_id = ?", (issue_id,))
+            continue
+        if not resp.ok:
+            continue
+
+        data = resp.json()
+        comments = data if isinstance(data, list) else data.get("items", data.get("comments", []))
+
+        for comment in comments:
+            cid = str(comment.get("id", ""))
+            body = (comment.get("body") or comment.get("content") or "").strip()
+            if not body.startswith("TELEGRAM_REPLY:"):
+                continue
+            with _telegram_db() as db:
+                if db.execute(
+                    "SELECT 1 FROM processed_comments WHERE comment_id = ?", (cid,)
+                ).fetchone():
+                    continue
+            reply_text = body[len("TELEGRAM_REPLY:"):].strip()
+            if _tg_send_message(chat_id, reply_text):
+                with _telegram_db() as db:
+                    db.execute(
+                        "INSERT OR IGNORE INTO processed_comments (comment_id) VALUES (?)", (cid,)
+                    )
+
+
+# ── APScheduler lifespan hooks ────────────────────────────────────────────────
+_tg_scheduler = None
+
+
+@app.on_event("startup")  # type: ignore[attr-defined]
+def _start_tg_scheduler() -> None:
+    global _tg_scheduler
+    if _TG_BOT_TOKEN and _PC_API_KEY:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        _tg_scheduler = BackgroundScheduler(daemon=True)
+        _tg_scheduler.add_job(_poll_telegram_replies, "interval", seconds=60, id="tg_poll")
+        _tg_scheduler.start()
+        print("[telegram] reply-poll scheduler started (60 s interval)")
+
+
+@app.on_event("shutdown")  # type: ignore[attr-defined]
+def _stop_tg_scheduler() -> None:
+    if _tg_scheduler and _tg_scheduler.running:
+        _tg_scheduler.shutdown(wait=False)
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +545,37 @@ class SimpleResult(BaseModel):
     success: bool
     message: str = ""
     error: Optional[str] = None
+
+
+# Telegram-Bridge models
+class _TgChat(BaseModel):
+    id: int
+    type: str = ""
+
+
+class _TgUser(BaseModel):
+    id: int
+    username: Optional[str] = None
+    first_name: str = ""
+
+
+class _TgMsg(BaseModel):
+    message_id: int
+    chat: _TgChat
+    from_: Optional[_TgUser] = Field(None, alias="from")
+    text: Optional[str] = None
+
+    model_config = {"populate_by_name": True}
+
+
+class TelegramUpdate(BaseModel):
+    update_id: int
+    message: Optional[_TgMsg] = None
+
+
+class TelegramSendRequest(BaseModel):
+    chat_id: str = Field(..., description="Telegram Chat-ID (Empfänger)")
+    text: str = Field(..., description="Nachrichtentext")
 
 
 # Datums-Heuristiken für Plaud-Mail-Betreff (z. B. „04-17 Besprechung 09:30-11:00")
@@ -1187,3 +1384,68 @@ def lena_send_mail(
         raise HTTPException(status_code=502, detail=f"SMTP-Fehler: {exc}") from exc
 
     return LenaSendMailResponse(success=True, message_id=message_id)
+
+
+# ---------------------------------------------------------------------------
+# Telegram-Bridge Endpoints (HBE-402)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/telegram/lena/webhook")
+async def telegram_lena_webhook(req: Request):
+    """
+    Telegram-Webhook für @HBE_Lena_bot.
+
+    Auth: X-Telegram-Bot-Api-Secret-Token Header (gesetzt beim Webhook-Register).
+    Kein X-API-Key — Telegram ruft diesen Endpoint direkt auf.
+    Erstellt ein Paperclip-Issue (Assignee: Lena, Priority: high) pro Text-Nachricht.
+    Antwortet immer HTTP 200 damit Telegram den Aufruf nicht wiederholt.
+    """
+    incoming_secret = req.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if _TG_WEBHOOK_SECRET and incoming_secret != _TG_WEBHOOK_SECRET:
+        # Wrong secret — silently accept (200) to avoid Telegram retries leaking info
+        return {"ok": True}
+
+    try:
+        body = await req.json()
+        update = TelegramUpdate(**body)
+    except Exception:
+        return {"ok": True}
+
+    msg = update.message
+    if not msg or not msg.text:
+        return {"ok": True}
+
+    user = msg.from_ or _TgUser(id=0)
+    username = user.username or user.first_name or "Unbekannt"
+    chat_id = str(msg.chat.id)
+
+    issue_id = _pc_create_issue(
+        chat_id=chat_id,
+        message_id=msg.message_id,
+        username=username,
+        text=msg.text,
+    )
+    if issue_id:
+        with _telegram_db() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO pending_issues (issue_id, chat_id) VALUES (?, ?)",
+                (issue_id, chat_id),
+            )
+
+    return {"ok": True}
+
+
+@app.post("/api/telegram/lena/send", response_model=SimpleResult)
+def telegram_lena_send(
+    req: TelegramSendRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Interne Schnittstelle: sendet eine Telegram-Nachricht an einen bestimmten Chat.
+    Erfordert X-API-Key. Wird von Lena (via Paperclip-Skill) oder manuell aufgerufen.
+    """
+    if not _TG_BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN nicht konfiguriert.")
+    if not _tg_send_message(req.chat_id, req.text):
+        raise HTTPException(status_code=502, detail="Telegram sendMessage fehlgeschlagen.")
+    return SimpleResult(success=True, message=f"Nachricht an Chat {req.chat_id} gesendet.")
