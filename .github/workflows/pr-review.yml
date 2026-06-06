@@ -38,11 +38,9 @@ jobs:
 
           EXISTING_ID=""
           if [ "$SEARCH_HTTP" = "200" ]; then
-            EXISTING_ID=$(echo "$SEARCH_BODY" | jq -r '
-              (.issues // .) |
-              map(select(.status != "done" and .status != "cancelled")) |
-              first | .id // empty
-            ' 2>/dev/null || echo "")
+            EXISTING_ID=$(echo "$SEARCH_BODY" | jq -r --arg fp "$FINGERPRINT" \
+              '(.issues // .) | map(select(.status != "done" and .status != "cancelled" and .originFingerprint == $fp)) | first | .id // empty' \
+              2>/dev/null || echo "")
           fi
 
           if [ -n "$EXISTING_ID" ]; then
