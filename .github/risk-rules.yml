@@ -11,6 +11,7 @@ rules:
   - if_paths_match:
       - "**/__tests__/**"
       - "**/*.test.ts"
+      - "**/*.test.js"
       - "**/*.spec.ts"
       - "**/test_*.py"
     risk: LOW
