@@ -77,6 +77,7 @@ class TelegramWebhookHandlerTest(unittest.TestCase):
         mock_create_issue = mock.MagicMock(return_value=None)
 
         class _MockRequest:
+            client = None
             headers = {"X-Telegram-Bot-Api-Secret-Token": "wrong-secret"}
 
             async def json(self):
@@ -92,6 +93,7 @@ class TelegramWebhookHandlerTest(unittest.TestCase):
         mock_create_issue = mock.MagicMock(return_value=None)
 
         class _MockRequest:
+            client = None
             headers = {}
 
             async def json(self):
@@ -102,6 +104,19 @@ class TelegramWebhookHandlerTest(unittest.TestCase):
             result = asyncio.run(self.api.telegram_lena_webhook(_MockRequest()))
         self.assertEqual(result, {"ok": True})
         mock_create_issue.assert_not_called()
+
+    def test_webhook_logs_warning_on_wrong_secret(self):
+        class _MockRequest:
+            client = None
+            headers = {"X-Telegram-Bot-Api-Secret-Token": "wrong"}
+
+            async def json(self):
+                return {}
+
+        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "correct"), \
+             self.assertLogs(self.api.__name__, level="WARNING") as cm:
+            asyncio.run(self.api.telegram_lena_webhook(_MockRequest()))
+        self.assertTrue(any("auth failure" in m for m in cm.output))
 
     def test_webhook_accepts_correct_secret(self):
         mock_create_issue = mock.MagicMock(return_value="issue-id-123")

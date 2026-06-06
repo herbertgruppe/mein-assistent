@@ -1416,6 +1416,10 @@ async def telegram_lena_webhook(req: Request):
         logger.warning("Telegram webhook received but TELEGRAM_WEBHOOK_SECRET is not set — rejecting.")
         return {"ok": True}
     if not hmac.compare_digest(incoming_secret, _TG_WEBHOOK_SECRET):
+        logger.warning(
+            "Telegram webhook auth failure: secret mismatch (client=%s)",
+            req.client.host if req.client else "unknown",
+        )
         return {"ok": True}
 
     try:
