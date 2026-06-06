@@ -21,6 +21,12 @@ rules:
       - "poetry.lock"
     risk: LOW
   - if_paths_match:
+      - "**/.env.example"
+      - "**/.env*.example"
+      - "**/.env*.template"
+      - "**/.env*.sample"
+    risk: MEDIUM
+  - if_paths_match:
       - "nginx/**"
       - "**/docker-compose*.yml"
       - "Dockerfile"
