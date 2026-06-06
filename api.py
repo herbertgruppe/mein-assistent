@@ -23,6 +23,7 @@ Lokaler Start:
     uvicorn api:app --host 127.0.0.1 --port 8502 --reload
 """
 import base64
+import hmac
 import logging
 import os
 import re
@@ -1412,7 +1413,7 @@ async def telegram_lena_webhook(req: Request):
     if not _TG_WEBHOOK_SECRET:
         logger.warning("Telegram webhook received but TELEGRAM_WEBHOOK_SECRET is not set — rejecting.")
         return {"ok": True}
-    if incoming_secret != _TG_WEBHOOK_SECRET:
+    if not hmac.compare_digest(incoming_secret, _TG_WEBHOOK_SECRET):
         return {"ok": True}
 
     try:
