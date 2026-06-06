@@ -86,8 +86,8 @@ _TG_BOT_TOKEN        = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 _TG_WEBHOOK_SECRET   = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
 _PC_API_URL          = os.getenv("PAPERCLIP_API_URL_MA", "https://paperclip.herbertgruppe.com").strip()
 _PC_API_KEY          = os.getenv("PAPERCLIP_API_KEY_MA", "").strip()
-_PC_COMPANY_ID       = os.getenv("PAPERCLIP_COMPANY_ID_MA", "9df4976b-9ac8-4e8f-a156-c06c7fa40cdc").strip()
-_PC_LENA_AGENT_ID    = os.getenv("PAPERCLIP_LENA_AGENT_ID", "7517114f-e731-4df5-96cf-a044719e9318").strip()
+_PC_COMPANY_ID       = os.getenv("PAPERCLIP_COMPANY_ID_MA", "").strip()
+_PC_LENA_AGENT_ID    = os.getenv("PAPERCLIP_LENA_AGENT_ID", "").strip()
 
 if os.getenv("TELEGRAM_BOT_TOKEN") and not os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip():
     raise RuntimeError(
