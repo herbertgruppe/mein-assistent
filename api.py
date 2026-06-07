@@ -42,7 +42,7 @@ import requests as _http
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 load_dotenv()
 
@@ -1428,6 +1428,30 @@ _WELL_KNOWN_FOLDER_MAP: dict[str, str] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Input-validation helpers (HBE-610 — security fix)
+# Extracted as module-level functions so tests can cover them without a full
+# Pydantic model load.
+# ---------------------------------------------------------------------------
+
+_RE_MESSAGE_ID = re.compile(r"^[A-Za-z0-9_\-=]+$")
+_RE_TARGET_FOLDER = re.compile(r"^[A-Za-z0-9 ÄÖÜäöüß_\-/]+$")
+
+
+def _check_message_id(v: str) -> str:
+    """Validate a Graph message ID (base64url-safe characters only)."""
+    if not _RE_MESSAGE_ID.match(v):
+        raise ValueError("message_id enthält unzulässige Zeichen — erwartet: base64url-sicher.")
+    return v
+
+
+def _check_target_folder(v: str) -> str:
+    """Validate an Outlook folder name against an allowlist character set."""
+    if not _RE_TARGET_FOLDER.match(v):
+        raise ValueError("target_folder enthält unzulässige Zeichen.")
+    return v
+
+
 def _resolve_folder_id(target_folder: str, headers: dict) -> str:
     """Return the Graph folder ID for *target_folder*.
 
@@ -1447,11 +1471,13 @@ def _resolve_folder_id(target_folder: str, headers: dict) -> str:
         if resp.status_code == 200:
             return resp.json()["id"]
 
+    # OData-escape single quotes (defense-in-depth even after validator).
+    safe_folder = target_folder.replace("'", "''")
     # Fall back: query by displayName (supports custom folders).
     resp = _rq.get(
         "https://graph.microsoft.com/v1.0/me/mailFolders",
         headers=headers,
-        params={"$filter": f"displayName eq '{target_folder}'", "$select": "id,displayName"},
+        params={"$filter": f"displayName eq '{safe_folder}'", "$select": "id,displayName"},
         timeout=30,
     )
     if resp.status_code != 200:
@@ -1472,6 +1498,16 @@ class LenaMoveMailRequest(BaseModel):
     message_id: str
     target_folder: str
 
+    @field_validator("message_id")
+    @classmethod
+    def _vid_message_id(cls, v: str) -> str:
+        return _check_message_id(v)
+
+    @field_validator("target_folder")
+    @classmethod
+    def _vid_target_folder(cls, v: str) -> str:
+        return _check_target_folder(v)
+
 
 class LenaMoveMailResponse(BaseModel):
     success: bool
@@ -1481,6 +1517,11 @@ class LenaMoveMailResponse(BaseModel):
 
 class LenaMarkReadRequest(BaseModel):
     message_id: str
+
+    @field_validator("message_id")
+    @classmethod
+    def _vid_message_id(cls, v: str) -> str:
+        return _check_message_id(v)
 
 
 class LenaMarkReadResponse(BaseModel):
