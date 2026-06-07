@@ -15,6 +15,10 @@ Telegram-Bridge (HBE-402):
   POST /api/telegram/lena/send    — Sendet Telegram-Nachricht an einen Chat (intern, X-API-Key)
   Background-Job                  — Pollt Paperclip-Comments auf TELEGRAM_REPLY: Prefix, sendet via Telegram
 
+Lena Mail-Management (HBE-607):
+  POST /api/lena/mail/move       — Verschiebt Mail in Outlook-Ordner (Archive, Deleted Items, Custom)
+  POST /api/lena/mail/mark-read  — Markiert Mail als gelesen
+
 Auth:    X-API-Key Header (API_SECRET_KEY aus .env)
 Port:    8502 (loopback, hinter nginx mit /api/-Proxy)
 Token:   /app/auth/outlook_token.json (Docker-Volume `auth`)
@@ -38,7 +42,7 @@ import requests as _http
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 load_dotenv()
 
@@ -1402,6 +1406,206 @@ def lena_send_mail(
         raise HTTPException(status_code=502, detail=f"SMTP-Fehler: {exc}") from exc
 
     return LenaSendMailResponse(success=True, message_id=message_id)
+
+
+# Well-known Outlook folder aliases (Graph API canonical IDs).
+# Maps lowercase display names (DE + EN) to Graph well-known folder names.
+_WELL_KNOWN_FOLDER_MAP: dict[str, str] = {
+    "inbox": "inbox",
+    "posteingang": "inbox",
+    "drafts": "drafts",
+    "entwürfe": "drafts",
+    "sent items": "sentitems",
+    "gesendete elemente": "sentitems",
+    "deleted items": "deleteditems",
+    "papierkorb": "deleteditems",
+    "gelöschte elemente": "deleteditems",
+    "junk email": "junkemail",
+    "spam": "junkemail",
+    "junk-e-mail": "junkemail",
+    "archive": "archive",
+    "archiv": "archive",
+}
+
+
+# ---------------------------------------------------------------------------
+# Input-validation helpers (HBE-610 — security fix)
+# Extracted as module-level functions so tests can cover them without a full
+# Pydantic model load.
+# ---------------------------------------------------------------------------
+
+_RE_MESSAGE_ID = re.compile(r"^[A-Za-z0-9_\-=]+$")
+_RE_TARGET_FOLDER = re.compile(r"^[A-Za-z0-9 ÄÖÜäöüß_\-/]+$")
+
+
+def _check_message_id(v: str) -> str:
+    """Validate a Graph message ID (base64url-safe characters only)."""
+    if not _RE_MESSAGE_ID.match(v):
+        raise ValueError("message_id enthält unzulässige Zeichen — erwartet: base64url-sicher.")
+    return v
+
+
+def _check_target_folder(v: str) -> str:
+    """Validate an Outlook folder name against an allowlist character set."""
+    if not _RE_TARGET_FOLDER.match(v):
+        raise ValueError("target_folder enthält unzulässige Zeichen.")
+    return v
+
+
+def _resolve_folder_id(target_folder: str, headers: dict) -> str:
+    """Return the Graph folder ID for *target_folder*.
+
+    Checks well-known alias table first; falls back to GET /me/mailFolders query by displayName.
+    Raises HTTPException 404 when the folder cannot be found.
+    """
+    import requests as _rq
+
+    alias = _WELL_KNOWN_FOLDER_MAP.get(target_folder.strip().lower())
+    if alias:
+        # Verify it exists and fetch its real ID so the PATCH has a stable value.
+        resp = _rq.get(
+            f"https://graph.microsoft.com/v1.0/me/mailFolders/{alias}",
+            headers=headers,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return resp.json()["id"]
+
+    # OData-escape single quotes (defense-in-depth even after validator).
+    safe_folder = target_folder.replace("'", "''")
+    # Fall back: query by displayName (supports custom folders).
+    resp = _rq.get(
+        "https://graph.microsoft.com/v1.0/me/mailFolders",
+        headers=headers,
+        params={"$filter": f"displayName eq '{safe_folder}'", "$select": "id,displayName"},
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler beim Ordner-Lookup: HTTP {resp.status_code} — {resp.text[:300]}",
+        )
+    folders = resp.json().get("value", [])
+    if not folders:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Outlook-Ordner nicht gefunden: '{target_folder}'",
+        )
+    return folders[0]["id"]
+
+
+class LenaMoveMailRequest(BaseModel):
+    message_id: str
+    target_folder: str
+
+    @field_validator("message_id")
+    @classmethod
+    def _vid_message_id(cls, v: str) -> str:
+        return _check_message_id(v)
+
+    @field_validator("target_folder")
+    @classmethod
+    def _vid_target_folder(cls, v: str) -> str:
+        return _check_target_folder(v)
+
+
+class LenaMoveMailResponse(BaseModel):
+    success: bool
+    message_id: str
+    folder: str
+
+
+class LenaMarkReadRequest(BaseModel):
+    message_id: str
+
+    @field_validator("message_id")
+    @classmethod
+    def _vid_message_id(cls, v: str) -> str:
+        return _check_message_id(v)
+
+
+class LenaMarkReadResponse(BaseModel):
+    success: bool
+
+
+@app.post("/api/lena/mail/move", response_model=LenaMoveMailResponse)
+def lena_mail_move(
+    req: LenaMoveMailRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Verschiebt eine Mail in einen Outlook-Ordner (HBE-607).
+
+    Unterstützt well-known Ordner-Aliase (Archive/Archiv, Deleted Items/Papierkorb,
+    Junk Email/Spam, Inbox/Posteingang) sowie beliebige Custom-Folder per displayName.
+    Implementierung: PATCH /me/messages/{id} mit parentFolderId.
+    """
+    import requests as _rq
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Content-Type": "application/json",
+    }
+
+    folder_id = _resolve_folder_id(req.target_folder, headers)
+
+    resp = _rq.patch(
+        f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
+        headers=headers,
+        json={"parentFolderId": folder_id},
+        timeout=30,
+    )
+    if resp.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler beim Verschieben: HTTP {resp.status_code} — {resp.text[:300]}",
+        )
+
+    return LenaMoveMailResponse(
+        success=True,
+        message_id=req.message_id,
+        folder=req.target_folder,
+    )
+
+
+@app.post("/api/lena/mail/mark-read", response_model=LenaMarkReadResponse)
+def lena_mail_mark_read(
+    req: LenaMarkReadRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Markiert eine Mail als gelesen (HBE-607).
+
+    Implementierung: PATCH /me/messages/{id} mit { "isRead": true }.
+    """
+    import requests as _rq
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Content-Type": "application/json",
+    }
+
+    resp = _rq.patch(
+        f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
+        headers=headers,
+        json={"isRead": True},
+        timeout=30,
+    )
+    if resp.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler beim Markieren: HTTP {resp.status_code} — {resp.text[:300]}",
+        )
+
+    return LenaMarkReadResponse(success=True)
 
 
 # ---------------------------------------------------------------------------
