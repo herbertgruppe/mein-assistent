@@ -1504,7 +1504,7 @@ async def telegram_lena_webhook(req: Request):
 
     if existing_issue_id:
         # Append follow-up message as a comment on the existing issue
-        _pc_add_comment(existing_issue_id, f"Sven: {msg.text}")
+        _pc_add_comment(existing_issue_id, f"{username}: {msg.text}")
     else:
         issue_id = _pc_create_issue(
             chat_id=chat_id,
