@@ -117,8 +117,14 @@ def _load_api_module():
     def _field(default=None, **kw):
         return default
 
+    def _field_validator(*args, **kwargs):
+        def decorator(fn):
+            return classmethod(fn)
+        return decorator
+
     pyd_mod.BaseModel = _BaseModel
     pyd_mod.Field = _field
+    pyd_mod.field_validator = _field_validator
     stubs["pydantic"] = pyd_mod
 
     saved = {name: sys.modules.get(name) for name in stubs}
