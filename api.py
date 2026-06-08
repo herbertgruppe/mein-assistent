@@ -1568,6 +1568,17 @@ class LenaMarkReadResponse(BaseModel):
     success: bool
 
 
+class LenaContactResult(BaseModel):
+    name: str
+    email: str
+    title: str = ""
+    company: str = ""
+
+
+class LenaContactsSearchResponse(BaseModel):
+    contacts: List[LenaContactResult]
+
+
 @app.post("/api/lena/mail/move", response_model=LenaMoveMailResponse)
 def lena_mail_move(
     req: LenaMoveMailRequest,
@@ -1646,6 +1657,95 @@ def lena_mail_mark_read(
         )
 
     return LenaMarkReadResponse(success=True)
+
+
+@app.get("/api/lena/contacts/search", response_model=LenaContactsSearchResponse)
+def lena_contacts_search(
+    q: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Sucht Kontakte im Outlook-Adressbuch via Microsoft Graph People API (HBE-647).
+
+    Query-Parameter:
+      - q  Suchbegriff (Name, E-Mail, Firma; max. 100 Zeichen)
+
+    Primäre Suche: GET /me/people?$search={q}
+    Fallback (kein Ergebnis): GET /me/contacts?$filter=startswith(displayName,'{q}')
+    HTTP 503 wenn Token abgelaufen — identisch zu /api/lena/mail/inbox.
+    """
+    import requests as _rq
+
+    q = q.strip()
+    if not q:
+        return LenaContactsSearchResponse(contacts=[])
+    if len(q) > 100:
+        raise HTTPException(status_code=400, detail="Suchbegriff zu lang (max. 100 Zeichen).")
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {"Authorization": f"Bearer {tool.access_token}"}
+
+    # Primary: People API
+    resp = _rq.get(
+        "https://graph.microsoft.com/v1.0/me/people",
+        headers=headers,
+        params={
+            "$search": q,
+            "$top": "10",
+            "$select": "displayName,emailAddresses,jobTitle,companyName",
+        },
+        timeout=30,
+    )
+
+    contacts: List[LenaContactResult] = []
+
+    if resp.status_code == 200:
+        for person in resp.json().get("value", []):
+            emails = person.get("emailAddresses") or []
+            email = emails[0].get("address", "") if emails else ""
+            if not email:
+                continue
+            contacts.append(
+                LenaContactResult(
+                    name=person.get("displayName", ""),
+                    email=email,
+                    title=person.get("jobTitle") or "",
+                    company=person.get("companyName") or "",
+                )
+            )
+
+    # Fallback: Contacts API when People API returned nothing
+    if not contacts:
+        q_esc = q.replace("'", "''")  # OData single-quote escaping
+        resp2 = _rq.get(
+            "https://graph.microsoft.com/v1.0/me/contacts",
+            headers=headers,
+            params={
+                "$filter": f"startswith(displayName,'{q_esc}')",
+                "$top": "10",
+                "$select": "displayName,emailAddresses,jobTitle,companyName",
+            },
+            timeout=30,
+        )
+        if resp2.status_code == 200:
+            for contact in resp2.json().get("value", []):
+                emails = contact.get("emailAddresses") or []
+                email = emails[0].get("address", "") if emails else ""
+                if not email:
+                    continue
+                contacts.append(
+                    LenaContactResult(
+                        name=contact.get("displayName", ""),
+                        email=email,
+                        title=contact.get("jobTitle") or "",
+                        company=contact.get("companyName") or "",
+                    )
+                )
+
+    return LenaContactsSearchResponse(contacts=contacts)
 
 
 # ---------------------------------------------------------------------------
