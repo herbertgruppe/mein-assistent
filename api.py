@@ -146,6 +146,46 @@ def _tg_send_message(chat_id: str, text: str) -> bool:
         return False
 
 
+def _pc_get_issue_status(issue_id: str) -> Optional[str]:
+    """Return the Paperclip issue status string, or None on error / not-found."""
+    if not (_PC_API_URL and _PC_API_KEY):
+        return None
+    try:
+        resp = _http.get(
+            f"{_PC_API_URL}/api/issues/{issue_id}",
+            headers={"Authorization": f"Bearer {_PC_API_KEY}"},
+            timeout=15,
+        )
+    except Exception:
+        return None
+    if resp.status_code == 404:
+        return None
+    if not resp.ok:
+        return None
+    return resp.json().get("status")
+
+
+def _pc_add_comment_to_issue(issue_id: str, username: str, text: str) -> bool:
+    """Add a Telegram message as a comment on an existing Paperclip issue. Returns True on success."""
+    if not (_PC_API_URL and _PC_API_KEY):
+        return False
+    body = f"Telegram-Nachricht von @{username}\n\n{text}"
+    try:
+        resp = _http.post(
+            f"{_PC_API_URL}/api/issues/{issue_id}/comments",
+            json={"body": body},
+            headers={"Authorization": f"Bearer {_PC_API_KEY}"},
+            timeout=15,
+        )
+    except Exception as exc:
+        logger.warning("[telegram] comment post error for %s: %s", issue_id, type(exc).__name__)
+        return False
+    if resp.ok:
+        return True
+    logger.warning("[telegram] comment post failed for %s: %s %s", issue_id, resp.status_code, resp.text[:200])
+    return False
+
+
 def _pc_create_issue(chat_id: str, message_id: int, username: str, text: str) -> Optional[str]:
     """Create a high-priority Paperclip issue assigned to Lena. Returns issue ID or None."""
     if not (_PC_API_URL and _PC_API_KEY):
@@ -181,49 +221,6 @@ def _pc_create_issue(chat_id: str, message_id: int, username: str, text: str) ->
         return resp.json().get("id")
     logger.warning("[telegram] Paperclip issue creation failed: %s %s", resp.status_code, resp.text[:300])
     return None
-
-
-def _pc_get_issue_status(issue_id: str) -> Optional[str]:
-    """Return the Paperclip issue status string, or None on error / not-found."""
-    if not (_PC_API_URL and _PC_API_KEY):
-        return None
-    try:
-        resp = _http.get(
-            f"{_PC_API_URL}/api/issues/{issue_id}",
-            headers={"Authorization": f"Bearer {_PC_API_KEY}"},
-            timeout=15,
-        )
-    except Exception:
-        return None
-    if resp.status_code == 404:
-        return None
-    if not resp.ok:
-        return None
-    return resp.json().get("status")
-
-
-def _pc_add_comment(issue_id: str, body: str) -> bool:
-    """Append a comment to an existing Paperclip issue. Returns True on success."""
-    if not (_PC_API_URL and _PC_API_KEY):
-        logger.warning("[telegram] PAPERCLIP_API_KEY_MA not set — skipping comment post")
-        return False
-    try:
-        resp = _http.post(
-            f"{_PC_API_URL}/api/issues/{issue_id}/comments",
-            json={"body": body},
-            headers={"Authorization": f"Bearer {_PC_API_KEY}"},
-            timeout=15,
-        )
-    except _http.exceptions.RequestException as exc:
-        logger.warning("[telegram] Paperclip comment request error: %s", type(exc).__name__)
-        return False
-    except Exception:
-        logger.warning("[telegram] Paperclip comment request error: unexpected error", exc_info=False)
-        return False
-    if resp.status_code in (200, 201):
-        return True
-    logger.warning("[telegram] Paperclip comment post failed: %s %s", resp.status_code, resp.text[:300])
-    return False
 
 
 def _poll_telegram_replies() -> None:
@@ -1690,25 +1687,21 @@ async def telegram_lena_webhook(req: Request):
     username = user.username or user.first_name or "Unbekannt"
     chat_id = str(msg.chat.id)
 
-    # Check for an existing open issue for this chat_id before creating a new one.
+    # Check for an existing active issue for this chat — clean all stale entries
+    active_issue_id = None
     with _telegram_db() as db:
-        row = db.execute(
+        rows = db.execute(
             "SELECT issue_id FROM pending_issues WHERE chat_id = ?", (chat_id,)
-        ).fetchone()
-    existing_issue_id = row["issue_id"] if row else None
+        ).fetchall()
+        for row in rows:
+            status = _pc_get_issue_status(row["issue_id"])
+            if status is None or status in {"done", "cancelled"}:
+                db.execute("DELETE FROM pending_issues WHERE issue_id = ?", (row["issue_id"],))
+            else:
+                active_issue_id = row["issue_id"]
 
-    if existing_issue_id:
-        status = _pc_get_issue_status(existing_issue_id)
-        terminal = {"done", "cancelled"}
-        if status is None or status in terminal:
-            # Stale entry — remove it and fall through to create a new issue
-            with _telegram_db() as db:
-                db.execute("DELETE FROM pending_issues WHERE issue_id = ?", (existing_issue_id,))
-            existing_issue_id = None
-
-    if existing_issue_id:
-        # Append follow-up message as a comment on the existing issue
-        _pc_add_comment(existing_issue_id, f"{username}: {msg.text}")
+    if active_issue_id:
+        _pc_add_comment_to_issue(active_issue_id, username, msg.text)
     else:
         issue_id = _pc_create_issue(
             chat_id=chat_id,
