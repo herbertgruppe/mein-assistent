@@ -25,9 +25,23 @@ from pathlib import Path
 from typing import List, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Security
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Security,
+)
+from fastapi.responses import HTMLResponse
 from fastapi.security import APIKeyHeader
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
+
+from database.protocols_db import ProtocolsDB
 
 load_dotenv()
 
@@ -64,6 +78,56 @@ def verify_api_key(key: str = Security(_API_KEY_HEADER)) -> str:
     if key != _API_SECRET_KEY:
         raise HTTPException(status_code=403, detail="Ungültiger API Key")
     return key
+
+
+# ---------------------------------------------------------------------------
+# Protokoll-Review: DB, Templates, Static, Dual-Auth
+# ---------------------------------------------------------------------------
+_BASE_DIR = Path(__file__).resolve().parent
+
+# Öffentliche Basis-URL für Reviewer-Links (hinter nginx/Authentik)
+_PUBLIC_BASE_URL = os.getenv(
+    "PUBLIC_BASE_URL", "https://mein-assistent.herbertgruppe.com"
+).rstrip("/")
+
+_TEMPLATES_DIR = _BASE_DIR / "templates"
+_STATIC_DIR = _BASE_DIR / "static"
+_TEMPLATES_DIR.mkdir(exist_ok=True)
+_STATIC_DIR.mkdir(exist_ok=True)
+
+templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+# protocols.db beim API-Start initialisieren (führt Migration automatisch aus)
+_protocols_db = ProtocolsDB(db_path=str(_BASE_DIR / "data" / "protocols.db"))
+
+
+def get_authenticated_user(
+    x_authentik_username: Optional[str] = Header(None),
+    x_forwarded_email: Optional[str] = Header(None),
+    api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    token: Optional[str] = Query(None),
+) -> str:
+    """
+    Dual-Auth für Browser-Endpoints (/review/, /api/asana/, /api/calendar/events).
+
+    Akzeptiert (in dieser Reihenfolge):
+      1. Authentik-Session — nginx injiziert X-Authentik-Username / X-Forwarded-Email
+      2. X-API-Key (für Skill-/Skript-Zugriffe)
+      3. Gültiger, nicht abgelaufener Reviewer-Token als ?token= Query-Param
+         (review.js sendet den Token bei allen Dropdown-Calls mit)
+    """
+    if x_authentik_username:
+        return x_authentik_username
+    if x_forwarded_email:
+        return x_forwarded_email
+    if api_key and _API_SECRET_KEY and api_key == _API_SECRET_KEY:
+        return "api-client"
+    if token:
+        protocol = _protocols_db.get_by_token(token)
+        if protocol and not ProtocolsDB.is_expired(protocol):
+            return "reviewer"
+    raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 # ---------------------------------------------------------------------------
@@ -442,10 +506,13 @@ def get_calendar_events(
     start: Optional[str] = None,
     end: Optional[str] = None,
     include_all_day: bool = False,
-    _key: str = Security(verify_api_key),
+    _user: str = Depends(get_authenticated_user),
 ):
     """
     Liefert Outlook-Kalender-Termine für ein Datum oder einen Zeitraum.
+
+    Auth: Authentik-Session ODER X-API-Key ODER gültiger Reviewer-Token
+    (Dual-Auth für den Web-Review-Editor).
 
     Query-Parameter (alternativ):
       - date=YYYY-MM-DD             → Termine an diesem Tag (00:00–24:00 lokal/UTC)
@@ -657,4 +724,557 @@ def process_reviewed_protocol(
         outlook_subject_prefix=outlook_subject,
         errors=errors,
         message="OK" if overall_success else f"{len(errors)} Fehler aufgetreten",
+    )
+
+
+# ===========================================================================
+# Protokoll-Review-Workflow (Web-Editor)
+# ===========================================================================
+# Mara (Paperclip-AI-Agent) legt Drafts via POST /api/protocols/draft ab.
+# Reviewer öffnen /review/{token}, wählen Outlook-Termin + (optional) Asana-
+# Board/-Abschnitt, korrigieren das Markdown und geben frei. Die Finalisierung
+# (PDF → Outlook; optional Asana-Protokoll-Task inkl. Subtasks) läuft als
+# FastAPI-BackgroundTask.
+#
+# --- Nginx-Konfiguration (im Repo portal-herbertgruppe einpflegen, NICHT hier):
+#
+#   # NEU: Review-Editor und API-Endpoints über Authentik zugänglich
+#   location /review/ {
+#       proxy_pass http://127.0.0.1:8502;
+#       proxy_set_header Host $host;
+#       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+#       proxy_set_header X-Forwarded-Proto $scheme;
+#       # Authentik-Auth AKTIV (Standard) — Reviewer muss Herbert-SSO-Login haben
+#   }
+#
+#   location /api/asana/ {
+#       proxy_pass http://127.0.0.1:8502;
+#       proxy_set_header Host $host;
+#       # Auth: Authentik-Session ODER X-API-Key (dual-auth in api.py)
+#   }
+#
+#   location /static/ {
+#       proxy_pass http://127.0.0.1:8502;
+#   }
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Models — Protokoll-Review
+# ---------------------------------------------------------------------------
+class ProtocolDraftRequest(BaseModel):
+    markdown: str = Field(..., description="Protokoll-Markdown von Mara")
+    meeting_name: str
+    meeting_datetime: str = Field(..., description="ISO-8601, Hint für Calendar-Picker")
+    source: str = Field(
+        ...,
+        description="'plaud-poller','email','manual','mara-generated','audio-transcribed'",
+    )
+    teilnehmer: List[str] = []
+    reviewer_emails: List[str] = []
+    ablageort: Optional[str] = None
+    recording_id: Optional[str] = None
+    event_id: Optional[str] = None
+    asana_board_gid: Optional[str] = None
+    asana_section_gid: Optional[str] = None
+    audio_ref: Optional[str] = None
+
+
+class ProtocolDraftResponse(BaseModel):
+    draft_id: str
+    reviewer_url: str
+    expires_at: str
+
+
+class ProtocolPatchRequest(BaseModel):
+    markdown: str
+
+
+class ProtocolApproveRequest(BaseModel):
+    event_id: str = Field(..., description="Outlook-Event-ID (Pflicht)")
+    create_asana_task: bool = Field(
+        True, description="Checkbox: Asana-Protokoll-Task + Subtasks anlegen"
+    )
+    asana_board_gid: Optional[str] = None
+    asana_section_gid: Optional[str] = None
+
+
+class ProtocolRejectRequest(BaseModel):
+    reason: str
+
+
+# ---------------------------------------------------------------------------
+# Asana-Hilfen: Agent-Singleton + 15-Minuten-Cache für Dropdown-Daten
+# ---------------------------------------------------------------------------
+_ASANA_CACHE_TTL_SECONDS = 15 * 60
+_asana_cache: dict = {}
+_asana_agent = None
+
+
+def _get_asana_agent():
+    """Lazy AsanaAgent-Singleton (Init macht einen Workspace-API-Call)."""
+    global _asana_agent
+    if _asana_agent is None:
+        from agents.asana_agent import AsanaAgent
+
+        _asana_agent = AsanaAgent()
+    return _asana_agent
+
+
+def _asana_cached(cache_key: str, loader):
+    """15-Minuten-TTL-Cache für Asana-Dropdown-Daten (Rate-Limit schonen)."""
+    import time
+
+    now = time.time()
+    hit = _asana_cache.get(cache_key)
+    if hit and now - hit[0] < _ASANA_CACHE_TTL_SECONDS:
+        return hit[1]
+    value = loader()
+    _asana_cache[cache_key] = (now, value)
+    return value
+
+
+def _get_protocol_llm():
+    """LLM für die Task-Extraktion (gleiches Muster wie agents/task_agent.py)."""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from langchain_anthropic import ChatAnthropic
+
+        return ChatAnthropic(
+            api_key=api_key,
+            model=os.getenv("TASK_MODEL", "claude-3-5-sonnet-latest"),
+            temperature=0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[api] LLM-Init für Task-Extraktion fehlgeschlagen: {exc}")
+        return None
+
+
+def _parse_due_on(value) -> Optional[str]:
+    """Normalisiert Fälligkeitsdaten aus der LLM-Extraktion zu YYYY-MM-DD."""
+    from datetime import datetime as _dt
+
+    if not value or value == "[?]":
+        return None
+    try:
+        if isinstance(value, str) and "." in value:
+            return _dt.strptime(value, "%d.%m.%Y").strftime("%Y-%m-%d")
+        if isinstance(value, str) and "-" in value:
+            return value
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Hintergrund-Task: Finalisierung nach Freigabe
+# ---------------------------------------------------------------------------
+def _create_asana_protocol_task(protocol: dict) -> tuple:
+    """
+    Legt den Asana-Protokoll-Task an (Muster aus pages/meeting_manager.py):
+      1. Task „📄 Protokoll {Datum} - {Meeting}" in Board/Section, Notes = Markdown
+      2. PDF generieren und an den Task anhängen (Fehler nicht fatal)
+      3. Aufgaben per LLM extrahieren und als Subtasks anlegen (Fehler nicht fatal)
+
+    Returns:
+        (task_gid, task_url)
+
+    Raises:
+        RuntimeError wenn der Protokoll-Task selbst nicht angelegt werden kann.
+    """
+    agent = _get_asana_agent()
+    if not agent.is_connected():
+        raise RuntimeError("Asana nicht konfiguriert (Token fehlt oder ungültig)")
+
+    markdown_text = protocol["current_markdown"]
+    date_str = (protocol.get("meeting_datetime") or "")[:10]
+    task_title = f"📄 Protokoll {date_str} - {protocol['meeting_name']}"
+
+    result = agent.create_task(
+        name=task_title,
+        notes=markdown_text,
+        project_gid=protocol["asana_board_gid"],
+        assignee_gid=None,
+        section_gid=protocol["asana_section_gid"],
+    )
+    if not result.get("success"):
+        raise RuntimeError(
+            f"Asana-Protokoll-Task fehlgeschlagen: {result.get('error', 'Unbekannt')}"
+        )
+    task_gid = result.get("task_gid")
+    task_url = result.get("permalink_url")
+
+    # --- PDF anhängen (nicht fatal) ---
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_path = Path(tmpdir) / f"Protokoll_{_safe_filename(protocol['meeting_name'])}.pdf"
+            if _markdown_to_pdf_standalone(markdown_text, pdf_path):
+                agent.attach_file_to_task(
+                    task_gid=task_gid,
+                    file_path=str(pdf_path),
+                    file_name=pdf_path.name,
+                )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[api] PDF-Anhang an Asana-Task fehlgeschlagen: {exc}")
+
+    # --- Subtasks aus „Weitere Schritte" (nicht fatal) ---
+    try:
+        llm = _get_protocol_llm()
+        if llm is None:
+            print("[api] ⚠️ Kein LLM verfügbar — Subtask-Extraktion übersprungen")
+        else:
+            from utils.protocol import extract_tasks_from_protocol_text
+
+            tasks = extract_tasks_from_protocol_text(markdown_text, llm)
+            for task in tasks:
+                title = task.get("title", "")
+                if not title:
+                    continue
+                origin_lines = [f"📎 Ursprung: {task_title}"]
+                if task.get("top"):
+                    origin_lines.append(f"📋 Tagesordnungspunkt: {task['top']}")
+                assignee_name = task.get("assignee")
+                if assignee_name and assignee_name != "[?]":
+                    origin_lines.append(f"👤 Geplanter Verantwortlicher: {assignee_name}")
+                origin_block = "\n".join(origin_lines)
+                description = task.get("description", "")
+                notes = f"{description}\n\n---\n{origin_block}" if description else origin_block
+
+                sub = agent.create_subtask(
+                    parent_task_gid=task_gid,
+                    name=title,
+                    notes=notes,
+                    due_on=_parse_due_on(task.get("due_date")),
+                    assignee_gid=None,
+                )
+                if not sub.get("success"):
+                    print(f"[api] ⚠️ Subtask fehlgeschlagen: {title}: {sub.get('error')}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[api] Subtask-Extraktion fehlgeschlagen: {exc}")
+
+    return task_gid, task_url
+
+
+def _finalize_protocol(draft_id: str) -> None:
+    """
+    Hintergrund-Job nach Freigabe:
+      1. PDF + Outlook (Anhang, Kategorie, Betreff-Prefix) via bestehender
+         process_reviewed_protocol-Logik (direkter Aufruf, kein HTTP)
+      2. Optional Asana-Protokoll-Task + Subtasks (create_asana_task-Checkbox)
+      3. Erfolg → status 'finalized'; Fehler → 'in_review' + finalization_error
+    """
+    protocol = _protocols_db.get_by_id(draft_id)
+    if not protocol or protocol["status"] != "approved":
+        return
+
+    try:
+        result = process_reviewed_protocol(
+            ProcessProtocolRequest(
+                markdown=protocol["current_markdown"],
+                meeting_name=protocol["meeting_name"],
+                event_id=protocol["event_id"],
+                asana_gid=protocol["asana_board_gid"],
+            ),
+            _key="internal",
+        )
+        if not result.success:
+            raise RuntimeError(
+                "PDF/Outlook fehlgeschlagen: " + "; ".join(result.errors)
+            )
+
+        task_gid = None
+        task_url = None
+        if protocol.get("create_asana_task"):
+            task_gid, task_url = _create_asana_protocol_task(protocol)
+
+        _protocols_db.set_finalized(draft_id, task_gid, task_url)
+
+    except Exception as exc:  # noqa: BLE001
+        _protocols_db.set_finalization_error(draft_id, str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — Protokoll-Review
+# ---------------------------------------------------------------------------
+@app.post(
+    "/api/protocols/draft", response_model=ProtocolDraftResponse, status_code=201
+)
+def create_protocol_draft(
+    req: ProtocolDraftRequest,
+    _key: str = Security(verify_api_key),
+):
+    """Mara legt einen Protokoll-Draft ab und erhält die Reviewer-URL."""
+    result = _protocols_db.create_draft(
+        markdown=req.markdown,
+        meeting_name=req.meeting_name,
+        meeting_datetime=req.meeting_datetime,
+        source=req.source,
+        teilnehmer=req.teilnehmer,
+        reviewer_emails=req.reviewer_emails,
+        ablageort=req.ablageort,
+        recording_id=req.recording_id,
+        event_id=req.event_id,
+        asana_board_gid=req.asana_board_gid,
+        asana_section_gid=req.asana_section_gid,
+        audio_ref=req.audio_ref,
+    )
+    return ProtocolDraftResponse(
+        draft_id=result["id"],
+        reviewer_url=f"{_PUBLIC_BASE_URL}/review/{result['reviewer_token']}",
+        expires_at=result["expires_at"],
+    )
+
+
+# WICHTIG: /finalized muss VOR /{draft_id} deklariert sein (Routing-Reihenfolge)
+@app.get("/api/protocols/finalized")
+def list_finalized_protocols(
+    since: Optional[str] = None,
+    limit: int = 50,
+    _key: str = Security(verify_api_key),
+):
+    """Vault-Sync für Claudian: alle finalisierten Protokolle seit `since`."""
+    protocols = _protocols_db.list_finalized_since(since=since, limit=limit)
+    return {
+        "protocols": [
+            {
+                "id": p["id"],
+                "meeting_name": p["meeting_name"],
+                "meeting_datetime": p["meeting_datetime"],
+                "ablageort": p["ablageort"],
+                "markdown": p["current_markdown"],
+                "frontmatter": {
+                    "asana_protokoll_task_gid": p["asana_task_gid"],
+                    "asana_protokoll_task_url": p["asana_task_url"],
+                    "teilnehmer": p["teilnehmer"],
+                },
+                "finalized_at": p["finalized_at"],
+            }
+            for p in protocols
+        ]
+    }
+
+
+def _get_protocol_for_token(
+    draft_id: str, token: Optional[str], allow_api_key: Optional[str] = None
+) -> dict:
+    """
+    Lädt ein Protokoll und prüft den Reviewer-Token.
+      - 404: draft_id unbekannt
+      - 401: kein Token/Key
+      - 403: Token gehört nicht zu diesem Draft / Key ungültig
+      - 410: Token abgelaufen
+    """
+    protocol = _protocols_db.get_by_id(draft_id)
+    if not protocol:
+        raise HTTPException(status_code=404, detail="Protokoll nicht gefunden")
+
+    if allow_api_key and _API_SECRET_KEY and allow_api_key == _API_SECRET_KEY:
+        return protocol
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Token fehlt (?token=...)")
+    if token != protocol["reviewer_token"]:
+        raise HTTPException(status_code=403, detail="Ungültiger Token")
+    if ProtocolsDB.is_expired(protocol):
+        raise HTTPException(status_code=410, detail="Token abgelaufen")
+    return protocol
+
+
+@app.get("/api/protocols/{draft_id}")
+def get_protocol_draft(
+    draft_id: str,
+    token: Optional[str] = Query(None),
+    api_key: Optional[str] = Header(None, alias="X-API-Key"),
+):
+    """Aktueller Draft-Stand. Auth: Reviewer-Token ODER X-API-Key."""
+    protocol = _get_protocol_for_token(draft_id, token, allow_api_key=api_key)
+    protocol.pop("reviewer_token", None)
+    return protocol
+
+
+@app.patch("/api/protocols/{draft_id}")
+def patch_protocol_markdown(
+    draft_id: str,
+    req: ProtocolPatchRequest,
+    token: Optional[str] = Query(None),
+    x_authentik_username: Optional[str] = Header(None),
+):
+    """Speichert den aktuellen Editor-Stand."""
+    _get_protocol_for_token(draft_id, token)
+    _protocols_db.update_markdown(
+        draft_id, req.markdown, modified_by=x_authentik_username or "reviewer"
+    )
+    return {"status": "saved"}
+
+
+@app.post("/api/protocols/{draft_id}/approve", status_code=202)
+def approve_protocol(
+    draft_id: str,
+    req: ProtocolApproveRequest,
+    background_tasks: BackgroundTasks,
+    token: Optional[str] = Query(None),
+    x_authentik_username: Optional[str] = Header(None),
+):
+    """
+    Freigabe: speichert Termin-/Asana-Auswahl, gibt sofort 202 zurück und
+    startet die Finalisierung als Hintergrund-Task.
+    """
+    protocol = _get_protocol_for_token(draft_id, token)
+
+    if protocol["status"] in ("approved", "finalized"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Protokoll ist bereits {protocol['status']}.",
+        )
+
+    if req.create_asana_task and not (req.asana_board_gid and req.asana_section_gid):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "asana_board_gid und asana_section_gid sind Pflicht, "
+                "wenn create_asana_task=true."
+            ),
+        )
+
+    _protocols_db.set_approved(
+        draft_id,
+        event_id=req.event_id,
+        asana_board_gid=req.asana_board_gid,
+        asana_section_gid=req.asana_section_gid,
+        create_asana_task=req.create_asana_task,
+        approved_by=x_authentik_username or "reviewer",
+    )
+    background_tasks.add_task(_finalize_protocol, draft_id)
+
+    return {
+        "status": "approved",
+        "message": "Protokoll wird im Hintergrund fertiggestellt.",
+    }
+
+
+@app.post("/api/protocols/{draft_id}/reject")
+def reject_protocol(
+    draft_id: str,
+    req: ProtocolRejectRequest,
+    token: Optional[str] = Query(None),
+    x_authentik_username: Optional[str] = Header(None),
+):
+    """Ablehnen: Status 'rejected' + Grund speichern."""
+    _get_protocol_for_token(draft_id, token)
+    _protocols_db.set_rejected(
+        draft_id, req.reason, rejected_by=x_authentik_username or "reviewer"
+    )
+    return {"status": "rejected"}
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — Asana-Dropdown-Daten (15 Minuten gecacht)
+# ---------------------------------------------------------------------------
+@app.get("/api/asana/boards")
+def get_asana_boards(_user: str = Depends(get_authenticated_user)):
+    """Alle Asana-Projekte des Workspace. Auth: Authentik/X-API-Key/Token."""
+
+    def load():
+        agent = _get_asana_agent()
+        if not agent.is_connected():
+            raise HTTPException(status_code=503, detail="Asana nicht konfiguriert.")
+        return [
+            {"gid": p["gid"], "name": p["name"]} for p in agent.list_projects()
+        ]
+
+    return _asana_cached("boards", load)
+
+
+@app.get("/api/asana/boards/{board_gid}/sections")
+def get_asana_board_sections(
+    board_gid: str, _user: str = Depends(get_authenticated_user)
+):
+    """Sections eines Asana-Boards. Auth: Authentik/X-API-Key/Token."""
+
+    def load():
+        agent = _get_asana_agent()
+        if not agent.is_connected():
+            raise HTTPException(status_code=503, detail="Asana nicht konfiguriert.")
+        return [
+            {"gid": s["gid"], "name": s["name"]}
+            for s in agent.get_project_sections(board_gid)
+        ]
+
+    return _asana_cached(f"sections:{board_gid}", load)
+
+
+# ---------------------------------------------------------------------------
+# Endpoint — Review-Editor (HTML)
+# ---------------------------------------------------------------------------
+@app.get("/review/{token}", response_class=HTMLResponse)
+def review_page(
+    request: Request,
+    token: str,
+    x_authentik_username: Optional[str] = Header(None),
+):
+    """
+    Editor-Seite für Reviewer. Auth: Authentik-SSO (erzwungen durch nginx;
+    der Reviewer-Token im Pfad identifiziert das Protokoll).
+    """
+    protocol = _protocols_db.get_by_token(token)
+    if not protocol:
+        return templates.TemplateResponse(
+            request, "review_error.html", {"reason": "unknown"}, status_code=404
+        )
+    if ProtocolsDB.is_expired(protocol):
+        return templates.TemplateResponse(
+            request, "review_error.html", {"reason": "expired"}, status_code=410
+        )
+
+    if protocol["status"] == "draft":
+        _protocols_db.set_status(protocol["id"], "in_review")
+        protocol["status"] = "in_review"
+
+    meeting_dt_fmt = protocol["meeting_datetime"]
+    try:
+        from datetime import datetime as _dt
+
+        meeting_dt_fmt = _dt.fromisoformat(
+            protocol["meeting_datetime"].replace("Z", "+00:00")
+        ).strftime("%d.%m.%Y %H:%M")
+    except (ValueError, AttributeError):
+        pass
+
+    return templates.TemplateResponse(
+        request,
+        "review.html",
+        {
+            "draft_id": protocol["id"],
+            "token": token,
+            "meeting_name": protocol["meeting_name"],
+            "meeting_datetime": protocol["meeting_datetime"],
+            "meeting_datetime_fmt": meeting_dt_fmt,
+            "teilnehmer": protocol["teilnehmer"],
+            "teilnehmer_str": ", ".join(protocol["teilnehmer"]),
+            "current_markdown": protocol["current_markdown"],
+            "status": protocol["status"],
+            "create_asana_task": protocol["create_asana_task"],
+            "finalization_error": protocol["finalization_error"],
+            "reviewer_name": x_authentik_username or "",
+        },
+    )
+
+
+@app.get("/review/{token}/success", response_class=HTMLResponse)
+def review_success_page(request: Request, token: str):
+    """Erfolgsseite nach Freigabe (Redirect-Ziel von review.js)."""
+    protocol = _protocols_db.get_by_token(token)
+    if not protocol:
+        return templates.TemplateResponse(
+            request, "review_error.html", {"reason": "unknown"}, status_code=404
+        )
+    return templates.TemplateResponse(
+        request,
+        "review_success.html",
+        {
+            "meeting_name": protocol["meeting_name"],
+            "create_asana_task": protocol["create_asana_task"],
+        },
     )

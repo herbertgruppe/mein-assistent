@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <title>Protokoll-Review – {{ meeting_name }}</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/simplemde/latest/simplemde.min.css">
+    <link rel="stylesheet" href="/static/review.css">
+</head>
+<body>
+    <header class="hg-header">
+        <h1>Herbert Gruppe – Protokoll-Review</h1>
+    </header>
+
+    <main class="hg-main">
+        <section class="hg-meta-bar">
+            <div><strong>Meeting:</strong> {{ meeting_name }} &middot; <strong>Datum:</strong> {{ meeting_datetime_fmt }}</div>
+            {% if teilnehmer_str %}<div><strong>Teilnehmer:</strong> {{ teilnehmer_str }}</div>{% endif %}
+            <div><strong>Status:</strong> <span class="hg-status hg-status-{{ status }}" id="status-badge">{{ status }}</span></div>
+        </section>
+
+        {% if finalization_error %}
+        <div class="hg-banner hg-banner-error">
+            ⚠️ Die letzte Finalisierung ist fehlgeschlagen: {{ finalization_error }}<br>
+            Bitte Auswahl prüfen und erneut freigeben.
+        </div>
+        {% endif %}
+
+        {% if status == 'rejected' %}
+        <div class="hg-banner hg-banner-warn">
+            Dieses Protokoll wurde abgelehnt. Es kann weiterhin bearbeitet und erneut freigegeben werden.
+        </div>
+        {% endif %}
+
+        <section class="hg-metadata">
+            <h2>Metadaten <span class="hg-hint">(Pflicht vor Freigabe)</span></h2>
+            <div class="hg-field">
+                <label for="event-select">Outlook-Termin *</label>
+                <select id="event-select">
+                    <option value="">Lade Termine …</option>
+                </select>
+            </div>
+            <div class="hg-field hg-field-checkbox">
+                <label>
+                    <input type="checkbox" id="asana-checkbox" {% if create_asana_task %}checked{% endif %}>
+                    In Asana anlegen (Protokoll-Aufgabe + Unteraufgaben)
+                </label>
+            </div>
+            <div class="hg-field" id="board-field">
+                <label for="board-select">Asana-Board *</label>
+                <select id="board-select">
+                    <option value="">Lade Boards …</option>
+                </select>
+            </div>
+            <div class="hg-field" id="section-field">
+                <label for="section-select">Asana-Abschnitt *</label>
+                <select id="section-select" disabled>
+                    <option value="">Erst Board wählen …</option>
+                </select>
+            </div>
+        </section>
+
+        <section class="hg-editor-wrap">
+            <div class="hg-tabs" id="mobile-tabs">
+                <button type="button" class="hg-tab active" data-tab="editor">Editor</button>
+                <button type="button" class="hg-tab" data-tab="preview">Vorschau</button>
+            </div>
+            <div class="hg-editor-grid" id="editor-grid">
+                <div class="hg-editor-pane" id="editor-pane">
+                    <textarea id="markdown-editor">{{ current_markdown }}</textarea>
+                </div>
+                <div class="hg-preview-pane" id="preview-pane"></div>
+            </div>
+        </section>
+
+        <section class="hg-actions">
+            <span class="hg-save-info" id="save-info"></span>
+            <button type="button" class="hg-btn hg-btn-secondary" id="save-btn">💾 Speichern</button>
+            <button type="button" class="hg-btn hg-btn-primary" id="approve-btn" disabled>✅ Freigeben</button>
+            <button type="button" class="hg-btn hg-btn-danger" id="reject-btn">❌ Ablehnen</button>
+        </section>
+    </main>
+
+    <!-- Ablehnen-Modal -->
+    <div class="hg-modal-backdrop" id="reject-modal" hidden>
+        <div class="hg-modal">
+            <h3>Protokoll ablehnen</h3>
+            <p>Bitte gib einen Grund an:</p>
+            <textarea id="reject-reason" rows="4" placeholder="Grund der Ablehnung …"></textarea>
+            <div class="hg-modal-actions">
+                <button type="button" class="hg-btn hg-btn-secondary" id="reject-cancel">Abbrechen</button>
+                <button type="button" class="hg-btn hg-btn-danger" id="reject-confirm">Ablehnen</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        window.REVIEW_CONTEXT = {
+            draftId: {{ draft_id | tojson }},
+            token: {{ token | tojson }},
+            meetingName: {{ meeting_name | tojson }},
+            meetingDatetime: {{ meeting_datetime | tojson }},
+            createAsanaTask: {{ create_asana_task | tojson }}
+        };
+    </script>
+    <script src="https://cdn.jsdelivr.net/simplemde/latest/simplemde.min.js"></script>
+    <script src="/static/review.js"></script>
+</body>
+</html>
