@@ -51,6 +51,12 @@ def _load_api_module() -> types.ModuleType:
 
         post = get
         on_event = get
+        patch = get
+        put = get
+        delete = get
+
+        def mount(self, *a, **kw):
+            pass
 
     class _HTTPException(Exception):
         def __init__(self, status_code=500, detail=""):
@@ -64,10 +70,18 @@ def _load_api_module() -> types.ModuleType:
     class _Request:
         pass
 
+    class _BackgroundTasks:
+        def add_task(self, *a, **kw):
+            pass
+
     fastapi_mod.FastAPI = _App
     fastapi_mod.HTTPException = _HTTPException
     fastapi_mod.Security = _security
     fastapi_mod.Request = _Request
+    fastapi_mod.BackgroundTasks = _BackgroundTasks
+    fastapi_mod.Depends = lambda *a, **kw: None
+    fastapi_mod.Header = lambda *a, **kw: None
+    fastapi_mod.Query = lambda *a, **kw: None
     stubs["fastapi"] = fastapi_mod
 
     sec_mod = types.ModuleType("fastapi.security")
@@ -78,6 +92,36 @@ def _load_api_module() -> types.ModuleType:
 
     sec_mod.APIKeyHeader = _APIKeyHeader
     stubs["fastapi.security"] = sec_mod
+
+    responses_mod = types.ModuleType("fastapi.responses")
+
+    class _HTMLResponse:
+        def __init__(self, *a, **kw):
+            pass
+
+    responses_mod.HTMLResponse = _HTMLResponse
+    stubs["fastapi.responses"] = responses_mod
+
+    staticfiles_mod = types.ModuleType("fastapi.staticfiles")
+
+    class _StaticFiles:
+        def __init__(self, *a, **kw):
+            pass
+
+    staticfiles_mod.StaticFiles = _StaticFiles
+    stubs["fastapi.staticfiles"] = staticfiles_mod
+
+    templating_mod = types.ModuleType("fastapi.templating")
+
+    class _Jinja2Templates:
+        def __init__(self, *a, **kw):
+            pass
+
+        def TemplateResponse(self, *a, **kw):
+            return None
+
+    templating_mod.Jinja2Templates = _Jinja2Templates
+    stubs["fastapi.templating"] = templating_mod
 
     pyd_mod = types.ModuleType("pydantic")
 
