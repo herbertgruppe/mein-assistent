@@ -64,9 +64,8 @@ config/
 *.log.*
 
 # Backup files
-*.backup
-*.backup_*
-*.backup_path_fix
+*.backup*
+*.bak
 
 # Runtime files
 *.pid

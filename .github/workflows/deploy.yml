@@ -1,0 +1,34 @@
+name: Deploy mein-assistent to Hetzner
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: mein-assistent-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Prepare SSH
+        env:
+          SSH_KEY: ${{ secrets.HETZNER_MEIN_ASSISTENT_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_ed25519
+          sed -i -e '$a\' ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 -H 46.225.132.135 >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keygen -lf ~/.ssh/id_ed25519
+
+      - name: Trigger deploy on Hetzner
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes github-deploy@46.225.132.135 true
+
+      - name: Clean up
+        if: always()
+        run: shred -u ~/.ssh/id_ed25519 2>/dev/null || rm -f ~/.ssh/id_ed25519

@@ -1,0 +1,99 @@
+name: PR Review via Paperclip
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  trigger-code-reviewer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Create Paperclip review issue
+        env:
+          PAPERCLIP_API_URL: ${{ vars.PAPERCLIP_API_URL }}
+          PAPERCLIP_API_KEY: ${{ secrets.PAPERCLIP_API_KEY }}
+          PAPERCLIP_COMPANY_ID: 9df4976b-9ac8-4e8f-a156-c06c7fa40cdc
+          CODE_REVIEWER_AGENT_ID: f2cdbdbc-f456-4ac7-bba6-178ef7422748
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_REPO: ${{ github.repository }}
+          PR_BASE: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_ACTION: ${{ github.event.action }}
+        run: |
+          set -euo pipefail
+
+          # Idempotency key: {repo-name}-pr-{number}
+          REPO_NAME=$(echo "$PR_REPO" | cut -d'/' -f2)
+          FINGERPRINT="${REPO_NAME}-pr-${PR_NUMBER}"
+
+          # Check for an existing open review issue for this PR
+          SEARCH_RESP=$(curl -sS -w "\n%{http_code}" \
+            "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/issues?originFingerprint=${FINGERPRINT}" \
+            -H "Authorization: Bearer $PAPERCLIP_API_KEY")
+          SEARCH_HTTP=$(echo "$SEARCH_RESP" | tail -1)
+          SEARCH_BODY=$(echo "$SEARCH_RESP" | head -n -1)
+
+          EXISTING_ID=""
+          if [ "$SEARCH_HTTP" = "200" ]; then
+            EXISTING_ID=$(echo "$SEARCH_BODY" | jq -r --arg fp "$FINGERPRINT" \
+              '(.issues // .) | map(select(.status != "done" and .status != "cancelled" and .originFingerprint == $fp)) | first | .id // empty' \
+              2>/dev/null || echo "")
+          fi
+
+          if [ -n "$EXISTING_ID" ]; then
+            # Active review issue exists — post a comment to re-trigger the reviewer
+            COMMENT=$(jq -n \
+              --arg sha "$PR_HEAD_SHA" \
+              --arg action "$PR_ACTION" \
+              --arg url "$PR_URL" \
+              '"Neuer Commit auf PR (`pull_request.\($action)`):\n\n- Head-SHA: `\($sha)`\n- PR: \($url)\n\nCode Reviewer Agent: bitte PR-Diff neu klassifizieren."')
+            COMMENT_PAYLOAD=$(jq -n --arg body "$COMMENT" '{body: $body}')
+            COMMENT_RESP=$(curl -sS -w "\n%{http_code}" -X POST \
+              "$PAPERCLIP_API_URL/api/issues/$EXISTING_ID/comments" \
+              -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "$COMMENT_PAYLOAD")
+            C_HTTP=$(echo "$COMMENT_RESP" | tail -1)
+            C_BODY=$(echo "$COMMENT_RESP" | head -n -1)
+            echo "HTTP: $C_HTTP"
+            echo "Response: $C_BODY"
+            if [ "$C_HTTP" != "200" ] && [ "$C_HTTP" != "201" ]; then
+              echo "::error::Paperclip-Kommentar fehlgeschlagen (HTTP $C_HTTP)"
+              exit 1
+            fi
+            echo "::notice::Kommentar auf bestehendes Issue $EXISTING_ID gepostet (Fingerprint: $FINGERPRINT, SHA: $PR_HEAD_SHA)"
+          else
+            # No active review issue — create a new one
+            BODY=$(jq -n \
+              --arg url "$PR_URL" \
+              --arg repo "$PR_REPO" \
+              --arg author "$PR_AUTHOR" \
+              --arg base "$PR_BASE" \
+              --arg sha "$PR_HEAD_SHA" \
+              --arg action "$PR_ACTION" \
+              '"## PR Review angefordert\n\n- Repo: \($repo)\n- PR: \($url)\n- Author: \($author)\n- Base: \($base)\n- Head-SHA: \($sha)\n- Trigger-Event: pull_request.\($action)\n\nCode Reviewer Agent soll: 1) risk-rules.yml im Repo laden, 2) PR-Diff klassifizieren (LOW/MEDIUM/HIGH), 3) GitHub-Review (APPROVE/REQUEST_CHANGES/COMMENT) submitten, 4) bei LOW nach 10 Min Cool-Off auto-mergen, 5) bei MEDIUM Folge-Issue für Lead Engineer anlegen, 6) bei HIGH Sven via Asana eskalieren."')
+            PAYLOAD=$(jq -n \
+              --arg title "PR Review: $PR_TITLE (#$PR_NUMBER)" \
+              --arg desc "$BODY" \
+              --arg agent "$CODE_REVIEWER_AGENT_ID" \
+              --arg fp "$FINGERPRINT" \
+              '{title: $title, description: $desc, assigneeAgentId: $agent, priority: "medium", originFingerprint: $fp}')
+            RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST \
+              "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/issues" \
+              -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD")
+            HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+            BODY_RESP=$(echo "$RESPONSE" | head -n -1)
+            echo "HTTP: $HTTP_CODE"
+            echo "Response: $BODY_RESP"
+            if [ "$HTTP_CODE" != "201" ]; then
+              echo "::error::Paperclip-Issue-Erzeugung fehlgeschlagen (HTTP $HTTP_CODE)"
+              exit 1
+            fi
+            ISSUE_ID=$(echo "$BODY_RESP" | jq -r '.identifier')
+            echo "::notice::Paperclip-Issue $ISSUE_ID erzeugt (Fingerprint: $FINGERPRINT) -> Code Reviewer wird via wakeOnDemand getriggert"
+          fi

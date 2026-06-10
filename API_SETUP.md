@@ -189,3 +189,84 @@ Falls der Token abgelaufen ist und Refresh fehlschlägt, antwortet die API mit
   öffentlich gemacht werden soll.
 - **Keine Asana-Verarbeitung**: Asana-Aufgaben werden vom Cowork-Skill direkt
   angelegt; das `asana_gid`-Feld ist nur zur späteren Nutzung reserviert.
+
+---
+
+## Attendee-Semantik (`/api/calendar/events`)
+
+Hauptkonsument: Cowork-Skill `meeting-protokoll` (Teil 1: Termin-Zuordnung
+zum Transkript). Diese Sektion erklärt, wie der Pro-Person-Status der
+Attendees zu interpretieren ist — Halluzinationen entstehen, wenn die
+Felder als „Anwesenheits-Wahrheit" missverstanden werden.
+
+### Response-Form
+
+```json
+{
+  "id": "...",
+  "title": "BL-Besprechung HRN",
+  "start": "2026-05-21T09:00:00.0000000",
+  "end": "2026-05-21T10:00:00.0000000",
+  "location": "...",
+  "attendees": [
+    {"name": "Thomas Winzer", "email": "thomas.winzer@…", "response": "accepted",  "type": "required"},
+    {"name": "Sven Herbert",  "email": "sven@…",          "response": "organizer", "type": "required"},
+    {"name": "Frank Herbert", "email": "frank@…",         "response": "declined",  "type": "required"}
+  ],
+  "attendee_names": ["Thomas Winzer", "Sven Herbert", "Frank Herbert"],
+  "preview": "…",
+  "is_all_day": false
+}
+```
+
+### Felder
+
+- `response` ∈ `accepted` | `declined` | `tentative` | `notResponded` |
+  `none` | `organizer` — MS-Graph-Werte 1:1 durchgereicht; `organizer`
+  ist ergänzt für den Termin-Organisator.
+- `type` ∈ `required` | `optional` | `resource` — MS-Graph-Werte
+  (`attendeeType`).
+- `email` ist neu und hilft bei Namens-Kollisionen.
+- `attendee_names` ist eine flache String-Liste (Backwards-Compat für
+  ältere Konsumenten). Neue Konsumenten sollen `attendees[].name`
+  verwenden.
+
+### Bedeutung (für Skills, Protokoll-Generierung etc.)
+
+Outlook-Attendees sind **eingeladene** Personen — NICHT zwangsläufig
+**anwesende**:
+
+| `response`     | Bedeutung                                                              |
+|----------------|------------------------------------------------------------------------|
+| `accepted`     | hat zugesagt — KEIN Beweis der Anwesenheit                             |
+| `declined`     | hat abgesagt — sicher **NICHT** anwesend → aus Teilnehmer-Liste ausschließen |
+| `tentative`    | „vorläufig" zugesagt — Anwesenheit ungewiss                            |
+| `notResponded` | hat noch nicht reagiert                                                |
+| `none`         | kein Status verfügbar                                                  |
+| `organizer`    | Termin-Organisator                                                     |
+
+**Wichtig:** Für vergangene Termine liefert MS Graph `responseStatus`
+häufig `none` oder leer. Das ist **kein Bug**, sondern Graph-Verhalten.
+In diesem Fall ist der **Transkript-Sprecher** die Primärquelle für die
+tatsächliche Anwesenheit; die Outlook-Einladung dient nur als
+Hintergrund-Information.
+
+### Empfehlung für Konsumenten
+
+1. Default-Teilnehmer-Liste = `attendees` ohne Einträge mit
+   `response == "declined"`.
+2. Wenn das Transkript einen Sprecher nennt, der nicht in
+   `attendees` ist, gilt das Transkript — **nicht** die Einladung
+   ergänzen. Niemals eingeladene Personen als anwesend behandeln,
+   wenn sie im Transkript nicht vorkommen.
+3. `attendee_names` nur zur reinen Anzeige verwenden — alle
+   semantischen Entscheidungen über die strukturierte `attendees`-Liste
+   treffen.
+
+### Hintergrund
+
+Die Pro-Person-Struktur wurde mit
+[HBE-274](/HBE/issues/HBE-274) eingeführt, nachdem Outlook-Einladungen
+zu Halluzinationen in BL-HRN-Protokollen geführt hatten (eingeladene,
+aber nicht anwesende Personen wurden als Sprecher protokolliert). Siehe
+auch Parent-Issue [HBE-273](/HBE/issues/HBE-273).

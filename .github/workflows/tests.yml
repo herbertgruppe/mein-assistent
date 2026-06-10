@@ -1,0 +1,32 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+  workflow_dispatch: {}
+
+concurrency:
+  group: mein-assistent-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: pip install pytest requests
+
+      - name: Run regression tests (HBE-273 / HBE-277 — Dragan-Halluzinations-Klasse)
+        run: python -m pytest tests/regression -v
+
+      - name: Run security smoke-tests (HBE-610 — mail-move validators)
+        run: python -m pytest tests/test_mail_move_validators.py -v
