@@ -20,6 +20,9 @@ Env-Vars:
   PAPERCLIP_COMPANY_ID_MA   HBE Company-ID
   TELEGRAM_BOT_TOKEN        Telegram-Bot-Token fuer Fehler-Alerts
   TELEGRAM_ADMIN_CHAT_ID    Chat-ID (Sven) fuer IMAP-Fehler-Alerts
+  LENA_SVEN_SENDERS         Komma-separierte Liste erlaubter Absender-Adressen (Lowercase).
+                            Nur E-Mails von diesen Adressen erzeugen Paperclip-Issues.
+                            Standard: "s.herbert@herbert.de,s.herbert@herbertgruppe.com"
 """
 from __future__ import annotations
 
@@ -67,7 +70,12 @@ MAX_BACKOFF_SEC  = 300
 MAX_BODY_CHARS   = 4000
 ALERT_THRESHOLD  = 3  # consecutive errors before Telegram alert
 
-SVEN_SENDERS         = frozenset({"sven.herbert@herbert.de", "s.herbert@herbertgruppe.com"})
+_SVEN_SENDERS_DEFAULT = "s.herbert@herbert.de,s.herbert@herbertgruppe.com"
+SVEN_SENDERS         = frozenset(
+    a.strip().lower()
+    for a in os.getenv("LENA_SVEN_SENDERS", _SVEN_SENDERS_DEFAULT).split(",")
+    if a.strip()
+)
 TRANSCRIPT_KEYWORDS  = frozenset({"transkript", "plaud"})
 TRANSCRIPT_EXTS      = frozenset({".txt", ".docx"})
 RE_NOREPLY           = re.compile(r'\bno[-_]?reply\b', re.IGNORECASE)
@@ -314,6 +322,17 @@ def _poll_mailbox(
             date_str    = msg.get("Date", "")
             body        = _extract_body(msg)
             from_addr   = _bare_addr(from_header)
+
+            if from_addr not in SVEN_SENDERS:
+                logger.debug(
+                    json.dumps({
+                        "event":      "skipped_sender",
+                        "from_addr":  from_addr,
+                        "message_id": message_id,
+                    })
+                )
+                _mark_processed(db, message_id, imap_user)
+                continue
 
             payload  = _build_payload(
                 from_header, from_addr, subject, date_str,
