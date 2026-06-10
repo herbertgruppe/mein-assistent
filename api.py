@@ -136,9 +136,12 @@ def get_authenticated_user(
     """
     if x_authentik_username:
         return x_authentik_username
-    if x_forwarded_email:
+    if x_forwarded_email and not x_authentik_username:
+        # Only trust X-Forwarded-Email when x_authentik_username was not provided
+        # (prevents spoofing when both headers arrive). Still requires nginx to strip
+        # this header from untrusted origins — bind app to 127.0.0.1 only.
         return x_forwarded_email
-    if api_key and _API_SECRET_KEY and api_key == _API_SECRET_KEY:
+    if api_key and _API_SECRET_KEY and hmac.compare_digest(api_key, _API_SECRET_KEY):
         return "api-client"
     if token:
         protocol = _protocols_db.get_by_token(token)
@@ -1620,12 +1623,12 @@ def _get_protocol_for_token(
     if not protocol:
         raise HTTPException(status_code=404, detail="Protokoll nicht gefunden")
 
-    if allow_api_key and _API_SECRET_KEY and allow_api_key == _API_SECRET_KEY:
+    if allow_api_key and _API_SECRET_KEY and hmac.compare_digest(allow_api_key, _API_SECRET_KEY):
         return protocol
 
     if not token:
         raise HTTPException(status_code=401, detail="Token fehlt (?token=...)")
-    if token != protocol["reviewer_token"]:
+    if not hmac.compare_digest(token, protocol["reviewer_token"]):
         raise HTTPException(status_code=403, detail="Ungültiger Token")
     if ProtocolsDB.is_expired(protocol):
         raise HTTPException(status_code=410, detail="Token abgelaufen")
