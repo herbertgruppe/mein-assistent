@@ -323,7 +323,7 @@ class DraganHallucinationRegressionTests(unittest.TestCase):
     def test_calendar_attendees_carry_responseStatus_HBE_274(self):
         """HBE-274: Pro-Attendee-responseStatus muss durchgereicht werden."""
         with mock.patch.object(_api, "_get_outlook_tool", return_value=self.stub):
-            resp = _api.get_calendar_events(date="2026-05-21", _key="ignored")
+            resp = _api.get_calendar_events(date="2026-05-21")
 
         self.assertEqual(resp.count, 1, "Genau ein Event erwartet")
         event = resp.events[0]
@@ -372,7 +372,7 @@ class DraganHallucinationRegressionTests(unittest.TestCase):
     def test_frontmatter_teilnehmer_excludes_Dragan(self):
         """DoD #3: teilnehmer enthält weder „Dragan" noch „Mihaljevic"."""
         with mock.patch.object(_api, "_get_outlook_tool", return_value=self.stub):
-            resp = _api.get_calendar_events(date="2026-05-21", _key="ignored")
+            resp = _api.get_calendar_events(date="2026-05-21")
         event = resp.events[0]
 
         teilnehmer = _skill_build_teilnehmer_frontmatter(event)
@@ -389,7 +389,7 @@ class DraganHallucinationRegressionTests(unittest.TestCase):
     def test_frontmatter_teilnehmer_contains_required_HRN_leiter(self):
         """DoD #5: Sven + Thomas Winzer müssen in der teilnehmer-Liste sein."""
         with mock.patch.object(_api, "_get_outlook_tool", return_value=self.stub):
-            resp = _api.get_calendar_events(date="2026-05-21", _key="ignored")
+            resp = _api.get_calendar_events(date="2026-05-21")
         event = resp.events[0]
 
         teilnehmer = _skill_build_teilnehmer_frontmatter(event)
@@ -434,7 +434,7 @@ class DraganHallucinationRegressionTests(unittest.TestCase):
         """Beweis dass der Test die Klasse fängt: ohne responseStatus
         landen alle Eingeladenen — inklusive Dragan — in der teilnehmer-Liste."""
         with mock.patch.object(_api, "_get_outlook_tool", return_value=self.stub):
-            resp = _api.get_calendar_events(date="2026-05-21", _key="ignored")
+            resp = _api.get_calendar_events(date="2026-05-21")
         event = resp.events[0]
 
         # Skill-Bug-Simulation: response ignorieren (alter Code-Pfad)
