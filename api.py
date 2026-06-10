@@ -85,6 +85,21 @@ app = FastAPI(
 _API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=True)
 _API_SECRET_KEY = os.getenv("API_SECRET_KEY", "").strip()
 
+# Trusted reverse-proxy IPs whose X-Authentik-* / X-Forwarded-* headers we honour.
+# Comma-separated list in TRUSTED_PROXY_IPS env var; defaults to loopback only.
+# HBE-720: never trust forwarded identity headers from unknown sources.
+_TRUSTED_PROXY_IPS: frozenset = frozenset(
+    ip.strip()
+    for ip in os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1,::1").split(",")
+    if ip.strip()
+)
+
+
+def _is_from_trusted_proxy(request: Request) -> bool:
+    """Return True only when the direct TCP peer is in _TRUSTED_PROXY_IPS."""
+    host = request.client.host if request.client else None
+    return host in _TRUSTED_PROXY_IPS
+
 
 def verify_api_key(key: str = Security(_API_KEY_HEADER)) -> str:
     if not _API_SECRET_KEY:
@@ -92,7 +107,7 @@ def verify_api_key(key: str = Security(_API_KEY_HEADER)) -> str:
             status_code=500,
             detail="API_SECRET_KEY nicht konfiguriert (in .env setzen)",
         )
-    if key != _API_SECRET_KEY:
+    if not hmac.compare_digest(key, _API_SECRET_KEY):
         raise HTTPException(status_code=403, detail="Ungültiger API Key")
     return key
 
@@ -120,6 +135,7 @@ _protocols_db = ProtocolsDB(db_path=str(_BASE_DIR / "data" / "protocols.db"))
 
 
 def get_authenticated_user(
+    request: Request,
     x_authentik_username: Optional[str] = Header(None),
     x_forwarded_email: Optional[str] = Header(None),
     api_key: Optional[str] = Header(None, alias="X-API-Key"),
@@ -130,17 +146,16 @@ def get_authenticated_user(
 
     Akzeptiert (in dieser Reihenfolge):
       1. Authentik-Session — nginx injiziert X-Authentik-Username / X-Forwarded-Email
-      2. X-API-Key (für Skill-/Skript-Zugriffe)
+         HBE-720: nur wenn der direkte TCP-Peer in TRUSTED_PROXY_IPS liegt (fail-closed).
+      2. X-API-Key (für Skill-/Skript-Zugriffe) — timing-safe via hmac.compare_digest.
       3. Gültiger, nicht abgelaufener Reviewer-Token als ?token= Query-Param
          (review.js sendet den Token bei allen Dropdown-Calls mit)
     """
-    if x_authentik_username:
-        return x_authentik_username
-    if x_forwarded_email and not x_authentik_username:
-        # Only trust X-Forwarded-Email when x_authentik_username was not provided
-        # (prevents spoofing when both headers arrive). Still requires nginx to strip
-        # this header from untrusted origins — bind app to 127.0.0.1 only.
-        return x_forwarded_email
+    if _is_from_trusted_proxy(request):
+        if x_authentik_username:
+            return x_authentik_username
+        if x_forwarded_email:
+            return x_forwarded_email
     if api_key and _API_SECRET_KEY and hmac.compare_digest(api_key, _API_SECRET_KEY):
         return "api-client"
     if token:
