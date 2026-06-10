@@ -81,6 +81,9 @@ def _load_api_module():
 
         post = get
         on_event = get
+        patch = get
+        put = get
+        delete = get
 
         def mount(self, *a, **kw):
             pass
