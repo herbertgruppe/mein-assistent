@@ -32,11 +32,12 @@ import logging
 import os
 import re
 import sqlite3
+import subprocess
 import tempfile
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Literal, Optional, Tuple
 
 import requests as _http
 from dotenv import load_dotenv
@@ -2474,3 +2475,209 @@ def telegram_lena_send(
     if not _tg_send_message(req.chat_id, req.text):
         raise HTTPException(status_code=502, detail="Telegram sendMessage fehlgeschlagen.")
     return SimpleResult(success=True, message=f"Nachricht an Chat {req.chat_id} gesendet.")
+
+
+# ---------------------------------------------------------------------------
+# Vault-Sync-API (HBE-757) — Lena liest + schreibt Svens Obsidian-Vault
+# ---------------------------------------------------------------------------
+
+_VAULT_MIRROR_PATH = Path(os.getenv("VAULT_MIRROR_PATH", "/opt/vault-mirror")).resolve()
+_VAULT_BOT_TOKEN   = os.getenv("GITHUB_BOT_TOKEN", "").strip()
+_VAULT_AUDIT_LOG   = Path(os.getenv("VAULT_AUDIT_LOG", "/app/data/vault-lena.log"))
+
+# Pfad-Whitelist: prefix → Zugriffsart ('full' | 'append_only')
+_VAULT_WRITE_WHITELIST: dict = {
+    "05 Daily Notes/":         "full",
+    "09 Lena Inbox/":          "full",
+    "01 Inbox/":               "full",
+    "04 Ressourcen/Personen/": "append_only",
+}
+
+
+def _vault_resolve(path: str) -> Path:
+    """Normalisiert und validiert den Vault-Pfad gegen path-traversal."""
+    path = path.replace("\\", "/").lstrip("/")
+    resolved = (_VAULT_MIRROR_PATH / path).resolve()
+    if not str(resolved).startswith(str(_VAULT_MIRROR_PATH) + "/") and resolved != _VAULT_MIRROR_PATH:
+        raise HTTPException(status_code=400, detail="Ungültiger Pfad: path traversal erkannt.")
+    return resolved
+
+
+def _vault_check_write_access(path: str) -> str:
+    """Gibt den Schreibmodus zurück oder wirft 403."""
+    path = path.replace("\\", "/").lstrip("/")
+    for prefix, mode in _VAULT_WRITE_WHITELIST.items():
+        if path.startswith(prefix):
+            return mode
+    allowed = list(_VAULT_WRITE_WHITELIST.keys())
+    raise HTTPException(
+        status_code=403,
+        detail=f"Schreibzugriff auf '{path}' nicht erlaubt. Erlaubte Pfade: {allowed}",
+    )
+
+
+def _vault_run_git(args: list, extra_env: Optional[dict] = None) -> subprocess.CompletedProcess:
+    env = {**os.environ}
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        ["git"] + args,
+        cwd=str(_VAULT_MIRROR_PATH),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+
+def _vault_push_to_origin() -> str:
+    """Pusht nach GitHub; gibt leeren String bei Erfolg zurück, sonst Fehlermeldung."""
+    if not _VAULT_BOT_TOKEN:
+        return "GITHUB_BOT_TOKEN nicht konfiguriert — Push übersprungen."
+    push_url = f"https://x-access-token:{_VAULT_BOT_TOKEN}@github.com/herbertgruppe/vault-memory.git"
+    result = _vault_run_git(["push", push_url, "master"])
+    if result.returncode != 0:
+        return f"Push fehlgeschlagen: {result.stderr[:300]}"
+    return ""
+
+
+def _vault_audit(path: str, mode: str, commit_sha: str, status: str) -> None:
+    try:
+        _VAULT_AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        ts = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        with _VAULT_AUDIT_LOG.open("a", encoding="utf-8") as f:
+            f.write(f"{ts}\t{status}\t{mode}\t{commit_sha or '-'}\t{path}\n")
+    except Exception:
+        pass
+
+
+class VaultWriteRequest(BaseModel):
+    path: str = Field(..., description="Relativer Pfad im Vault, z.B. '05 Daily Notes/2026-06-12.md'")
+    content: str = Field(..., description="Dateiinhalt (Markdown)")
+    mode: Literal["create", "append", "overwrite"] = Field(..., description="create | append | overwrite")
+    commit_message: str = Field(..., description="Git-Commit-Message")
+
+    @field_validator("path")
+    @classmethod
+    def _no_traversal(cls, v: str) -> str:
+        if ".." in v:
+            raise ValueError("Pfad darf '..' nicht enthalten.")
+        return v.strip()
+
+    @field_validator("commit_message")
+    @classmethod
+    def _prefix_lena(cls, v: str) -> str:
+        v = v.strip()
+        return v if v.startswith("[Lena]") else f"[Lena] {v}"
+
+
+class VaultWriteResponse(BaseModel):
+    status: str
+    commit_sha: str
+    path: str
+
+
+class VaultReadResponse(BaseModel):
+    path: str
+    content: str
+    exists: bool
+
+
+@app.get("/api/lena/vault/read", response_model=VaultReadResponse)
+def lena_vault_read(
+    path: str = Query(..., description="Relativer Pfad im Vault"),
+    _key: str = Security(verify_api_key),
+) -> VaultReadResponse:
+    """Liest eine Datei aus dem Vault-Mirror (kein Schreibzugriff nötig)."""
+    if not _VAULT_MIRROR_PATH.exists():
+        raise HTTPException(
+            status_code=503,
+            detail=f"Vault-Mirror nicht gefunden ({_VAULT_MIRROR_PATH}). Phase 1 (Hetzner-Setup) abschließen.",
+        )
+    target = _vault_resolve(path)
+    if not target.exists():
+        return VaultReadResponse(path=path, content="", exists=False)
+    return VaultReadResponse(path=path, content=target.read_text(encoding="utf-8"), exists=True)
+
+
+@app.post("/api/lena/vault/write", response_model=VaultWriteResponse)
+def lena_vault_write(
+    req: VaultWriteRequest,
+    _key: str = Security(verify_api_key),
+) -> VaultWriteResponse:
+    """
+    Schreibt eine Datei in den Vault-Mirror, commitet und pusht via Git.
+
+    Pfad-Whitelist:
+      05 Daily Notes/         — voll
+      09 Lena Inbox/          — voll
+      01 Inbox/               — voll
+      04 Ressourcen/Personen/ — append-only (kein overwrite)
+    """
+    if not _VAULT_MIRROR_PATH.exists():
+        raise HTTPException(
+            status_code=503,
+            detail=f"Vault-Mirror nicht gefunden ({_VAULT_MIRROR_PATH}). Phase 1 (Hetzner-Setup) abschließen.",
+        )
+
+    access_mode = _vault_check_write_access(req.path)
+
+    if access_mode == "append_only" and req.mode == "overwrite":
+        _vault_audit(req.path, req.mode, "", "REJECTED_OVERWRITE_APPEND_ONLY")
+        raise HTTPException(
+            status_code=403,
+            detail="'overwrite' ist auf append-only Pfaden nicht erlaubt. Nutze mode='append' oder 'create'.",
+        )
+
+    target = _vault_resolve(req.path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if req.mode == "create":
+        if target.exists():
+            raise HTTPException(
+                status_code=409,
+                detail=f"Datei existiert bereits: '{req.path}'. Nutze mode='overwrite' oder 'append'.",
+            )
+        target.write_text(req.content, encoding="utf-8")
+    elif req.mode == "append":
+        if target.exists():
+            existing = target.read_text(encoding="utf-8")
+            sep = "\n" if existing and not existing.endswith("\n") else ""
+            target.write_text(existing + sep + req.content, encoding="utf-8")
+        else:
+            target.write_text(req.content, encoding="utf-8")
+    else:  # overwrite
+        target.write_text(req.content, encoding="utf-8")
+
+    lena_env = {
+        "GIT_AUTHOR_NAME": "Lena (HBE)",
+        "GIT_AUTHOR_EMAIL": "lena@herbertgruppe.com",
+        "GIT_COMMITTER_NAME": "Lena (HBE)",
+        "GIT_COMMITTER_EMAIL": "lena@herbertgruppe.com",
+    }
+
+    add_result = _vault_run_git(["add", str(target)])
+    if add_result.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"git add fehlgeschlagen: {add_result.stderr[:200]}")
+
+    commit_result = _vault_run_git(
+        ["commit", "--author=Lena (HBE) <lena@herbertgruppe.com>", "-m", req.commit_message],
+        extra_env=lena_env,
+    )
+    if commit_result.returncode != 0:
+        _vault_audit(req.path, req.mode, "", "COMMIT_FAILED")
+        raise HTTPException(status_code=500, detail=f"git commit fehlgeschlagen: {commit_result.stderr[:300]}")
+
+    sha_result = _vault_run_git(["rev-parse", "--short", "HEAD"])
+    commit_sha = sha_result.stdout.strip() if sha_result.returncode == 0 else "unknown"
+
+    push_error = _vault_push_to_origin()
+    if push_error:
+        _vault_audit(req.path, req.mode, commit_sha, f"PUSH_FAILED")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Commit OK (SHA {commit_sha}), aber Push fehlgeschlagen: {push_error}",
+        )
+
+    _vault_audit(req.path, req.mode, commit_sha, "OK")
+    return VaultWriteResponse(status="ok", commit_sha=commit_sha, path=req.path)

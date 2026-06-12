@@ -37,6 +37,9 @@ services:
       - auth:/app/auth
       - users_data:/app/users
       - users_config:/app/config
+      # Vault-Mirror: Sven's Obsidian-Vault (HBE-757)
+      # Wird auf dem Host unter /opt/vault-mirror/ geclont (setup-vault-mirror.sh)
+      - /opt/vault-mirror:/opt/vault-mirror
     depends_on:
       - assistent
     healthcheck:
