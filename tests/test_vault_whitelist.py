@@ -281,5 +281,89 @@ class TestVaultWriteEndpointHTTP(unittest.TestCase):
             shutil.rmtree(str(vault_dir), ignore_errors=True)
 
 
+class TestVaultPullScheduler(unittest.TestCase):
+    """Tests for _vault_pull_from_origin race-condition fix (HBE-766).
+
+    Verifies that the pull scheduler uses merge --ff-only instead of reset --hard,
+    so local commits are preserved when a push has failed.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.api = _load_api_module()
+
+    def _make_proc(self, returncode=0, stdout="", stderr=""):
+        p = mock.MagicMock()
+        p.returncode = returncode
+        p.stdout = stdout
+        p.stderr = stderr
+        return p
+
+    def test_uses_merge_ff_only_not_reset_hard(self):
+        """After a successful fetch, merge --ff-only must be called (not reset --hard)."""
+        git_calls = []
+
+        def fake_git(args, extra_env=None):
+            git_calls.append(args)
+            return self._make_proc(returncode=0)
+
+        with mock.patch.object(self.api, "_vault_run_git", side_effect=fake_git):
+            with mock.patch.object(self.api, "_VAULT_BOT_TOKEN", "fake-token"):
+                with mock.patch.object(self.api, "_vault_auth_env", return_value={}):
+                    # Ensure .git dir appears to exist
+                    with mock.patch("pathlib.Path.exists", return_value=True):
+                        self.api._vault_pull_from_origin()
+
+        merge_calls = [c for c in git_calls if "merge" in c]
+        reset_calls = [c for c in git_calls if "reset" in c]
+
+        self.assertEqual(len(reset_calls), 0, "reset --hard must not be called")
+        self.assertTrue(
+            any("--ff-only" in c and "FETCH_HEAD" in c for c in merge_calls),
+            f"merge --ff-only FETCH_HEAD must be called; got: {git_calls}",
+        )
+
+    def test_push_failure_then_pull_preserves_local_commits(self):
+        """When merge --ff-only fails (local commits present), function must not raise
+        and must not call reset --hard — the local commit is preserved."""
+        git_calls = []
+
+        def fake_git(args, extra_env=None):
+            git_calls.append(list(args))
+            if args[0] == "fetch":
+                return self._make_proc(returncode=0)
+            if args[0] == "merge":
+                # Simulate: local commit exists, ff-only not possible
+                return self._make_proc(returncode=1, stderr="fatal: Not possible to fast-forward")
+            return self._make_proc(returncode=0)
+
+        with mock.patch.object(self.api, "_vault_run_git", side_effect=fake_git):
+            with mock.patch.object(self.api, "_VAULT_BOT_TOKEN", "fake-token"):
+                with mock.patch.object(self.api, "_vault_auth_env", return_value={}):
+                    with mock.patch("pathlib.Path.exists", return_value=True):
+                        # Must not raise
+                        self.api._vault_pull_from_origin()
+
+        reset_calls = [c for c in git_calls if "reset" in c]
+        self.assertEqual(reset_calls, [], "reset --hard must never be called")
+
+    def test_fetch_failure_skips_merge(self):
+        """When fetch fails, merge must not be attempted."""
+        git_calls = []
+
+        def fake_git(args, extra_env=None):
+            git_calls.append(list(args))
+            return self._make_proc(returncode=1, stderr="network error")
+
+        with mock.patch.object(self.api, "_vault_run_git", side_effect=fake_git):
+            with mock.patch.object(self.api, "_VAULT_BOT_TOKEN", "fake-token"):
+                with mock.patch.object(self.api, "_vault_auth_env", return_value={}):
+                    with mock.patch("pathlib.Path.exists", return_value=True):
+                        self.api._vault_pull_from_origin()
+
+        merge_calls = [c for c in git_calls if "merge" in c]
+        self.assertEqual(merge_calls, [], "merge must not be called when fetch fails")
+
+
 if __name__ == "__main__":
     unittest.main()

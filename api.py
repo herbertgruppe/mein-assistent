@@ -2624,7 +2624,9 @@ def _vault_pull_from_origin() -> None:
         auth = _vault_auth_env()
         fetch = _vault_run_git(["fetch", _VAULT_GITHUB_REPO, "master", "--quiet"], extra_env=auth)
         if fetch.returncode == 0:
-            _vault_run_git(["reset", "--hard", "FETCH_HEAD", "--quiet"])
+            merge = _vault_run_git(["merge", "--ff-only", "FETCH_HEAD"])
+            if merge.returncode != 0:
+                logger.warning(f"[vault] ff-only merge fehlgeschlagen (lokale Commits vorhanden?): {merge.stderr[:200]}")
     except Exception as exc:
         logger.warning(f"[vault] pull fehlgeschlagen: {exc}")
 
