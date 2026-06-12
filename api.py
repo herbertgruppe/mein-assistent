@@ -376,10 +376,31 @@ def _start_tg_scheduler() -> None:
         logger.info("[telegram] reply-poll scheduler started (60 s interval)")
 
 
+@app.on_event("startup")  # type: ignore[attr-defined]
+def _start_vault_sync() -> None:
+    """Initialisiert den Vault-Mirror und startet den 2-Min-Pull-Job."""
+    import threading
+    # Clone in background thread so API starts without blocking
+    threading.Thread(target=_vault_init_mirror, daemon=True, name="vault-init").start()
+
+    if _VAULT_BOT_TOKEN:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        vault_sched = BackgroundScheduler(daemon=True)
+        vault_sched.add_job(_vault_pull_from_origin, "interval", seconds=120, id="vault_pull")
+        vault_sched.start()
+        logger.info("[vault] pull-scheduler gestartet (120 s interval)")
+
+
 @app.on_event("shutdown")  # type: ignore[attr-defined]
 def _stop_tg_scheduler() -> None:
     if _tg_scheduler and _tg_scheduler.running:
         _tg_scheduler.shutdown(wait=False)
+
+
+@app.on_event("shutdown")  # type: ignore[attr-defined]
+def _vault_cleanup_askpass() -> None:
+    import shutil
+    shutil.rmtree(_VAULT_ASKPASS_DIR, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2484,6 +2505,7 @@ def telegram_lena_send(
 _VAULT_MIRROR_PATH = Path(os.getenv("VAULT_MIRROR_PATH", "/opt/vault-mirror")).resolve()
 _VAULT_BOT_TOKEN   = os.getenv("GITHUB_BOT_TOKEN", "").strip()
 _VAULT_AUDIT_LOG   = Path(os.getenv("VAULT_AUDIT_LOG", "/app/data/vault-lena.log"))
+_VAULT_GITHUB_REPO = "https://github.com/herbertgruppe/vault-memory.git"
 
 # Pfad-Whitelist: prefix → Zugriffsart ('full' | 'append_only')
 _VAULT_WRITE_WHITELIST: dict = {
@@ -2492,6 +2514,29 @@ _VAULT_WRITE_WHITELIST: dict = {
     "01 Inbox/":               "full",
     "04 Ressourcen/Personen/": "append_only",
 }
+
+# GIT_ASKPASS helper — token is passed via GIT_PUSH_TOKEN env var, never embedded in URL
+import stat as _stat
+_VAULT_ASKPASS_DIR  = Path(tempfile.mkdtemp(prefix="vault-askpass-"))
+_VAULT_ASKPASS_PATH = _VAULT_ASKPASS_DIR / "askpass.sh"
+_VAULT_ASKPASS_PATH.write_text(
+    "#!/bin/sh\n"
+    "case \"$1\" in\n"
+    "  *sername*) printf 'x-access-token' ;;\n"
+    "  *assword*) printf '%s' \"$GIT_PUSH_TOKEN\" ;;\n"
+    "esac\n",
+    encoding="ascii",
+)
+_VAULT_ASKPASS_PATH.chmod(_stat.S_IRWXU)
+
+
+def _vault_auth_env() -> dict:
+    """Liefert env-Variablen für git-Operationen die den Token benötigen."""
+    return {
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": str(_VAULT_ASKPASS_PATH),
+        "GIT_PUSH_TOKEN": _VAULT_BOT_TOKEN,
+    }
 
 
 def _vault_resolve(path: str) -> Path:
@@ -2531,14 +2576,57 @@ def _vault_run_git(args: list, extra_env: Optional[dict] = None) -> subprocess.C
 
 
 def _vault_push_to_origin() -> str:
-    """Pusht nach GitHub; gibt leeren String bei Erfolg zurück, sonst Fehlermeldung."""
+    """Pusht nach GitHub via GIT_ASKPASS (token nie in URL oder Prozessliste)."""
     if not _VAULT_BOT_TOKEN:
         return "GITHUB_BOT_TOKEN nicht konfiguriert — Push übersprungen."
-    push_url = f"https://x-access-token:{_VAULT_BOT_TOKEN}@github.com/herbertgruppe/vault-memory.git"
-    result = _vault_run_git(["push", push_url, "master"])
+    result = _vault_run_git(
+        ["push", _VAULT_GITHUB_REPO, "master"],
+        extra_env=_vault_auth_env(),
+    )
     if result.returncode != 0:
         return f"Push fehlgeschlagen: {result.stderr[:300]}"
     return ""
+
+
+def _vault_init_mirror() -> None:
+    """Initialisiert den Vault-Mirror beim API-Start falls noch nicht geklont."""
+    if not _VAULT_BOT_TOKEN:
+        logger.info("[vault] GITHUB_BOT_TOKEN nicht gesetzt — Mirror-Init übersprungen.")
+        return
+    if (_VAULT_MIRROR_PATH / ".git").exists():
+        return
+    logger.info(f"[vault] Klone {_VAULT_GITHUB_REPO} nach {_VAULT_MIRROR_PATH} …")
+    _VAULT_MIRROR_PATH.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, **_vault_auth_env()}
+    result = subprocess.run(
+        ["git", "clone", _VAULT_GITHUB_REPO, str(_VAULT_MIRROR_PATH)],
+        capture_output=True, text=True, timeout=120, env=env,
+    )
+    if result.returncode != 0:
+        logger.error(f"[vault] Clone fehlgeschlagen: {result.stderr[:200]}")
+        return
+    subprocess.run(["git", "-C", str(_VAULT_MIRROR_PATH), "config", "user.name", "mein-assistent-bot"], check=False)
+    subprocess.run(["git", "-C", str(_VAULT_MIRROR_PATH), "config", "user.email", "bot@herbertgruppe.com"], check=False)
+    inbox = _VAULT_MIRROR_PATH / "09 Lena Inbox"
+    if not inbox.exists():
+        inbox.mkdir(parents=True, exist_ok=True)
+        (inbox / ".gitkeep").touch()
+    logger.info("[vault] Mirror initialisiert.")
+
+
+def _vault_pull_from_origin() -> None:
+    """Zieht Svens neue Commits (alle 2 Min via APScheduler)."""
+    if not (_VAULT_MIRROR_PATH / ".git").exists():
+        return
+    if not _VAULT_BOT_TOKEN:
+        return
+    try:
+        auth = _vault_auth_env()
+        fetch = _vault_run_git(["fetch", _VAULT_GITHUB_REPO, "master", "--quiet"], extra_env=auth)
+        if fetch.returncode == 0:
+            _vault_run_git(["reset", "--hard", "FETCH_HEAD", "--quiet"])
+    except Exception as exc:
+        logger.warning(f"[vault] pull fehlgeschlagen: {exc}")
 
 
 def _vault_audit(path: str, mode: str, commit_sha: str, status: str) -> None:
