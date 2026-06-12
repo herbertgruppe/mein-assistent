@@ -193,5 +193,93 @@ class TestVaultWriteEndpointLogic(unittest.TestCase):
         self.assertEqual(access_mode, "full")
 
 
+class TestVaultWriteEndpointHTTP(unittest.TestCase):
+    """Endpoint-level tests for POST /api/lena/vault/write.
+
+    Covers the three must-have cases from HBE-763:
+    1. Happy-path: whitelisted path → file written, git commit, 200 response
+    2. 403: path outside whitelist
+    3. 400: path traversal via _vault_resolve (second-layer defence after Pydantic validator)
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.api = _load_api_module()
+        import fastapi
+        cls.HTTPException = fastapi.HTTPException
+
+    def _make_req(self, path, mode="overwrite", content="# test", commit_message="[Lena] test"):
+        return self.api.VaultWriteRequest(
+            path=path,
+            content=content,
+            mode=mode,
+            commit_message=commit_message,
+        )
+
+    def test_happy_path_returns_ok_and_commits(self):
+        """Whitelisted path: file is written to mirror, git operations called, response ok."""
+        import tempfile
+        import shutil
+
+        vault_dir = Path(tempfile.mkdtemp())
+        try:
+            self.api._VAULT_MIRROR_PATH = vault_dir
+
+            mock_ok = mock.MagicMock()
+            mock_ok.returncode = 0
+            mock_ok.stderr = ""
+
+            mock_revparse = mock.MagicMock()
+            mock_revparse.returncode = 0
+            mock_revparse.stdout = "deadb33f\n"
+
+            def fake_git(args, extra_env=None):
+                if args[0] == "rev-parse":
+                    return mock_revparse
+                return mock_ok
+
+            with mock.patch.object(self.api, "_vault_run_git", side_effect=fake_git):
+                with mock.patch.object(self.api, "_vault_push_to_origin", return_value=""):
+                    req = self._make_req("05 Daily Notes/2026-06-12.md", content="# Note")
+                    result = self.api.lena_vault_write(req, _key="test-secret-for-import")
+
+            self.assertEqual(result.status, "ok")
+            self.assertEqual(result.commit_sha, "deadb33f")
+            self.assertEqual(result.path, "05 Daily Notes/2026-06-12.md")
+            written = (vault_dir / "05 Daily Notes" / "2026-06-12.md").read_text(encoding="utf-8")
+            self.assertEqual(written, "# Note")
+        finally:
+            shutil.rmtree(str(vault_dir), ignore_errors=True)
+
+    def test_forbidden_path_raises_403(self):
+        """Path outside the whitelist must raise HTTPException 403 before any git op."""
+        import tempfile
+        import shutil
+
+        vault_dir = Path(tempfile.mkdtemp())
+        try:
+            self.api._VAULT_MIRROR_PATH = vault_dir
+            req = self._make_req("02 Projekte/secret-plan.md")
+            with self.assertRaises(self.HTTPException) as ctx:
+                self.api.lena_vault_write(req, _key="test-secret-for-import")
+            self.assertEqual(ctx.exception.status_code, 403)
+        finally:
+            shutil.rmtree(str(vault_dir), ignore_errors=True)
+
+    def test_path_traversal_raises_400(self):
+        """'../'-traversal in path must be rejected with 400 by _vault_resolve."""
+        import tempfile
+        import shutil
+
+        vault_dir = Path(tempfile.mkdtemp())
+        try:
+            self.api._VAULT_MIRROR_PATH = vault_dir
+            with self.assertRaises(self.HTTPException) as ctx:
+                self.api._vault_resolve("../outside-vault/secrets.md")
+            self.assertEqual(ctx.exception.status_code, 400)
+        finally:
+            shutil.rmtree(str(vault_dir), ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()
