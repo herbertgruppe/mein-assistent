@@ -280,6 +280,122 @@ class TestVaultWriteEndpointHTTP(unittest.TestCase):
         finally:
             shutil.rmtree(str(vault_dir), ignore_errors=True)
 
+    def _fake_git_ok(self, revparse_sha="abc1234"):
+        """Return a side_effect function for _vault_run_git that always succeeds."""
+        mock_ok = mock.MagicMock()
+        mock_ok.returncode = 0
+        mock_ok.stderr = ""
+
+        mock_revparse = mock.MagicMock()
+        mock_revparse.returncode = 0
+        mock_revparse.stdout = f"{revparse_sha}\n"
+
+        def fake_git(args, extra_env=None):
+            if args[0] == "rev-parse":
+                return mock_revparse
+            return mock_ok
+
+        return fake_git
+
+    def test_create_mode_new_file(self):
+        """mode='create' on a non-existent whitelisted path writes file and commits."""
+        import tempfile, shutil
+
+        vault_dir = Path(tempfile.mkdtemp())
+        try:
+            self.api._VAULT_MIRROR_PATH = vault_dir
+            with mock.patch.object(self.api, "_vault_run_git", side_effect=self._fake_git_ok("cre1234")):
+                with mock.patch.object(self.api, "_vault_push_to_origin", return_value=""):
+                    req = self._make_req("05 Daily Notes/new-note.md", mode="create", content="# New")
+                    result = self.api.lena_vault_write(req, _key="test-secret-for-import")
+
+            self.assertEqual(result.status, "ok")
+            self.assertEqual(result.commit_sha, "cre1234")
+            written = (vault_dir / "05 Daily Notes" / "new-note.md").read_text(encoding="utf-8")
+            self.assertEqual(written, "# New")
+        finally:
+            shutil.rmtree(str(vault_dir), ignore_errors=True)
+
+    def test_create_mode_existing_file_raises_409(self):
+        """mode='create' on an already-existing file must raise HTTPException 409."""
+        import tempfile, shutil
+
+        vault_dir = Path(tempfile.mkdtemp())
+        try:
+            self.api._VAULT_MIRROR_PATH = vault_dir
+            target = vault_dir / "05 Daily Notes" / "existing.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("existing content", encoding="utf-8")
+
+            req = self._make_req("05 Daily Notes/existing.md", mode="create", content="# New")
+            with self.assertRaises(self.HTTPException) as ctx:
+                self.api.lena_vault_write(req, _key="test-secret-for-import")
+            self.assertEqual(ctx.exception.status_code, 409)
+        finally:
+            shutil.rmtree(str(vault_dir), ignore_errors=True)
+
+    def test_append_mode_existing_file(self):
+        """mode='append' on an existing file appends content with newline separator."""
+        import tempfile, shutil
+
+        vault_dir = Path(tempfile.mkdtemp())
+        try:
+            self.api._VAULT_MIRROR_PATH = vault_dir
+            target = vault_dir / "09 Lena Inbox" / "notes.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("# Existing", encoding="utf-8")
+
+            with mock.patch.object(self.api, "_vault_run_git", side_effect=self._fake_git_ok("app1234")):
+                with mock.patch.object(self.api, "_vault_push_to_origin", return_value=""):
+                    req = self._make_req("09 Lena Inbox/notes.md", mode="append", content="## Appended")
+                    result = self.api.lena_vault_write(req, _key="test-secret-for-import")
+
+            self.assertEqual(result.status, "ok")
+            written = target.read_text(encoding="utf-8")
+            self.assertIn("# Existing", written)
+            self.assertIn("## Appended", written)
+            self.assertTrue(written.startswith("# Existing\n"))
+        finally:
+            shutil.rmtree(str(vault_dir), ignore_errors=True)
+
+    def test_append_mode_new_file(self):
+        """mode='append' on a non-existent file creates it (same as create)."""
+        import tempfile, shutil
+
+        vault_dir = Path(tempfile.mkdtemp())
+        try:
+            self.api._VAULT_MIRROR_PATH = vault_dir
+            with mock.patch.object(self.api, "_vault_run_git", side_effect=self._fake_git_ok("app5678")):
+                with mock.patch.object(self.api, "_vault_push_to_origin", return_value=""):
+                    req = self._make_req("01 Inbox/new-item.md", mode="append", content="# New via append")
+                    result = self.api.lena_vault_write(req, _key="test-secret-for-import")
+
+            self.assertEqual(result.status, "ok")
+            written = (vault_dir / "01 Inbox" / "new-item.md").read_text(encoding="utf-8")
+            self.assertEqual(written, "# New via append")
+        finally:
+            shutil.rmtree(str(vault_dir), ignore_errors=True)
+
+    def test_append_only_path_allows_append_mode(self):
+        """append-only path (04 Ressourcen/Personen/) must accept mode='append'."""
+        import tempfile, shutil
+
+        vault_dir = Path(tempfile.mkdtemp())
+        try:
+            self.api._VAULT_MIRROR_PATH = vault_dir
+            with mock.patch.object(self.api, "_vault_run_git", side_effect=self._fake_git_ok("aop9999")):
+                with mock.patch.object(self.api, "_vault_push_to_origin", return_value=""):
+                    req = self._make_req(
+                        "04 Ressourcen/Personen/Max Mustermann.md",
+                        mode="append",
+                        content="- Notiz vom 2026-06-12",
+                    )
+                    result = self.api.lena_vault_write(req, _key="test-secret-for-import")
+
+            self.assertEqual(result.status, "ok")
+        finally:
+            shutil.rmtree(str(vault_dir), ignore_errors=True)
+
 
 class TestVaultPullScheduler(unittest.TestCase):
     """Tests for _vault_pull_from_origin race-condition fix (HBE-766).

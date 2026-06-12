@@ -6,7 +6,33 @@
 #
 # Einmalig ausführen als root auf dem Hetzner-VPS:
 #   bash /opt/mein-assistent/scripts/setup-vault-mirror.sh
+#
+# OPS-SIGNOFF ERFORDERLICH (HBE-767):
+#   Dieses Skript nimmt als root folgende Änderungen am Host vor:
+#     1. Klont /opt/vault-mirror (einmalig)
+#     2. Schreibt ~/.netrc mit GitHub-Token (chmod 600)
+#     3. Fügt Cron-Job für vault-pull-cron.sh hinzu (idempotent)
+#     4. Legt /etc/logrotate.d/vault-lena an, falls nicht vorhanden (idempotent)
+#   Signoff durch Sven Herbert (Operations Lead) vor Erstausführung erforderlich.
+#   Skript kann mit --yes übersprungen werden wenn Signoff bereits erteilt wurde.
 set -euo pipefail
+
+# Ops-Bestätigung — kann mit --yes übersprungen werden (z.B. nach Signoff)
+if [[ "${1:-}" != "--yes" ]]; then
+    echo "========================================================================"
+    echo "  OPS-SIGNOFF: Dieses Skript läuft als root und nimmt folgende"
+    echo "  Änderungen am Hetzner-VPS vor:"
+    echo "    • Klont /opt/vault-mirror"
+    echo "    • Schreibt ~/.netrc (chmod 600) mit GITHUB_BOT_TOKEN"
+    echo "    • Registriert Cron-Job: vault-pull-cron.sh (alle 2 min)"
+    echo "    • Legt /etc/logrotate.d/vault-lena an"
+    echo "========================================================================"
+    read -r -p "Ops-Signoff bestätigen? [ja/NEIN] " CONFIRM
+    if [[ "$CONFIRM" != "ja" ]]; then
+        echo "Abgebrochen. Bitte Sven Herbert als Ops Lead um Signoff bitten." >&2
+        exit 1
+    fi
+fi
 
 VAULT_DIR="/opt/vault-mirror"
 REPO_URL="https://github.com/herbertgruppe/vault-memory.git"
