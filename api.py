@@ -92,7 +92,7 @@ def verify_api_key(key: str = Security(_API_KEY_HEADER)) -> str:
             status_code=500,
             detail="API_SECRET_KEY nicht konfiguriert (in .env setzen)",
         )
-    if key != _API_SECRET_KEY:
+    if not hmac.compare_digest(key.encode(), _API_SECRET_KEY.encode()):
         raise HTTPException(status_code=403, detail="Ungültiger API Key")
     return key
 
@@ -118,8 +118,23 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 # protocols.db beim API-Start initialisieren (führt Migration automatisch aus)
 _protocols_db = ProtocolsDB(db_path=str(_BASE_DIR / "data" / "protocols.db"))
 
+# Trusted Proxies: nur von diesen IPs werden Authentik-Header (X-Authentik-Username,
+# X-Forwarded-Email) akzeptiert. nginx läuft auf 127.0.0.1 — daher Default.
+# Mehrere IPs kommasepariert: TRUSTED_PROXIES=127.0.0.1,10.0.0.1
+_TRUSTED_PROXIES: set = set(
+    ip.strip()
+    for ip in os.getenv("TRUSTED_PROXIES", "127.0.0.1").split(",")
+    if ip.strip()
+)
+if not _TRUSTED_PROXIES:
+    logger.warning(
+        "[security] TRUSTED_PROXIES ist leer — Authentik-Header werden nie akzeptiert. "
+        "Setze TRUSTED_PROXIES=127.0.0.1 in .env."
+    )
+
 
 def get_authenticated_user(
+    request: Request,
     x_authentik_username: Optional[str] = Header(None),
     x_forwarded_email: Optional[str] = Header(None),
     api_key: Optional[str] = Header(None, alias="X-API-Key"),
@@ -129,17 +144,20 @@ def get_authenticated_user(
     Dual-Auth für Browser-Endpoints (/review/, /api/asana/, /api/calendar/events).
 
     Akzeptiert (in dieser Reihenfolge):
-      1. Authentik-Session — nginx injiziert X-Authentik-Username / X-Forwarded-Email
-      2. X-API-Key (für Skill-/Skript-Zugriffe)
+      1. Authentik-Session — nginx injiziert X-Authentik-Username / X-Forwarded-Email.
+         Wird nur akzeptiert wenn die Anfrage von einer vertrauenswürdigen Proxy-IP
+         kommt (TRUSTED_PROXIES env, Default 127.0.0.1). Verhindert Header-Spoofing
+         bei direktem FastAPI-Zugriff.
+      2. X-API-Key (für Skill-/Skript-Zugriffe, timing-safe via hmac.compare_digest)
       3. Gültiger, nicht abgelaufener Reviewer-Token als ?token= Query-Param
          (review.js sendet den Token bei allen Dropdown-Calls mit)
     """
-    if x_authentik_username:
+    client_ip = request.client.host if request.client else ""
+    from_trusted_proxy = client_ip in _TRUSTED_PROXIES
+
+    if from_trusted_proxy and x_authentik_username:
         return x_authentik_username
-    if x_forwarded_email and not x_authentik_username:
-        # Only trust X-Forwarded-Email when x_authentik_username was not provided
-        # (prevents spoofing when both headers arrive). Still requires nginx to strip
-        # this header from untrusted origins — bind app to 127.0.0.1 only.
+    if from_trusted_proxy and x_forwarded_email:
         return x_forwarded_email
     if api_key and _API_SECRET_KEY and hmac.compare_digest(api_key, _API_SECRET_KEY):
         return "api-client"
