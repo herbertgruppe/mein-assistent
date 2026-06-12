@@ -31,6 +31,9 @@
 - **`HBE-766`**: replaced `git reset --hard` with `git merge --ff-only FETCH_HEAD` in the pull
   scheduler — prevents wiping local commits that have not yet been pushed (e.g. after a temporary
   network failure).
+- **`HBE-770`**: replaced `git reset --hard FETCH_HEAD` with `git merge --ff-only FETCH_HEAD` in
+  `scripts/vault-pull-cron.sh` — mirrors the same reversibility fix applied to `api.py` in
+  HBE-766; cron script now preserves any not-yet-pushed local commits instead of discarding them.
 - **Code-Reviewer findings** (`HBE-758` / commit `b1ccf38`): trusted-proxy header hardening,
   `hmac.compare_digest` for constant-time key comparison, removed debug endpoint.
 

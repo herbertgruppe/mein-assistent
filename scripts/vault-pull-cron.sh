@@ -12,10 +12,10 @@ if [[ ! -d "$VAULT_DIR/.git" ]]; then
     exit 0
 fi
 
-# Fetch + reset — übernimmt Svens neue Commits.
+# Fetch + merge (ff-only) — übernimmt Svens neue Commits ohne lokale Commits zu verwerfen.
 # ~/.netrc (root, chmod 600) liefert die Credentials für HTTPS.
 GIT_TERMINAL_PROMPT=0 git -C "$VAULT_DIR" fetch origin master --quiet 2>&1 \
     || { echo "[$TS] FEHLER: git fetch fehlgeschlagen"; exit 1; }
-git -C "$VAULT_DIR" reset --hard FETCH_HEAD --quiet
+git -C "$VAULT_DIR" merge --ff-only FETCH_HEAD --quiet
 
 echo "[$TS] OK: vault-mirror aktualisiert ($(git -C "$VAULT_DIR" rev-parse --short HEAD))"
