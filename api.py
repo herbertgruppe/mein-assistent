@@ -1481,7 +1481,15 @@ def _create_asana_protocol_task(protocol: dict) -> tuple:
     if not agent.is_connected():
         raise RuntimeError("Asana nicht konfiguriert (Token fehlt oder ungültig)")
 
-    markdown_text = protocol["current_markdown"]
+    # Strip Obsidian syntax (Wikilinks, Embeds) — Vault-Version bleibt unverändert
+    markdown_text = _strip_obsidian_syntax(protocol["current_markdown"])
+
+    # Asana-Notes-Limit ca. 65k Zeichen; bei Überschreitung kürzen mit Hinweis
+    _ASANA_NOTES_LIMIT = 65_000
+    if len(markdown_text) > _ASANA_NOTES_LIMIT:
+        truncation_note = "\n\n---\n[…] vollständiges Protokoll als PDF am Outlook-Termin"
+        markdown_text = markdown_text[: _ASANA_NOTES_LIMIT - len(truncation_note)] + truncation_note
+
     date_str = (protocol.get("meeting_datetime") or "")[:10]
     task_title = f"📄 Protokoll {date_str} - {protocol['meeting_name']}"
 
