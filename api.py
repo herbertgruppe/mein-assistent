@@ -2508,8 +2508,9 @@ _VAULT_AUDIT_LOG   = Path(os.getenv("VAULT_AUDIT_LOG", "/app/data/vault-lena.log
 _VAULT_GITHUB_REPO = "https://github.com/herbertgruppe/vault-memory.git"
 
 # Pfad-Whitelist: prefix → Zugriffsart ('full' | 'append_only')
+# append_only: create auf neue Files OK, append OK, overwrite immer → 403
 _VAULT_WRITE_WHITELIST: dict = {
-    "05 Daily Notes/":         "full",
+    "05 Daily Notes/":         "append_only",  # Sven-Bereich schützen: kein overwrite (HBE-757)
     "09 Lena Inbox/":          "full",
     "01 Inbox/":               "full",
     "04 Ressourcen/Personen/": "append_only",
@@ -2699,7 +2700,7 @@ def lena_vault_write(
     Schreibt eine Datei in den Vault-Mirror, commitet und pusht via Git.
 
     Pfad-Whitelist:
-      05 Daily Notes/         — voll
+      05 Daily Notes/         — append-only (kein overwrite; Sven-Bereich schützen)
       09 Lena Inbox/          — voll
       01 Inbox/               — voll
       04 Ressourcen/Personen/ — append-only (kein overwrite)

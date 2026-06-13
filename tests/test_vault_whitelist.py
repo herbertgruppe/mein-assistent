@@ -134,9 +134,10 @@ class TestVaultWriteAccess(unittest.TestCase):
     def _check(self, path: str) -> str:
         return self.api._vault_check_write_access(path)
 
-    def test_daily_notes_allowed(self):
+    def test_daily_notes_append_only(self):
+        # Daily Notes are append_only to protect Sven's sections (HBE-757 hardening)
         result = self._check("05 Daily Notes/2026-06-12.md")
-        self.assertEqual(result, "full")
+        self.assertEqual(result, "append_only")
 
     def test_lena_inbox_allowed(self):
         result = self._check("09 Lena Inbox/note.md")
@@ -187,10 +188,11 @@ class TestVaultWriteEndpointLogic(unittest.TestCase):
         self.assertEqual(access_mode, "append_only",
                          "append-only check must trigger for 04 Ressourcen/Personen/ paths")
 
-    def test_daily_notes_returns_full_allowing_overwrite(self):
-        """_vault_check_write_access must return 'full' for 05 Daily Notes/ paths."""
+    def test_daily_notes_blocks_overwrite_like_personen(self):
+        """Daily Notes use append_only to block overwrite — same as 04 Ressourcen/Personen/."""
         access_mode = self.api._vault_check_write_access("05 Daily Notes/2026-06-12.md")
-        self.assertEqual(access_mode, "full")
+        self.assertEqual(access_mode, "append_only",
+                         "05 Daily Notes/ must use append_only to protect Sven's sections")
 
 
 class TestVaultWriteEndpointHTTP(unittest.TestCase):
@@ -208,7 +210,7 @@ class TestVaultWriteEndpointHTTP(unittest.TestCase):
         import fastapi
         cls.HTTPException = fastapi.HTTPException
 
-    def _make_req(self, path, mode="overwrite", content="# test", commit_message="[Lena] test"):
+    def _make_req(self, path, mode="append", content="# test", commit_message="[Lena] test"):
         return self.api.VaultWriteRequest(
             path=path,
             content=content,
