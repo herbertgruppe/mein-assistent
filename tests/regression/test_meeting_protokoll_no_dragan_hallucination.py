@@ -80,6 +80,13 @@ def _load_api_module():
             return deco
 
         post = get
+        on_event = get
+        patch = get
+        put = get
+        delete = get
+
+        def mount(self, *a, **kw):
+            pass
 
     def _security(*a, **kw):
         return None
@@ -88,9 +95,21 @@ def _load_api_module():
         def __init__(self, *a, **kw):
             super().__init__(kw.get("detail") or (a[1] if len(a) > 1 else ""))
 
+    class _Request:
+        pass
+
+    class _BackgroundTasks:
+        def add_task(self, *a, **kw):
+            pass
+
     fastapi_mod.FastAPI = _App
     fastapi_mod.HTTPException = _HTTPException
     fastapi_mod.Security = _security
+    fastapi_mod.Request = _Request
+    fastapi_mod.BackgroundTasks = _BackgroundTasks
+    fastapi_mod.Depends = lambda *a, **kw: None
+    fastapi_mod.Header = lambda *a, **kw: None
+    fastapi_mod.Query = lambda *a, **kw: None
     stubs["fastapi"] = fastapi_mod
 
     sec_mod = types.ModuleType("fastapi.security")
@@ -102,6 +121,36 @@ def _load_api_module():
     sec_mod.APIKeyHeader = _APIKeyHeader
     stubs["fastapi.security"] = sec_mod
 
+    responses_mod = types.ModuleType("fastapi.responses")
+
+    class _HTMLResponse:
+        def __init__(self, *a, **kw):
+            pass
+
+    responses_mod.HTMLResponse = _HTMLResponse
+    stubs["fastapi.responses"] = responses_mod
+
+    staticfiles_mod = types.ModuleType("fastapi.staticfiles")
+
+    class _StaticFiles:
+        def __init__(self, *a, **kw):
+            pass
+
+    staticfiles_mod.StaticFiles = _StaticFiles
+    stubs["fastapi.staticfiles"] = staticfiles_mod
+
+    templating_mod = types.ModuleType("fastapi.templating")
+
+    class _Jinja2Templates:
+        def __init__(self, *a, **kw):
+            pass
+
+        def TemplateResponse(self, *a, **kw):
+            return None
+
+    templating_mod.Jinja2Templates = _Jinja2Templates
+    stubs["fastapi.templating"] = templating_mod
+
     pyd_mod = types.ModuleType("pydantic")
 
     class _BaseModel:
@@ -112,8 +161,14 @@ def _load_api_module():
     def _field(default=None, **kw):
         return default
 
+    def _field_validator(*args, **kwargs):
+        def decorator(fn):
+            return classmethod(fn)
+        return decorator
+
     pyd_mod.BaseModel = _BaseModel
     pyd_mod.Field = _field
+    pyd_mod.field_validator = _field_validator
     stubs["pydantic"] = pyd_mod
 
     saved = {name: sys.modules.get(name) for name in stubs}
@@ -268,7 +323,7 @@ class DraganHallucinationRegressionTests(unittest.TestCase):
     def test_calendar_attendees_carry_responseStatus_HBE_274(self):
         """HBE-274: Pro-Attendee-responseStatus muss durchgereicht werden."""
         with mock.patch.object(_api, "_get_outlook_tool", return_value=self.stub):
-            resp = _api.get_calendar_events(date="2026-05-21", _key="ignored")
+            resp = _api.get_calendar_events(date="2026-05-21")
 
         self.assertEqual(resp.count, 1, "Genau ein Event erwartet")
         event = resp.events[0]
@@ -317,7 +372,7 @@ class DraganHallucinationRegressionTests(unittest.TestCase):
     def test_frontmatter_teilnehmer_excludes_Dragan(self):
         """DoD #3: teilnehmer enthält weder „Dragan" noch „Mihaljevic"."""
         with mock.patch.object(_api, "_get_outlook_tool", return_value=self.stub):
-            resp = _api.get_calendar_events(date="2026-05-21", _key="ignored")
+            resp = _api.get_calendar_events(date="2026-05-21")
         event = resp.events[0]
 
         teilnehmer = _skill_build_teilnehmer_frontmatter(event)
@@ -334,7 +389,7 @@ class DraganHallucinationRegressionTests(unittest.TestCase):
     def test_frontmatter_teilnehmer_contains_required_HRN_leiter(self):
         """DoD #5: Sven + Thomas Winzer müssen in der teilnehmer-Liste sein."""
         with mock.patch.object(_api, "_get_outlook_tool", return_value=self.stub):
-            resp = _api.get_calendar_events(date="2026-05-21", _key="ignored")
+            resp = _api.get_calendar_events(date="2026-05-21")
         event = resp.events[0]
 
         teilnehmer = _skill_build_teilnehmer_frontmatter(event)
@@ -379,7 +434,7 @@ class DraganHallucinationRegressionTests(unittest.TestCase):
         """Beweis dass der Test die Klasse fängt: ohne responseStatus
         landen alle Eingeladenen — inklusive Dragan — in der teilnehmer-Liste."""
         with mock.patch.object(_api, "_get_outlook_tool", return_value=self.stub):
-            resp = _api.get_calendar_events(date="2026-05-21", _key="ignored")
+            resp = _api.get_calendar_events(date="2026-05-21")
         event = resp.events[0]
 
         # Skill-Bug-Simulation: response ignorieren (alter Code-Pfad)
