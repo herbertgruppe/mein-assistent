@@ -29,7 +29,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 import requests
 from dotenv import load_dotenv
@@ -104,31 +104,37 @@ logger = _setup_logging()
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
-def _load_state() -> tuple[str, Set[str]]:
-    """Load (last_sync_at_iso, processed_story_gids) from state file."""
+def _load_state() -> tuple[str, Dict[str, None]]:
+    """Load (last_sync_at_iso, processed_story_gids) from state file.
+
+    processed_story_gids is a dict[str, None] ordered by insertion (= recency).
+    """
     path = Path(STATE_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         try:
             data = json.loads(path.read_text())
-            return data.get("last_sync_at", ""), set(data.get("processed_story_gids", []))
+            # dict.fromkeys preserves JSON-array order, which equals insertion order
+            return data.get("last_sync_at", ""), dict.fromkeys(data.get("processed_story_gids", []))
         except Exception as exc:
             logger.warning("State file parse error, resetting: %s", exc)
     # First run — look back INITIAL_LOOKBACK_HOURS
     fallback = (
         datetime.now(timezone.utc) - timedelta(hours=INITIAL_LOOKBACK_HOURS)
     ).isoformat()
-    return fallback, set()
+    return fallback, {}
 
 
-def _save_state(last_sync_at: str, processed_gids: Set[str]) -> None:
-    """Persist state to file, capping processed_gids to MAX_PROCESSED_GIDS."""
+def _save_state(last_sync_at: str, processed_gids: Dict[str, None]) -> None:
+    """Persist state to file, capping processed_gids to MAX_PROCESSED_GIDS.
+
+    processed_gids keys are in insertion order (oldest first), so slicing
+    [-MAX_PROCESSED_GIDS:] correctly retains the most-recently-seen GIDs.
+    """
     path = Path(STATE_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Keep only the most-recent entries to prevent unbounded growth
-    gids_list = list(processed_gids)
-    if len(gids_list) > MAX_PROCESSED_GIDS:
-        gids_list = gids_list[-MAX_PROCESSED_GIDS:]
+    keys = list(processed_gids.keys())
+    gids_list = keys[-MAX_PROCESSED_GIDS:] if len(keys) > MAX_PROCESSED_GIDS else keys
     path.write_text(json.dumps(
         {"last_sync_at": last_sync_at, "processed_story_gids": gids_list},
         ensure_ascii=False,
@@ -277,7 +283,7 @@ def _tg_alert(text: str) -> None:
 
 
 # ── Poll cycle ────────────────────────────────────────────────────────────────
-def _poll_once(workspace_gid: str, last_sync_at: str, processed_gids: Set[str]) -> tuple[int, int]:
+def _poll_once(workspace_gid: str, last_sync_at: str, processed_gids: Dict[str, None]) -> tuple[int, int]:
     """Run one poll cycle. Returns (events_found, issues_created)."""
     events_found   = 0
     issues_created = 0
@@ -316,7 +322,7 @@ def _poll_once(workspace_gid: str, last_sync_at: str, processed_gids: Set[str]) 
             if not is_mention and not is_assignment:
                 # Mark as seen so we don't re-check it
                 if story_gid:
-                    processed_gids.add(story_gid)
+                    processed_gids[story_gid] = None
                 continue
 
             events_found += 1
@@ -338,7 +344,7 @@ def _poll_once(workspace_gid: str, last_sync_at: str, processed_gids: Set[str]) 
 
             if issue_id:
                 if story_gid:
-                    processed_gids.add(story_gid)
+                    processed_gids[story_gid] = None
                 issues_created += 1
                 logger.info(json.dumps({
                     "event":           "issue_created",
