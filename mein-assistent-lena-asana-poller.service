@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=mein-assistent
 WorkingDirectory=/opt/mein-assistent
 EnvironmentFile=/opt/mein-assistent/.env
 Environment="LENA_ASANA_LOG_FILE=/var/log/lena-asana-poller.log"
@@ -20,6 +20,9 @@ SyslogIdentifier=lena-asana-poller
 # Sicherheitseinstellungen
 PrivateTmp=true
 NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/mein-assistent/data /var/log/lena-asana-poller.log
 
 [Install]
 WantedBy=multi-user.target
