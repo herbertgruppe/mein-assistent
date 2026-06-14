@@ -7,10 +7,10 @@ Pollt Plaud-Account(s) periodisch und erstellt Paperclip-Issues fuer neue Aufnah
 Env-Vars:
   PLAUD_POLL_INTERVAL_SEC       Polling-Intervall in Sek (Standard: 600)
   PLAUD_MIN_DURATION_SEC        Min-Dauer Filter (Standard: 180 = 3 Min)
-  PLAUD_DB_PATH                 SQLite-Pfad (Standard: /opt/plaud-poller/state.db)
-  PLAUD_LOG_FILE                Log-Datei (Standard: /var/log/plaud-poller.log)
+  PLAUD_DB_PATH                 SQLite-Pfad (Standard: /var/lib/plaud/state.db)
+  PLAUD_LOG_FILE                Log-Datei (Standard: /var/log/plaud/plaud-poller.log)
   PLAUD_ACCOUNTS                Multi-Account: "home_dir:agent_id,home_dir2:agent_id2"
-                                Standard (Sven): "/root:PAPERCLIP_PROTOKOLL_AGENT_ID"
+                                Standard (Sven): "/var/lib/plaud:PAPERCLIP_PROTOKOLL_AGENT_ID"
   PLAUD_RECENT_DAYS             Tage fuer `plaud recent --days N` (Standard: 1)
   PAPERCLIP_API_URL             Paperclip-API-Basis-URL
   PAPERCLIP_API_KEY_MA          Bearer-Token fuer Paperclip (mein-assistent App-Key)
@@ -43,8 +43,8 @@ load_dotenv()
 # ── Config ────────────────────────────────────────────────────────────────────
 POLL_INTERVAL_SEC    = int(os.getenv("PLAUD_POLL_INTERVAL_SEC", "600"))
 MIN_DURATION_SEC     = int(os.getenv("PLAUD_MIN_DURATION_SEC",  "180"))
-DB_PATH              = os.getenv("PLAUD_DB_PATH",  "/opt/plaud-poller/state.db")
-LOG_FILE             = os.getenv("PLAUD_LOG_FILE", "/var/log/plaud-poller.log")
+DB_PATH              = os.getenv("PLAUD_DB_PATH",  "/var/lib/plaud/state.db")
+LOG_FILE             = os.getenv("PLAUD_LOG_FILE", "/var/log/plaud/plaud-poller.log")
 RECENT_DAYS          = int(os.getenv("PLAUD_RECENT_DAYS", "1"))
 
 PC_API_URL      = os.getenv("PAPERCLIP_API_URL",    "https://paperclip.herbertgruppe.com")
@@ -61,7 +61,7 @@ TG_ADMIN_CHAT = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
 
 # Multi-Account-Format: "home_dir:agent_id,home_dir2:agent_id2"
 # home_dir ist das HOME-Verzeichnis fuer den jeweiligen plaud-Token (~/.plaud/tokens.json)
-PLAUD_ACCOUNTS_ENV = os.getenv("PLAUD_ACCOUNTS", f"/root:{PC_PROTOKOLL_AGENT_ID}")
+PLAUD_ACCOUNTS_ENV = os.getenv("PLAUD_ACCOUNTS", f"/var/lib/plaud:{PC_PROTOKOLL_AGENT_ID}")
 
 MAX_BACKOFF_SEC = 300
 ALERT_THRESHOLD = 3  # consecutive errors before Telegram alert
