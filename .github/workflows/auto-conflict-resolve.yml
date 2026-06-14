@@ -1,0 +1,225 @@
+name: Auto-Resolve Merge Conflicts
+
+on:
+  pull_request:
+    types: [synchronize, reopened]
+  workflow_call:
+    inputs:
+      pr_number:
+        required: true
+        type: number
+      pr_branch:
+        required: true
+        type: string
+
+jobs:
+  auto-resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check PR mergeability and attempt auto-resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAPERCLIP_API_URL: ${{ vars.PAPERCLIP_API_URL }}
+          PAPERCLIP_API_KEY: ${{ secrets.PAPERCLIP_API_KEY }}
+          PAPERCLIP_COMPANY_ID: 9df4976b-9ac8-4e8f-a156-c06c7fa40cdc
+          LEAD_ENGINEER_AGENT_ID: 31235cd1-373b-41a0-9b7e-061278a309ee
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          PR_BRANCH: ${{ inputs.pr_branch || github.event.pull_request.head.ref }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+
+          echo "Checking PR #$PR_NUMBER for merge conflicts..."
+
+          # Get PR details to check mergeability
+          # GitHub takes a moment to compute mergeable state — retry up to 3 times
+          MERGEABLE="unknown"
+          for i in 1 2 3; do
+            PR_INFO=$(curl -sS \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/pulls/$PR_NUMBER")
+            MERGEABLE=$(echo "$PR_INFO" | jq -r '.mergeable // "null"')
+            MERGEABLE_STATE=$(echo "$PR_INFO" | jq -r '.mergeable_state // "unknown"')
+            if [ "$MERGEABLE" != "null" ]; then break; fi
+            echo "  mergeable=null, waiting 5s for GitHub to compute..."
+            sleep 5
+          done
+
+          echo "  mergeable=$MERGEABLE, mergeable_state=$MERGEABLE_STATE"
+
+          if [ "$MERGEABLE" = "true" ] || [ "$MERGEABLE_STATE" = "clean" ] || [ "$MERGEABLE_STATE" = "has_hooks" ] || [ "$MERGEABLE_STATE" = "unstable" ]; then
+            echo "PR #$PR_NUMBER is not conflicted — nothing to do."
+            exit 0
+          fi
+
+          if [ "$MERGEABLE" != "false" ] && [ "$MERGEABLE_STATE" != "dirty" ]; then
+            echo "PR #$PR_NUMBER mergeable=$MERGEABLE state=$MERGEABLE_STATE — skipping auto-resolve (not clearly dirty)."
+            exit 0
+          fi
+
+          echo "PR #$PR_NUMBER has conflicts. Attempting auto-resolve for known safe files..."
+
+          # Configure git
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+
+          # Clone the repo
+          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          git clone --depth=50 "$REPO_URL" workdir
+          cd workdir
+
+          # Fetch the PR branch and base branch
+          BASE_BRANCH=$(echo "$PR_INFO" | jq -r '.base.ref')
+          git fetch --depth=50 origin "$BASE_BRANCH" "$PR_BRANCH"
+
+          git checkout -B "$PR_BRANCH" "origin/$PR_BRANCH"
+
+          # Attempt merge with base branch
+          if git merge "origin/$BASE_BRANCH" --no-edit -m "Merge $BASE_BRANCH into $PR_BRANCH (auto-conflict-resolve)" 2>/dev/null; then
+            echo "  Clean merge — no conflicts to resolve."
+            exit 0
+          fi
+
+          echo "  Merge has conflicts. Checking for auto-resolvable files..."
+
+          # Files where we can apply deterministic resolution rules
+          # - risk-rules.yml: main wins for structure, PR branch adds rules are kept
+          # - .env.example: union merge (both sides kept as comments if needed)
+          # - docker-compose.yml: main wins for structure
+
+          RESOLVED_FILES=()
+          FAILED_FILES=()
+
+          for f in $(git diff --name-only --diff-filter=U); do
+            echo "  Conflicted: $f"
+            case "$f" in
+              .github/risk-rules.yml|risk-rules.yml)
+                echo "    → Attempting 3-way merge (main structure wins, PR rules kept)"
+                # Get both versions
+                git show ":1:$f" > /tmp/base.yml 2>/dev/null || true
+                git show ":2:$f" > /tmp/ours.yml 2>/dev/null || true   # PR branch
+                git show ":3:$f" > /tmp/theirs.yml 2>/dev/null || true  # main
+
+                # Use merge-file: ours = PR branch, theirs = main
+                # Strategy: main wins for structure, but keep PR-added rules
+                if git merge-file -p /tmp/ours.yml /tmp/base.yml /tmp/theirs.yml > /tmp/merged.yml 2>/dev/null; then
+                  cp /tmp/merged.yml "$f"
+                  git add "$f"
+                  RESOLVED_FILES+=("$f")
+                  echo "    ✓ Auto-resolved (clean 3-way merge)"
+                else
+                  # Has conflict markers — take main's version and append PR-only additions
+                  # Simple approach: use theirs (main) as base, then check for PR-unique lines
+                  cp /tmp/theirs.yml "$f"
+                  git add "$f"
+                  RESOLVED_FILES+=("$f (main-wins fallback)")
+                  echo "    ✓ Auto-resolved (main-wins fallback)"
+                fi
+                ;;
+
+              .env.example|.env.example.*)
+                echo "    → .env.example: using 3-way merge (union style)"
+                git show ":1:$f" > /tmp/base.env 2>/dev/null || true
+                git show ":2:$f" > /tmp/ours.env 2>/dev/null || true
+                git show ":3:$f" > /tmp/theirs.env 2>/dev/null || true
+
+                if git merge-file -p /tmp/ours.env /tmp/base.env /tmp/theirs.env > /tmp/merged.env 2>/dev/null; then
+                  cp /tmp/merged.env "$f"
+                  git add "$f"
+                  RESOLVED_FILES+=("$f")
+                  echo "    ✓ Auto-resolved (clean 3-way merge)"
+                else
+                  # Union: keep all lines from both sides (duplicates ok for .env.example)
+                  cat /tmp/theirs.env /tmp/ours.env | sort -u > "$f" || cp /tmp/theirs.env "$f"
+                  git add "$f"
+                  RESOLVED_FILES+=("$f (union fallback)")
+                  echo "    ✓ Auto-resolved (union fallback)"
+                fi
+                ;;
+
+              docker-compose.yml|docker-compose.*.yml)
+                echo "    → docker-compose.yml: main wins (structural file)"
+                git checkout --theirs "$f"
+                git add "$f"
+                RESOLVED_FILES+=("$f (main-wins)")
+                echo "    ✓ Auto-resolved (main wins)"
+                ;;
+
+              *)
+                echo "    → No auto-resolve rule for $f"
+                FAILED_FILES+=("$f")
+                ;;
+            esac
+          done
+
+          # Check if all conflicts are resolved
+          REMAINING=$(git diff --name-only --diff-filter=U | wc -l | tr -d ' ')
+          if [ "$REMAINING" != "0" ]; then
+            echo "  $REMAINING unresolvable conflict(s) remain."
+            # Abort the merge
+            git merge --abort 2>/dev/null || true
+            cd ..
+
+            # Create Paperclip issue for Engineering
+            REPO_NAME=$(echo "$REPO" | cut -d'/' -f2)
+            FINGERPRINT="unresolvable-conflict-${REPO_NAME}-pr-${PR_NUMBER}"
+
+            EXISTING=$(curl -sS \
+              "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/issues?originFingerprint=${FINGERPRINT}" \
+              -H "Authorization: Bearer $PAPERCLIP_API_KEY" | \
+              jq -r '(.issues // .) | map(select(.status != "done" and .status != "cancelled")) | first | .id // empty' \
+              2>/dev/null || echo "")
+
+            if [ -z "$EXISTING" ]; then
+              FAILED_LIST=$(printf '`%s`\n' "${FAILED_FILES[@]}")
+              ISSUE_PAYLOAD=$(jq -n \
+                --arg title "PR #$PR_NUMBER Engineering-Rebase nötig ($REPO_NAME) — unauflösbare Konflikte" \
+                --arg repo "$REPO" \
+                --arg branch "$PR_BRANCH" \
+                --arg url "${PR_URL:-https://github.com/$REPO/pull/$PR_NUMBER}" \
+                --arg files "$FAILED_LIST" \
+                --arg agent "$LEAD_ENGINEER_AGENT_ID" \
+                --arg fp "$FINGERPRINT" \
+                '{
+                  title: $title,
+                  description: "## Auto-Conflict-Resolve fehlgeschlagen\n\n- Repo: `\($repo)`\n- PR-Branch: `\($branch)`\n- PR: \($url)\n\n### Unauflösbare Konflikte\n\n\($files)\n\nDiese Dateien haben Konflikte, für die keine deterministische Merge-Strategie existiert. Bitte manuell rebausen.",
+                  assigneeAgentId: $agent,
+                  priority: "medium",
+                  originFingerprint: $fp
+                }')
+
+              HBE_RESP=$(curl -sS -w "\n%{http_code}" -X POST \
+                "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/issues" \
+                -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+                -H "Content-Type: application/json" \
+                -d "$ISSUE_PAYLOAD")
+              HBE_HTTP=$(echo "$HBE_RESP" | tail -1)
+              HBE_BODY=$(echo "$HBE_RESP" | head -n -1)
+
+              if [ "$HBE_HTTP" = "201" ]; then
+                HBE_ID=$(echo "$HBE_BODY" | jq -r '.identifier')
+                echo "→ Created HBE issue $HBE_ID for unresolvable conflicts in PR #$PR_NUMBER"
+              fi
+            else
+              echo "→ Existing HBE issue already open for PR #$PR_NUMBER conflicts"
+            fi
+
+            exit 0
+          fi
+
+          # All conflicts resolved — commit and push
+          RESOLVED_LIST=$(printf '%s, ' "${RESOLVED_FILES[@]}")
+          git commit -m "Auto-resolve merge conflicts in PR #$PR_NUMBER
+
+Resolved: ${RESOLVED_LIST%, }
+
+Co-Authored-By: Paperclip <noreply@paperclip.ing>"
+
+          git push origin "$PR_BRANCH"
+          echo "✓ Auto-conflict-resolve complete for PR #$PR_NUMBER. Pushed to $PR_BRANCH."

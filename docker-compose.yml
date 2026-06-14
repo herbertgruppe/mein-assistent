@@ -61,6 +61,13 @@ services:
     volumes:
       # Nur data-Volume — SQLite-DB + Log-Datei
       - data:/app/data
+    healthcheck:
+      # Healthy wenn Log-Datei in den letzten 10 Min geschrieben wurde (poll_cycle alle 5 Min)
+      test: ["CMD-SHELL", "find /app/data/lena-imap-poller.log -mmin -10 | grep -q ."]
+      interval: 5m
+      timeout: 10s
+      start_period: 30s
+      retries: 2
 
 volumes:
   transcripts:
