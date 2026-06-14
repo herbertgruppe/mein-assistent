@@ -1,0 +1,25 @@
+[Unit]
+Description=Plaud Poller — pollt Plaud-Account(s) und erstellt Paperclip-Issues
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/mein-assistent
+EnvironmentFile=/opt/mein-assistent/.env
+Environment="PLAUD_DB_PATH=/opt/plaud-poller/state.db"
+Environment="PLAUD_LOG_FILE=/var/log/plaud-poller.log"
+ExecStart=/opt/mein-assistent/venv/bin/python3 /opt/mein-assistent/plaud_poller.py
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=plaud-poller
+
+# Sicherheitseinstellungen
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
