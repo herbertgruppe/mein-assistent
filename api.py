@@ -234,8 +234,14 @@ def _tg_send_message(chat_id: str, text: str) -> bool:
 
 def _pc_get_issue_status(issue_id: str) -> Optional[str]:
     """Return the Paperclip issue status string, or None on error / not-found."""
+    status, _ = _pc_get_issue_info(issue_id)
+    return status
+
+
+def _pc_get_issue_info(issue_id: str) -> tuple:
+    """Return (status, assigneeAgentId) for a Paperclip issue, or (None, None) on error."""
     if not (_PC_API_URL and _PC_API_KEY):
-        return None
+        return None, None
     try:
         resp = _http.get(
             f"{_PC_API_URL}/api/issues/{issue_id}",
@@ -243,12 +249,13 @@ def _pc_get_issue_status(issue_id: str) -> Optional[str]:
             timeout=15,
         )
     except Exception:
-        return None
+        return None, None
     if resp.status_code == 404:
-        return None
+        return None, None
     if not resp.ok:
-        return None
-    return resp.json().get("status")
+        return None, None
+    data = resp.json()
+    return data.get("status"), data.get("assigneeAgentId")
 
 
 def _pc_add_comment_to_issue(issue_id: str, username: str, text: str) -> bool:
@@ -2450,16 +2457,26 @@ async def telegram_lena_webhook(req: Request):
     username = user.username or user.first_name or "Unbekannt"
     chat_id = str(msg.chat.id)
 
-    # Check for an existing active issue for this chat — clean all stale entries
+    # Check for an existing active issue for this chat — clean all stale/foreign entries.
+    # An entry is stale if the issue is done, cancelled, blocked, or not found.
+    # An entry is foreign if its assignee is not Lena (guards against stale DB rows from
+    # older code paths landing Sven's messages on Mara-owned issues, causing silent 403s).
     active_issue_id = None
     with _telegram_db() as db:
         rows = db.execute(
             "SELECT issue_id FROM pending_issues WHERE chat_id = ?", (chat_id,)
         ).fetchall()
         for row in rows:
-            status = _pc_get_issue_status(row["issue_id"])
-            if status is None or status in {"done", "cancelled"}:
+            status, assignee = _pc_get_issue_info(row["issue_id"])
+            is_stale = status is None or status in {"done", "cancelled", "blocked"}
+            is_foreign = bool(_PC_LENA_AGENT_ID) and assignee != _PC_LENA_AGENT_ID
+            if is_stale or is_foreign:
                 db.execute("DELETE FROM pending_issues WHERE issue_id = ?", (row["issue_id"],))
+                if is_foreign and not is_stale:
+                    logger.warning(
+                        "[telegram] purged foreign pending_issue %s (assignee=%s, expected=%s)",
+                        row["issue_id"], assignee, _PC_LENA_AGENT_ID,
+                    )
             else:
                 active_issue_id = row["issue_id"]
 
@@ -2473,11 +2490,21 @@ async def telegram_lena_webhook(req: Request):
             text=msg.text,
         )
         if issue_id:
-            with _telegram_db() as db:
-                db.execute(
-                    "INSERT OR REPLACE INTO pending_issues (issue_id, chat_id) VALUES (?, ?)",
-                    (issue_id, chat_id),
+            # Variant-1 guard: only track issues that are actually assigned to Lena.
+            # Prevents foreign issue IDs from entering pending_issues if the API ever
+            # ignores our assigneeAgentId or a misconfiguration occurs.
+            _, created_assignee = _pc_get_issue_info(issue_id)
+            if bool(_PC_LENA_AGENT_ID) and created_assignee != _PC_LENA_AGENT_ID:
+                logger.warning(
+                    "[telegram] new issue %s not assigned to Lena (assignee=%s) — not tracking",
+                    issue_id, created_assignee,
                 )
+            else:
+                with _telegram_db() as db:
+                    db.execute(
+                        "INSERT OR REPLACE INTO pending_issues (issue_id, chat_id) VALUES (?, ?)",
+                        (issue_id, chat_id),
+                    )
 
     return {"ok": True}
 
