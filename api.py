@@ -1437,12 +1437,12 @@ def lena_delete_calendar_event(
         raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
 
     if send_cancellations:
-        # Use the cancel action to send cancellation notices before deleting
+        # /cancel sends cancellation notices AND removes the event — do not also DELETE.
         cancel_url = f"https://graph.microsoft.com/v1.0/me/events/{event_id}/cancel"
         cancel_resp = _graph_req("post", cancel_url, tool, json={})
-        if cancel_resp.status_code not in (200, 202, 204):
-            # Fall back to plain DELETE if cancel action fails (e.g. not organizer)
-            pass
+        if cancel_resp.status_code in (200, 202, 204):
+            return SimpleResult(success=True, message=f"Termin {event_id[:16]}… abgesagt und gelöscht.")
+        # Fall back to plain DELETE if cancel action fails (e.g. not organizer)
 
     url = f"https://graph.microsoft.com/v1.0/me/events/{event_id}"
     resp = _graph_req("delete", url, tool)
