@@ -1,6 +1,7 @@
 # .github/risk-rules.yml
 # Risk classification rules for code-approval automation.
 # Code Reviewer Agent reads this file first; LLM classification is fallback only.
+# evaluation: first-match
 version: 1
 rules:
   - if_paths_match:
@@ -24,6 +25,13 @@ rules:
       - ".github/workflows/**"
     risk: MEDIUM
   - if_paths_match:
+      - ".env.example"
+      - "**/.env.example"
+      - "**/.env*.example"
+      - "**/.env*.template"
+      - "**/.env*.sample"
+    risk: MEDIUM
+  - if_paths_match:
       - "nginx/**"
       - "**/docker-compose*.yml"
       - "Dockerfile"
@@ -31,6 +39,7 @@ rules:
       - "**/.env*"
       - ".streamlit/secrets*"
       - "**/migrations/**"
+      - "migrations/**"
       - "**/auth/**"
       - "utils/auth*"
       - "**/sso/**"
