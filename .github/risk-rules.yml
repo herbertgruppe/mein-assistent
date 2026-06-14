@@ -1,6 +1,7 @@
 # .github/risk-rules.yml
 # Risk classification rules for code-approval automation.
 # Code Reviewer Agent reads this file first; LLM classification is fallback only.
+# evaluation: first-match
 version: 1
 rules:
   - if_paths_match:

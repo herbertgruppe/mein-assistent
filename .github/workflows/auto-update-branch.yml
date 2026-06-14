@@ -1,0 +1,147 @@
+name: Auto-Update Open PRs
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  update-open-prs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Update all open PRs to be up to date with base
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAPERCLIP_API_URL: ${{ vars.PAPERCLIP_API_URL }}
+          PAPERCLIP_API_KEY: ${{ secrets.PAPERCLIP_API_KEY }}
+          PAPERCLIP_COMPANY_ID: 9df4976b-9ac8-4e8f-a156-c06c7fa40cdc
+          LEAD_ENGINEER_AGENT_ID: 31235cd1-373b-41a0-9b7e-061278a309ee
+          REPO: ${{ github.repository }}
+          PUSH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          echo "Fetching open PRs for $REPO after push $PUSH_SHA..."
+
+          PAGE=1
+          while true; do
+            RESP=$(curl -sS -w "\n%{http_code}" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/pulls?state=open&per_page=100&page=$PAGE")
+            HTTP=$(echo "$RESP" | tail -1)
+            PRS=$(echo "$RESP" | head -n -1)
+
+            if [ "$HTTP" != "200" ]; then
+              echo "::error::Failed to list PRs (HTTP $HTTP): $PRS"
+              exit 1
+            fi
+
+            COUNT=$(echo "$PRS" | jq 'length')
+            if [ "$COUNT" = "0" ]; then
+              break
+            fi
+
+            while IFS= read -r line; do
+              PR_NUMBER=$(echo "$line" | jq -r '.number')
+              PR_TITLE=$(echo "$line" | jq -r '.title')
+              PR_BRANCH=$(echo "$line" | jq -r '.head.ref')
+              PR_URL=$(echo "$line" | jq -r '.html_url')
+
+              echo "Updating PR #$PR_NUMBER ($PR_BRANCH): $PR_TITLE"
+
+              UPDATE_RESP=$(curl -sS -w "\n%{http_code}" -X PUT \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$REPO/pulls/$PR_NUMBER/update-branch" \
+                -d '{}')
+              UPDATE_HTTP=$(echo "$UPDATE_RESP" | tail -1)
+              UPDATE_BODY=$(echo "$UPDATE_RESP" | head -n -1)
+
+              if [ "$UPDATE_HTTP" = "200" ] || [ "$UPDATE_HTTP" = "202" ]; then
+                echo "  ✓ PR #$PR_NUMBER updated successfully"
+
+              elif [ "$UPDATE_HTTP" = "422" ]; then
+                # Merge conflict — cannot auto-update
+                MSG=$(echo "$UPDATE_BODY" | jq -r '.message // "merge conflict"' 2>/dev/null || echo "merge conflict")
+                echo "  ✗ PR #$PR_NUMBER has merge conflict: $MSG"
+
+                # Post comment on the PR
+                COMMENT_BODY=$(jq -n \
+                  --arg pr "$PR_NUMBER" \
+                  --arg branch "$PR_BRANCH" \
+                  '{body: "⚠️ **Auto-Update-Branch fehlgeschlagen — manueller Rebase nötig.**\n\nNach dem letzten Push auf `main` konnte dieser PR-Branch (`\($branch)`) nicht automatisch aktualisiert werden (Merge-Konflikt).\n\nBitte manuell rebausen:\n```bash\ngit checkout \($branch)\ngit rebase origin/main\n# Konflikte lösen, dann:\ngit push --force-with-lease\n```\n\nEin HBE-Issue wurde für Engineering angelegt."}')
+
+                curl -sS -X POST \
+                  -H "Authorization: Bearer $GH_TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" \
+                  -d "$COMMENT_BODY" > /dev/null || echo "  Warning: failed to post PR comment"
+
+                # Create Paperclip issue for Engineering
+                REPO_NAME=$(echo "$REPO" | cut -d'/' -f2)
+                FINGERPRINT="auto-update-conflict-${REPO_NAME}-pr-${PR_NUMBER}"
+
+                # Check for existing open issue with same fingerprint (dedup)
+                EXISTING=$(curl -sS \
+                  "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/issues?originFingerprint=${FINGERPRINT}" \
+                  -H "Authorization: Bearer $PAPERCLIP_API_KEY" | \
+                  jq -r '(.issues // .) | map(select(.status != "done" and .status != "cancelled")) | first | .id // empty' \
+                  2>/dev/null || echo "")
+
+                if [ -z "$EXISTING" ]; then
+                  ISSUE_PAYLOAD=$(jq -n \
+                    --arg title "PR #$PR_NUMBER Engineering-Rebase nötig ($REPO_NAME)" \
+                    --arg repo "$REPO" \
+                    --arg branch "$PR_BRANCH" \
+                    --arg url "$PR_URL" \
+                    --arg agent "$LEAD_ENGINEER_AGENT_ID" \
+                    --arg fp "$FINGERPRINT" \
+                    '{
+                      title: $title,
+                      description: "## Auto-Update-Branch fehlgeschlagen\n\n- Repo: `\($repo)`\n- PR-Branch: `\($branch)`\n- PR: \($url)\n\nDieser PR hat einen Merge-Konflikt mit `main` der nicht automatisch aufgelöst werden kann. Bitte manuell rebausen.",
+                      assigneeAgentId: $agent,
+                      priority: "medium",
+                      originFingerprint: $fp
+                    }')
+
+                  HBE_RESP=$(curl -sS -w "\n%{http_code}" -X POST \
+                    "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/issues" \
+                    -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+                    -H "Content-Type: application/json" \
+                    -d "$ISSUE_PAYLOAD")
+                  HBE_HTTP=$(echo "$HBE_RESP" | tail -1)
+                  HBE_BODY=$(echo "$HBE_RESP" | head -n -1)
+
+                  if [ "$HBE_HTTP" = "201" ]; then
+                    HBE_ID=$(echo "$HBE_BODY" | jq -r '.identifier')
+                    echo "  → Created HBE issue $HBE_ID for PR #$PR_NUMBER"
+                  else
+                    echo "  Warning: failed to create HBE issue (HTTP $HBE_HTTP)"
+                  fi
+                else
+                  echo "  → Existing HBE issue already open for PR #$PR_NUMBER (fingerprint: $FINGERPRINT)"
+                fi
+
+              elif [ "$UPDATE_HTTP" = "204" ]; then
+                echo "  ✓ PR #$PR_NUMBER already up to date"
+
+              else
+                MSG=$(echo "$UPDATE_BODY" | jq -r '.message // "unknown error"' 2>/dev/null || echo "unknown error")
+                echo "  ! PR #$PR_NUMBER update returned HTTP $UPDATE_HTTP: $MSG"
+              fi
+
+            done < <(echo "$PRS" | jq -c '.[]')
+
+            if [ "$COUNT" -lt 100 ]; then
+              break
+            fi
+            PAGE=$((PAGE + 1))
+          done
+
+          echo "Auto-update-branch complete."
