@@ -110,6 +110,9 @@ def _load_api_module():
     fastapi_mod.Depends = lambda *a, **kw: None
     fastapi_mod.Header = lambda *a, **kw: None
     fastapi_mod.Query = lambda *a, **kw: None
+    fastapi_mod.File = lambda *a, **kw: None
+    fastapi_mod.Form = lambda *a, **kw: None
+    fastapi_mod.UploadFile = type("UploadFile", (), {"__init__": lambda *a, **kw: None})
     stubs["fastapi"] = fastapi_mod
 
     sec_mod = types.ModuleType("fastapi.security")
