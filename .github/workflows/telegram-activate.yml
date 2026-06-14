@@ -1,0 +1,118 @@
+name: Telegram-Bridge aktivieren (HBE-402)
+
+# Manueller Trigger nach .env-Update auf dem Server.
+# Voraussetzungen:
+#   1. GitHub Secrets gesetzt: TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, PAPERCLIP_API_KEY_MA
+#   2. /opt/mein-assistent/.env auf Hetzner enthält alle Telegram-/Paperclip-Vars
+#   3. HETZNER_DEPLOY_KEY (paperclip-engineering) als Org-Secret vorhanden
+#
+# Was dieser Workflow tut:
+#   - Baut den API-Container neu (zieht neue .env-Werte)
+#   - Registriert den Telegram-Webhook via Telegram Bot API
+#   - Verifiziert die Webhook-Registrierung
+#   - Ermittelt Svens Chat-ID (ersten /start-Update ausgeben)
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_rebuild:
+        description: 'Container-Rebuild überspringen (z.B. wenn bereits neu gebaut)'
+        required: false
+        default: 'false'
+        type: boolean
+
+concurrency:
+  group: mein-assistent-telegram-activate
+  cancel-in-progress: false
+
+jobs:
+  activate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Prepare SSH (paperclip-engineering)
+        env:
+          SSH_KEY: ${{ secrets.HETZNER_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          sed -i -e '$a\' ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 -H 46.225.132.135 >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keygen -lf ~/.ssh/id_ed25519
+
+      - name: Rebuild API container
+        if: ${{ inputs.skip_rebuild != 'true' }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes \
+            paperclip-engineering@46.225.132.135 \
+            "docker-compose mein-assistent build"
+
+      - name: Restart API container (up -d)
+        if: ${{ inputs.skip_rebuild != 'true' }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes \
+            paperclip-engineering@46.225.132.135 \
+            "docker-compose mein-assistent up -d"
+
+      - name: Wait for API health
+        run: |
+          for i in $(seq 1 12); do
+            status=$(curl -s -o /dev/null -w "%{http_code}" \
+              https://mein-assistent.herbertgruppe.com/api/health 2>/dev/null || echo "000")
+            echo "Attempt $i: HTTP $status"
+            if [ "$status" = "200" ]; then
+              echo "API healthy."
+              break
+            fi
+            sleep 5
+          done
+
+      - name: Register Telegram webhook
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          RESPONSE=$(curl -s -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+            -d "url=https://mein-assistent.herbertgruppe.com/api/telegram/lena/webhook" \
+            -d "secret_token=${TELEGRAM_WEBHOOK_SECRET}")
+          echo "setWebhook response: $RESPONSE"
+          OK=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ok','false'))")
+          if [ "$OK" != "True" ]; then
+            echo "::error::Webhook registration failed: $RESPONSE"
+            exit 1
+          fi
+
+      - name: Verify webhook info
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" | \
+            python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d, indent=2, ensure_ascii=False))"
+
+      - name: Check for Sven /start update (chat_id)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          echo "Abruf offener Updates (falls /start bereits gesendet):"
+          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates" | \
+            python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          updates = data.get('result', [])
+          if not updates:
+              print('Keine Updates — /start an @lena_hberatung_bot senden und erneut prüfen.')
+          else:
+              for u in updates:
+                  msg = u.get('message', {})
+                  chat = msg.get('chat', {})
+                  text = msg.get('text', '')
+                  print(f'chat_id={chat.get(\"id\")}  username={chat.get(\"username\")}  text={text!r}')
+          " || true
+
+      - name: Clean up SSH key
+        if: always()
+        run: shred -u ~/.ssh/id_ed25519 2>/dev/null || rm -f ~/.ssh/id_ed25519
