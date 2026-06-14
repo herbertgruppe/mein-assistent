@@ -174,10 +174,13 @@ def get_authenticated_user(
 # ---------------------------------------------------------------------------
 _TG_BOT_TOKEN        = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 _TG_WEBHOOK_SECRET   = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+_TG_ADMIN_CHAT_ID    = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "").strip()
 _PC_API_URL          = os.getenv("PAPERCLIP_API_URL_MA", "https://paperclip.herbertgruppe.com").strip()
 _PC_API_KEY          = os.getenv("PAPERCLIP_API_KEY_MA", "").strip()
 _PC_COMPANY_ID       = os.getenv("PAPERCLIP_COMPANY_ID_MA", "").strip()
 _PC_LENA_AGENT_ID    = os.getenv("PAPERCLIP_LENA_AGENT_ID", "").strip()
+# MARA_SPEAKER_FALLBACK_DEFAULT: ask | continue | pause
+_MARA_SPEAKER_FALLBACK_DEFAULT = os.getenv("MARA_SPEAKER_FALLBACK_DEFAULT", "ask").strip()
 
 if os.getenv("TELEGRAM_BOT_TOKEN") and not os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip():
     raise RuntimeError(
@@ -204,6 +207,11 @@ def _telegram_db():
         comment_id TEXT PRIMARY KEY,
         processed_at TEXT DEFAULT CURRENT_TIMESTAMP
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS speaker_questions (
+        message_id INTEGER PRIMARY KEY,
+        issue_id   TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
     conn.commit()
     try:
         yield conn
@@ -212,24 +220,47 @@ def _telegram_db():
         conn.close()
 
 
-def _tg_send_message(chat_id: str, text: str) -> bool:
-    """Send a message via Telegram Bot API. Returns True on success."""
+def _tg_send_message(
+    chat_id: str,
+    text: str,
+    reply_markup: Optional[dict] = None,
+) -> Optional[int]:
+    """Send a message via Telegram Bot API. Returns message_id on success, None on failure."""
     if not _TG_BOT_TOKEN:
-        return False
+        return None
+    payload: dict = {"chat_id": chat_id, "text": text}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     try:
         resp = _http.post(
             f"https://api.telegram.org/bot{_TG_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": text},
+            json=payload,
             timeout=10,
         )
-        return resp.ok
+        if resp.ok:
+            return resp.json().get("result", {}).get("message_id")
+        return None
     except _http.exceptions.RequestException as exc:
         # Use type name only — str(exc) would include the full URL with the BOT_TOKEN
         logger.warning("[telegram] sendMessage failed: %s", type(exc).__name__)
-        return False
+        return None
     except Exception:
         logger.warning("[telegram] sendMessage failed: unexpected error", exc_info=False)
-        return False
+        return None
+
+
+def _tg_answer_callback_query(callback_query_id: str, text: str = "") -> None:
+    """Acknowledge a Telegram callback_query to dismiss the loading spinner."""
+    if not _TG_BOT_TOKEN:
+        return
+    try:
+        _http.post(
+            f"https://api.telegram.org/bot{_TG_BOT_TOKEN}/answerCallbackQuery",
+            json={"callback_query_id": callback_query_id, "text": text},
+            timeout=10,
+        )
+    except Exception:
+        pass
 
 
 def _pc_get_issue_status(issue_id: str) -> Optional[str]:
@@ -256,6 +287,53 @@ def _pc_get_issue_info(issue_id: str) -> tuple:
         return None, None
     data = resp.json()
     return data.get("status"), data.get("assigneeAgentId")
+
+
+def _pc_patch_issue_status(
+    issue_id: str,
+    status: str,
+    blocked_reason: Optional[str] = None,
+) -> bool:
+    """PATCH Paperclip issue status. Returns True on success."""
+    if not (_PC_API_URL and _PC_API_KEY):
+        return False
+    body: dict = {"status": status}
+    if blocked_reason:
+        body["blockedReason"] = blocked_reason
+    try:
+        resp = _http.patch(
+            f"{_PC_API_URL}/api/issues/{issue_id}",
+            json=body,
+            headers={"Authorization": f"Bearer {_PC_API_KEY}"},
+            timeout=15,
+        )
+    except Exception as exc:
+        logger.warning("[telegram] pc_patch_issue error %s: %s", issue_id, type(exc).__name__)
+        return False
+    if resp.ok:
+        return True
+    logger.warning("[telegram] pc_patch_issue failed %s: %s %s", issue_id, resp.status_code, resp.text[:200])
+    return False
+
+
+def _pc_post_system_comment(issue_id: str, body: str) -> bool:
+    """Post a system comment (no Telegram prefix) on a Paperclip issue. Returns True on success."""
+    if not (_PC_API_URL and _PC_API_KEY):
+        return False
+    try:
+        resp = _http.post(
+            f"{_PC_API_URL}/api/issues/{issue_id}/comments",
+            json={"body": body},
+            headers={"Authorization": f"Bearer {_PC_API_KEY}"},
+            timeout=15,
+        )
+    except Exception as exc:
+        logger.warning("[telegram] pc_post_system_comment error %s: %s", issue_id, type(exc).__name__)
+        return False
+    if resp.ok:
+        return True
+    logger.warning("[telegram] pc_post_system_comment failed %s: %s", issue_id, resp.status_code)
+    return False
 
 
 def _pc_add_comment_to_issue(issue_id: str, username: str, text: str) -> bool:
@@ -745,14 +823,30 @@ class _TgMsg(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class _TgCallbackQuery(BaseModel):
+    id: str
+    from_: Optional[_TgUser] = Field(None, alias="from")
+    message: Optional[_TgMsg] = None
+    data: Optional[str] = None
+
+    model_config = {"populate_by_name": True}
+
+
 class TelegramUpdate(BaseModel):
     update_id: int
     message: Optional[_TgMsg] = None
+    callback_query: Optional[_TgCallbackQuery] = None
 
 
 class TelegramSendRequest(BaseModel):
     chat_id: str = Field(..., description="Telegram Chat-ID (Empfänger)")
     text: str = Field(..., description="Nachrichtentext")
+
+
+class SpeakerQuestionRequest(BaseModel):
+    issue_id: str = Field(..., description="Paperclip Issue-ID (z.B. HBE-753)")
+    meeting_name: str = Field(..., description="Termin-Titel für die Nachricht")
+    unknown_speakers: List[str] = Field(..., description="Liste der unbekannten Speaker-Labels")
 
 
 # Datums-Heuristiken für Plaud-Mail-Betreff (z. B. „04-17 Besprechung 09:30-11:00")
@@ -2457,6 +2551,15 @@ async def telegram_lena_webhook(req: Request):
     except Exception:
         return {"ok": True}
 
+    # --- callback_query: Sven pressed an inline-keyboard button ---
+    if update.callback_query:
+        cq = update.callback_query
+        _tg_answer_callback_query(cq.id)
+        data = cq.data or ""
+        chat_id = str(cq.message.chat.id) if cq.message else _TG_ADMIN_CHAT_ID
+        _handle_speaker_callback(data, chat_id)
+        return {"ok": True}
+
     msg = update.message
     if not msg or not msg.text:
         return {"ok": True}
@@ -2517,6 +2620,48 @@ async def telegram_lena_webhook(req: Request):
     return {"ok": True}
 
 
+def _handle_speaker_callback(data: str, chat_id: str) -> None:
+    """Process a speaker-question callback_query from Sven."""
+    # data format: "spkr_pause:HBE-753", "spkr_cont:HBE-753", "spkr_ready:HBE-753"
+    parts = data.split(":", 1)
+    if len(parts) != 2 or not parts[0].startswith("spkr_"):
+        return
+    action, issue_id = parts[0], parts[1]
+
+    if action == "spkr_pause":
+        _pc_patch_issue_status(issue_id, "blocked", "awaiting_plaud_update")
+        _pc_post_system_comment(issue_id, "TELEGRAM_CALLBACK: speaker_plaud_update")
+        fertig_keyboard = {
+            "inline_keyboard": [[
+                {"text": "✅ Fertig — Transkript neu einlesen", "callback_data": f"spkr_ready:{issue_id}"},
+            ]]
+        }
+        _tg_send_message(
+            chat_id,
+            f"⏸ {issue_id} wartet auf Plaud-Update.\n"
+            "Bitte benenne die Speaker in der Plaud-App und drücke dann Fertig.",
+            reply_markup=fertig_keyboard,
+        )
+
+    elif action == "spkr_cont":
+        _pc_post_system_comment(issue_id, "TELEGRAM_CALLBACK: speaker_continue")
+        _tg_send_message(
+            chat_id,
+            f"▶️ {issue_id}: Protokoll wird mit Platzhaltern für unbekannte Speaker erstellt.",
+        )
+
+    elif action == "spkr_ready":
+        _pc_patch_issue_status(issue_id, "in_progress")
+        _pc_post_system_comment(issue_id, "TELEGRAM_CALLBACK: speaker_ready")
+        _tg_send_message(
+            chat_id,
+            f"✅ {issue_id}: Mara liest das aktualisierte Transkript ein und erstellt das Protokoll neu.",
+        )
+
+    else:
+        logger.warning("[telegram] unknown speaker callback action: %s", action)
+
+
 @app.post("/api/telegram/lena/send", response_model=SimpleResult)
 def telegram_lena_send(
     req: TelegramSendRequest,
@@ -2531,6 +2676,74 @@ def telegram_lena_send(
     if not _tg_send_message(req.chat_id, req.text):
         raise HTTPException(status_code=502, detail="Telegram sendMessage fehlgeschlagen.")
     return SimpleResult(success=True, message=f"Nachricht an Chat {req.chat_id} gesendet.")
+
+
+@app.post("/api/telegram/speaker-question", response_model=SimpleResult)
+def telegram_speaker_question(
+    req: SpeakerQuestionRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Mara ruft diesen Endpoint auf wenn SKILL_SPEAKER unbekannte Speaker nicht
+    aufloesen konnte. Schickt eine strukturierte Telegram-Nachricht mit zwei
+    Quick-Reply-Buttons an TELEGRAM_ADMIN_CHAT_ID (Sven).
+
+    Erfordert X-API-Key und konfiguriertes TELEGRAM_ADMIN_CHAT_ID.
+    """
+    if not _TG_BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN nicht konfiguriert.")
+    if not _TG_ADMIN_CHAT_ID:
+        raise HTTPException(
+            status_code=503,
+            detail="TELEGRAM_ADMIN_CHAT_ID nicht konfiguriert — Speaker-Fragen koennen nicht gesendet werden.",
+        )
+
+    speakers_str = ", ".join(req.unknown_speakers)
+    text = (
+        f"🎙️ Unbekannte Speaker in {req.issue_id}\n"
+        f"Termin: {req.meeting_name}\n"
+        f"Unklar: {speakers_str}\n\n"
+        "Was soll ich tun?"
+    )
+    keyboard = {
+        "inline_keyboard": [[
+            {
+                "text": "🔄 In Plaud ergänzen",
+                "callback_data": f"spkr_pause:{req.issue_id}",
+            },
+            {
+                "text": "▶️ Weitermachen ohne",
+                "callback_data": f"spkr_cont:{req.issue_id}",
+            },
+        ]]
+    }
+    message_id = _tg_send_message(_TG_ADMIN_CHAT_ID, text, reply_markup=keyboard)
+    if not message_id:
+        raise HTTPException(status_code=502, detail="Telegram sendMessage fehlgeschlagen.")
+
+    with _telegram_db() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO speaker_questions (message_id, issue_id) VALUES (?, ?)",
+            (message_id, req.issue_id),
+        )
+
+    return SimpleResult(
+        success=True,
+        message=f"Speaker-Frage fuer {req.issue_id} an Sven gesendet (TG message_id={message_id}).",
+    )
+
+
+@app.get("/api/telegram/speaker-fallback-config")
+def telegram_speaker_fallback_config(
+    _key: str = Security(verify_api_key),
+):
+    """
+    Gibt den konfigurierten MARA_SPEAKER_FALLBACK_DEFAULT-Wert zurueck.
+    Mara liest diesen beim Start des SKILL_SPEAKER, um das Default-Verhalten zu bestimmen.
+
+    Werte: ask (Default) | continue | pause
+    """
+    return {"fallback_default": _MARA_SPEAKER_FALLBACK_DEFAULT}
 
 
 # ---------------------------------------------------------------------------
