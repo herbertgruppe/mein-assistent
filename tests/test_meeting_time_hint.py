@@ -44,6 +44,16 @@ def _load_api_module():
             return deco
 
         post = get
+        on_event = get
+        patch = get
+        put = get
+        delete = get
+
+        def mount(self, *a, **kw):
+            pass
+
+        def include_router(self, *a, **kw):
+            pass
 
     def _security(*a, **kw):
         return None
@@ -55,6 +65,14 @@ def _load_api_module():
     fastapi_mod.FastAPI = _App
     fastapi_mod.HTTPException = _HTTPException
     fastapi_mod.Security = _security
+    fastapi_mod.Request = type("Request", (), {})
+    fastapi_mod.BackgroundTasks = type("BackgroundTasks", (), {"add_task": lambda *a, **kw: None})
+    fastapi_mod.Depends = lambda *a, **kw: None
+    fastapi_mod.Header = lambda *a, **kw: None
+    fastapi_mod.Query = lambda *a, **kw: None
+    fastapi_mod.File = lambda *a, **kw: None
+    fastapi_mod.Form = lambda *a, **kw: None
+    fastapi_mod.UploadFile = type("UploadFile", (), {"__init__": lambda *a, **kw: None})
     stubs["fastapi"] = fastapi_mod
 
     sec_mod = types.ModuleType("fastapi.security")
@@ -65,6 +83,21 @@ def _load_api_module():
 
     sec_mod.APIKeyHeader = _APIKeyHeader
     stubs["fastapi.security"] = sec_mod
+
+    responses_mod = types.ModuleType("fastapi.responses")
+    responses_mod.HTMLResponse = type("HTMLResponse", (), {"__init__": lambda *a, **kw: None})
+    stubs["fastapi.responses"] = responses_mod
+
+    staticfiles_mod = types.ModuleType("fastapi.staticfiles")
+    staticfiles_mod.StaticFiles = type("StaticFiles", (), {"__init__": lambda *a, **kw: None})
+    stubs["fastapi.staticfiles"] = staticfiles_mod
+
+    templating_mod = types.ModuleType("fastapi.templating")
+    templating_mod.Jinja2Templates = type("Jinja2Templates", (), {
+        "__init__": lambda *a, **kw: None,
+        "TemplateResponse": lambda *a, **kw: None,
+    })
+    stubs["fastapi.templating"] = templating_mod
 
     pyd_mod = types.ModuleType("pydantic")
 
@@ -78,6 +111,7 @@ def _load_api_module():
 
     pyd_mod.BaseModel = _BaseModel
     pyd_mod.Field = _field
+    pyd_mod.field_validator = lambda *a, **kw: (lambda fn: fn)
     stubs["pydantic"] = pyd_mod
 
     saved = {name: sys.modules.get(name) for name in stubs}

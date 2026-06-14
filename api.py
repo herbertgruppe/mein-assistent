@@ -45,11 +45,14 @@ from fastapi import (
     BackgroundTasks,
     Depends,
     FastAPI,
+    File,
+    Form,
     Header,
     HTTPException,
     Query,
     Request,
     Security,
+    UploadFile,
 )
 from fastapi.responses import HTMLResponse
 from fastapi.security import APIKeyHeader
@@ -1216,6 +1219,412 @@ def get_calendar_events(
         end=end_dt.isoformat(),
         count=len(events),
         events=events,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Lena Kalender-CRUD (HBE-788)
+# ---------------------------------------------------------------------------
+
+class LenaCalendarAttendeeInput(BaseModel):
+    email: str
+    name: str = ""
+    type: Literal["required", "optional", "resource"] = "required"
+
+
+class LenaCreateEventRequest(BaseModel):
+    subject: str
+    start: str
+    end: str
+    timezone: str = "Europe/Berlin"
+    location: str = ""
+    body_html: str = ""
+    attendees: List[LenaCalendarAttendeeInput] = []
+    categories: List[str] = []
+    is_online_meeting: bool = False
+
+
+class LenaCreateEventResponse(BaseModel):
+    event_id: str
+    web_link: str
+    ical_uid: str
+
+
+class LenaUpdateEventRequest(BaseModel):
+    start: Optional[str] = None
+    end: Optional[str] = None
+    timezone: Optional[str] = None
+    subject: Optional[str] = None
+    location: Optional[str] = None
+    body_html: Optional[str] = None
+    send_updates: bool = True
+
+
+class LenaUpdateEventResponse(BaseModel):
+    event_id: str
+    subject: str
+    start: str
+    end: str
+
+
+class LenaAttendeesRequest(BaseModel):
+    add: List[LenaCalendarAttendeeInput] = []
+    remove: List[str] = []
+
+
+class LenaAttendeesResponse(BaseModel):
+    event_id: str
+    attendees_count: int
+
+
+class LenaCalendarAttachmentResponse(BaseModel):
+    attachment_id: str
+    name: str
+    size: int
+
+
+class LenaFindSlotRequest(BaseModel):
+    attendees: List[str]
+    duration_minutes: int = 60
+    earliest: str
+    latest: str
+    timezone: str = "Europe/Berlin"
+    working_hours_only: bool = True
+
+
+class LenaSlot(BaseModel):
+    start: str
+    end: str
+    score: float = 0.0
+
+
+class LenaFindSlotResponse(BaseModel):
+    slots: List[LenaSlot]
+    meeting_time_suggestions_result: str = ""
+
+
+def _graph_headers(tool) -> dict:
+    return {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Content-Type": "application/json",
+    }
+
+
+def _graph_req(method: str, url: str, tool, **kwargs):
+    """Graph API call with one 401 → token-refresh retry."""
+    import requests as _rq
+    headers = _graph_headers(tool)
+    kwargs.setdefault("timeout", 30)
+    resp = getattr(_rq, method)(url, headers=headers, **kwargs)
+    if resp.status_code == 401 and tool._refresh_access_token():
+        headers = _graph_headers(tool)
+        resp = getattr(_rq, method)(url, headers=headers, **kwargs)
+    return resp
+
+
+@app.post("/api/lena/calendar/events", response_model=LenaCreateEventResponse)
+def lena_create_calendar_event(
+    req: LenaCreateEventRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Legt einen Outlook-Termin an (via Microsoft Graph).
+
+    Approval-Gate: Lena sendet vor dem Aufruf eine Telegram-Vorschau und wartet
+    auf Svens Freigabe (gemäß SKILL_MEETING_OPERATIONS.md).
+    """
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    graph_attendees = [
+        {"emailAddress": {"address": a.email, "name": a.name}, "type": a.type}
+        for a in req.attendees
+    ]
+
+    payload: dict = {
+        "subject": req.subject,
+        "start": {"dateTime": req.start, "timeZone": req.timezone},
+        "end": {"dateTime": req.end, "timeZone": req.timezone},
+        "attendees": graph_attendees,
+        "isOnlineMeeting": req.is_online_meeting,
+    }
+    if req.location:
+        payload["location"] = {"displayName": req.location}
+    if req.body_html:
+        payload["body"] = {"contentType": "HTML", "content": req.body_html}
+    if req.categories:
+        payload["categories"] = req.categories
+
+    resp = _graph_req("post", "https://graph.microsoft.com/v1.0/me/events", tool, json=payload)
+    if resp.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler {resp.status_code}: {resp.text[:300]}",
+        )
+
+    data = resp.json()
+    return LenaCreateEventResponse(
+        event_id=data.get("id", ""),
+        web_link=data.get("webLink", ""),
+        ical_uid=data.get("iCalUId", ""),
+    )
+
+
+@app.patch("/api/lena/calendar/events/{event_id}", response_model=LenaUpdateEventResponse)
+def lena_update_calendar_event(
+    event_id: str,
+    req: LenaUpdateEventRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Verschiebt oder aktualisiert einen Outlook-Termin. Nur übergebene Felder werden geändert.
+
+    `send_updates=true` benachrichtigt alle Teilnehmer per Mail.
+    """
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    tz = req.timezone or "Europe/Berlin"
+    payload: dict = {}
+    if req.start is not None:
+        payload["start"] = {"dateTime": req.start, "timeZone": tz}
+    if req.end is not None:
+        payload["end"] = {"dateTime": req.end, "timeZone": tz}
+    if req.subject is not None:
+        payload["subject"] = req.subject
+    if req.location is not None:
+        payload["location"] = {"displayName": req.location}
+    if req.body_html is not None:
+        payload["body"] = {"contentType": "HTML", "content": req.body_html}
+
+    if not payload:
+        raise HTTPException(status_code=400, detail="Keine Felder zum Aktualisieren angegeben.")
+
+    url = f"https://graph.microsoft.com/v1.0/me/events/{event_id}"
+    params = {"sendUpdates": "all" if req.send_updates else "none"}
+    resp = _graph_req("patch", url, tool, json=payload, params=params)
+
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler {resp.status_code}: {resp.text[:300]}",
+        )
+
+    data = resp.json()
+    return LenaUpdateEventResponse(
+        event_id=data.get("id", event_id),
+        subject=data.get("subject", ""),
+        start=(data.get("start") or {}).get("dateTime", ""),
+        end=(data.get("end") or {}).get("dateTime", ""),
+    )
+
+
+@app.delete("/api/lena/calendar/events/{event_id}", response_model=SimpleResult)
+def lena_delete_calendar_event(
+    event_id: str,
+    send_cancellations: bool = True,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Löscht einen Outlook-Termin. Graph sendet bei DELETE automatisch Absagen an Teilnehmer.
+
+    `send_cancellations=false` (query param) unterdrückt die Absagen.
+    """
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    if send_cancellations:
+        # /cancel sends cancellation notices AND removes the event — do not also DELETE.
+        cancel_url = f"https://graph.microsoft.com/v1.0/me/events/{event_id}/cancel"
+        cancel_resp = _graph_req("post", cancel_url, tool, json={})
+        if cancel_resp.status_code in (200, 202, 204):
+            return SimpleResult(success=True, message=f"Termin {event_id[:16]}… abgesagt und gelöscht.")
+        # Fall back to plain DELETE if cancel action fails (e.g. not organizer)
+
+    url = f"https://graph.microsoft.com/v1.0/me/events/{event_id}"
+    resp = _graph_req("delete", url, tool)
+
+    if resp.status_code not in (200, 204):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler {resp.status_code}: {resp.text[:300]}",
+        )
+
+    return SimpleResult(success=True, message=f"Termin {event_id[:16]}… gelöscht.")
+
+
+@app.post(
+    "/api/lena/calendar/events/{event_id}/attendees",
+    response_model=LenaAttendeesResponse,
+)
+def lena_manage_attendees(
+    event_id: str,
+    req: LenaAttendeesRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Fügt Teilnehmer zu einem Outlook-Termin hinzu oder entfernt sie.
+
+    Liest den aktuellen Termin, mergt die Änderungen und sendet einen PATCH zurück.
+    """
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    url = f"https://graph.microsoft.com/v1.0/me/events/{event_id}"
+
+    get_resp = _graph_req("get", url, tool, params={"$select": "attendees,subject"})
+    if get_resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Konnte Termin nicht lesen: HTTP {get_resp.status_code} — {get_resp.text[:200]}",
+        )
+
+    current: list = get_resp.json().get("attendees", [])
+    remove_set = {e.lower() for e in req.remove}
+    merged = [
+        a for a in current
+        if (a.get("emailAddress") or {}).get("address", "").lower() not in remove_set
+    ]
+    existing_emails = {
+        (a.get("emailAddress") or {}).get("address", "").lower()
+        for a in merged
+    }
+    for a in req.add:
+        if a.email.lower() not in existing_emails:
+            merged.append({
+                "emailAddress": {"address": a.email, "name": a.name},
+                "type": a.type,
+            })
+            existing_emails.add(a.email.lower())
+
+    patch_resp = _graph_req("patch", url, tool, json={"attendees": merged})
+    if patch_resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Teilnehmer-Update fehlgeschlagen: HTTP {patch_resp.status_code} — {patch_resp.text[:200]}",
+        )
+
+    return LenaAttendeesResponse(
+        event_id=event_id,
+        attendees_count=len(patch_resp.json().get("attendees", [])),
+    )
+
+
+@app.post(
+    "/api/lena/calendar/events/{event_id}/attachments",
+    response_model=LenaCalendarAttachmentResponse,
+)
+async def lena_attach_to_event(
+    event_id: str,
+    file: UploadFile = File(...),
+    filename: Optional[str] = Form(None),
+    content_type: Optional[str] = Form(None),
+    _key: str = Security(verify_api_key),
+):
+    """
+    Hängt eine Datei als Anhang an einen Outlook-Termin (direkte Graph-Upload, max 3 MB).
+
+    Multipart-Form-Felder: `file` (binär, Pflicht), `filename` (optional), `content_type` (optional).
+    """
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    file_bytes = await file.read()
+    if len(file_bytes) > 3 * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail="Datei zu groß (max 3 MB für direkte Anhänge). Für größere Dateien UploadSession nutzen.",
+        )
+
+    used_filename = filename or file.filename or "attachment"
+    used_ct = content_type or file.content_type or "application/octet-stream"
+    file_b64 = base64.b64encode(file_bytes).decode("utf-8")
+
+    payload = {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "name": used_filename,
+        "contentType": used_ct,
+        "contentBytes": file_b64,
+    }
+
+    url = f"https://graph.microsoft.com/v1.0/me/events/{event_id}/attachments"
+    resp = _graph_req("post", url, tool, json=payload)
+    if resp.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler {resp.status_code}: {resp.text[:300]}",
+        )
+
+    data = resp.json()
+    return LenaCalendarAttachmentResponse(
+        attachment_id=data.get("id", ""),
+        name=data.get("name", used_filename),
+        size=data.get("size", len(file_bytes)),
+    )
+
+
+@app.post("/api/lena/calendar/find-free-slot", response_model=LenaFindSlotResponse)
+def lena_find_free_slot(
+    req: LenaFindSlotRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Sucht freie Zeitslots für mehrere Personen via Graph `findMeetingTimes`.
+
+    Gibt bis zu 3 Vorschläge zurück, sortiert nach Confidence-Score (höchster zuerst).
+    """
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    attendees_payload = [
+        {"type": "required", "emailAddress": {"address": email}}
+        for email in req.attendees
+    ]
+
+    payload = {
+        "attendees": attendees_payload,
+        "timeConstraint": {
+            "activityDomain": "work" if req.working_hours_only else "unrestricted",
+            "timeslots": [
+                {
+                    "start": {"dateTime": req.earliest, "timeZone": req.timezone},
+                    "end": {"dateTime": req.latest, "timeZone": req.timezone},
+                }
+            ],
+        },
+        "meetingDuration": f"PT{req.duration_minutes}M",
+        "returnSuggestionReasons": True,
+        "minimumAttendeePercentage": 100,
+        "maxCandidates": 10,
+    }
+
+    resp = _graph_req("post", "https://graph.microsoft.com/v1.0/me/findMeetingTimes", tool, json=payload)
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph findMeetingTimes Fehler {resp.status_code}: {resp.text[:300]}",
+        )
+
+    data = resp.json()
+    suggestions = data.get("meetingTimeSuggestions", [])
+    slots = []
+    for s in suggestions[:3]:
+        slot = s.get("meetingTimeSlot") or {}
+        slots.append(LenaSlot(
+            start=(slot.get("start") or {}).get("dateTime", ""),
+            end=(slot.get("end") or {}).get("dateTime", ""),
+            score=float(s.get("confidence", 0.0)),
+        ))
+
+    return LenaFindSlotResponse(
+        slots=slots,
+        meeting_time_suggestions_result=data.get("emptySuggestionsReason", ""),
     )
 
 
