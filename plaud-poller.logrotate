@@ -1,0 +1,12 @@
+/var/log/plaud-poller.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root root
+    postrotate
+        systemctl kill -s HUP plaud-poller.service 2>/dev/null || true
+    endscript
+}
