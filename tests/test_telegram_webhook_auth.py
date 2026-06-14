@@ -200,7 +200,7 @@ class TelegramInReviewResetTest(unittest.TestCase):
              mock.patch.object(self.api, "_PC_LENA_AGENT_ID", "lena-agent-id"), \
              mock.patch.object(self.api, "_telegram_db", return_value=mock_db), \
              mock.patch.object(self.api, "_pc_get_issue_info", mock_get_info), \
-             mock.patch.object(self.api, "_pc_set_issue_status", mock_set_status), \
+             mock.patch.object(self.api, "_pc_patch_issue_status", mock_set_status), \
              mock.patch.object(self.api, "_pc_add_comment_to_issue", mock_add_comment):
             result = asyncio.run(self.api.telegram_lena_webhook(self._make_request()))
 
@@ -219,7 +219,7 @@ class TelegramInReviewResetTest(unittest.TestCase):
              mock.patch.object(self.api, "_PC_LENA_AGENT_ID", "lena-agent-id"), \
              mock.patch.object(self.api, "_telegram_db", return_value=mock_db), \
              mock.patch.object(self.api, "_pc_get_issue_info", mock_get_info), \
-             mock.patch.object(self.api, "_pc_set_issue_status", mock_set_status), \
+             mock.patch.object(self.api, "_pc_patch_issue_status", mock_set_status), \
              mock.patch.object(self.api, "_pc_add_comment_to_issue", mock_add_comment):
             result = asyncio.run(self.api.telegram_lena_webhook(self._make_request()))
 
