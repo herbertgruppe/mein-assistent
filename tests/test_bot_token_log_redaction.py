@@ -59,7 +59,7 @@ class TestTgSendMessageNoTokenLeak:
              caplog.at_level(logging.WARNING):
             result = api._tg_send_message("123", "hello")
 
-        assert result is False
+        assert not result
         for record in caplog.records:
             assert FAKE_TOKEN not in record.getMessage(), (
                 f"BOT_TOKEN leaked in log record: {record.getMessage()!r}"
@@ -72,17 +72,17 @@ class TestTgSendMessageNoTokenLeak:
              caplog.at_level(logging.WARNING):
             result = api._tg_send_message("123", "hello")
 
-        assert result is False
+        assert not result
         for record in caplog.records:
             assert FAKE_TOKEN not in record.getMessage()
 
     def test_returns_false_on_network_error(self, api):
-        """Sanity: function must still return False (not raise) on network error."""
+        """Sanity: function must still return falsy (not raise) on network error."""
         import requests.exceptions as req_exc
 
         with mock.patch.object(api, "_TG_BOT_TOKEN", FAKE_TOKEN), \
              mock.patch("requests.post", side_effect=req_exc.Timeout("timed out")):
-            assert api._tg_send_message("123", "hello") is False
+            assert not api._tg_send_message("123", "hello")
 
 
 class TestPcCreateIssueNoTokenLeak:
