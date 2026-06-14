@@ -2567,7 +2567,7 @@ def _vault_run_git(args: list, extra_env: Optional[dict] = None) -> subprocess.C
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
-        ["git"] + args,
+        ["git", "-c", f"safe.directory={_VAULT_MIRROR_PATH}"] + args,
         cwd=str(_VAULT_MIRROR_PATH),
         capture_output=True,
         text=True,
@@ -2606,8 +2606,8 @@ def _vault_init_mirror() -> None:
     if result.returncode != 0:
         logger.error(f"[vault] Clone fehlgeschlagen: {result.stderr[:200]}")
         return
-    subprocess.run(["git", "-C", str(_VAULT_MIRROR_PATH), "config", "user.name", "mein-assistent-bot"], check=False)
-    subprocess.run(["git", "-C", str(_VAULT_MIRROR_PATH), "config", "user.email", "bot@herbertgruppe.com"], check=False)
+    subprocess.run(["git", "-C", str(_VAULT_MIRROR_PATH), "-c", f"safe.directory={_VAULT_MIRROR_PATH}", "config", "user.name", "mein-assistent-bot"], check=False)
+    subprocess.run(["git", "-C", str(_VAULT_MIRROR_PATH), "-c", f"safe.directory={_VAULT_MIRROR_PATH}", "config", "user.email", "bot@herbertgruppe.com"], check=False)
     inbox = _VAULT_MIRROR_PATH / "09 Lena Inbox"
     if not inbox.exists():
         inbox.mkdir(parents=True, exist_ok=True)
