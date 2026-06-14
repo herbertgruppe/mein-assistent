@@ -148,5 +148,85 @@ class TelegramWebhookHandlerTest(unittest.TestCase):
         mock_create_issue.assert_called_once()
 
 
+class TelegramInReviewResetTest(unittest.TestCase):
+    """Regression test for HBE-794: user message on in_review issue resets to in_progress."""
+
+    @classmethod
+    def setUpClass(cls):
+        env = {
+            "TELEGRAM_BOT_TOKEN": "",
+            "TELEGRAM_WEBHOOK_SECRET": "",
+            "API_SECRET_KEY": "test-key",
+        }
+        cls.api = _load_api_module("api_in_review_reset_test", env)
+
+    def _make_request(self):
+        class _Req:
+            headers = {"X-Telegram-Bot-Api-Secret-Token": "correct-secret"}
+
+            async def json(self):
+                return {
+                    "update_id": 2,
+                    "message": {
+                        "message_id": 99,
+                        "chat": {"id": 77777},
+                        "text": "Werr@obw.de",
+                        "from": {"id": 1, "is_bot": False, "first_name": "Sven"},
+                        "date": 1700001000,
+                    },
+                }
+
+        return _Req()
+
+    def _make_db(self, issue_id):
+        """Return a mock _telegram_db that has one pending issue."""
+        row = mock.MagicMock()
+        row.__getitem__ = mock.MagicMock(side_effect=lambda k: issue_id if k == "issue_id" else None)
+
+        db = mock.MagicMock()
+        db.__enter__ = mock.MagicMock(return_value=db)
+        db.__exit__ = mock.MagicMock(return_value=False)
+        db.execute = mock.MagicMock(return_value=mock.MagicMock(fetchall=mock.MagicMock(return_value=[row])))
+        return db
+
+    def test_in_review_issue_gets_reset_to_in_progress(self):
+        issue_id = "hbe-786-test"
+        mock_db = self._make_db(issue_id)
+        mock_get_info = mock.MagicMock(return_value=("in_review", "lena-agent-id"))
+        mock_set_status = mock.MagicMock(return_value=True)
+        mock_add_comment = mock.MagicMock(return_value=True)
+
+        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "correct-secret"), \
+             mock.patch.object(self.api, "_PC_LENA_AGENT_ID", "lena-agent-id"), \
+             mock.patch.object(self.api, "_telegram_db", return_value=mock_db), \
+             mock.patch.object(self.api, "_pc_get_issue_info", mock_get_info), \
+             mock.patch.object(self.api, "_pc_set_issue_status", mock_set_status), \
+             mock.patch.object(self.api, "_pc_add_comment_to_issue", mock_add_comment):
+            result = asyncio.run(self.api.telegram_lena_webhook(self._make_request()))
+
+        self.assertEqual(result, {"ok": True})
+        mock_set_status.assert_called_once_with(issue_id, "in_progress")
+        mock_add_comment.assert_called_once()
+
+    def test_non_in_review_issue_is_not_reset(self):
+        issue_id = "hbe-some-other"
+        mock_db = self._make_db(issue_id)
+        mock_get_info = mock.MagicMock(return_value=("in_progress", "lena-agent-id"))
+        mock_set_status = mock.MagicMock(return_value=True)
+        mock_add_comment = mock.MagicMock(return_value=True)
+
+        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "correct-secret"), \
+             mock.patch.object(self.api, "_PC_LENA_AGENT_ID", "lena-agent-id"), \
+             mock.patch.object(self.api, "_telegram_db", return_value=mock_db), \
+             mock.patch.object(self.api, "_pc_get_issue_info", mock_get_info), \
+             mock.patch.object(self.api, "_pc_set_issue_status", mock_set_status), \
+             mock.patch.object(self.api, "_pc_add_comment_to_issue", mock_add_comment):
+            result = asyncio.run(self.api.telegram_lena_webhook(self._make_request()))
+
+        self.assertEqual(result, {"ok": True})
+        mock_set_status.assert_not_called()
+        mock_add_comment.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
