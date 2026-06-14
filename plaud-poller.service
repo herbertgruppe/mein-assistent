@@ -5,11 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=plaud
+Group=plaud
 WorkingDirectory=/opt/mein-assistent
 EnvironmentFile=/opt/mein-assistent/.env
-Environment="PLAUD_DB_PATH=/opt/plaud-poller/state.db"
-Environment="PLAUD_LOG_FILE=/var/log/plaud-poller.log"
+Environment="PLAUD_DB_PATH=/var/lib/plaud/state.db"
+Environment="PLAUD_LOG_FILE=/var/log/plaud/plaud-poller.log"
 ExecStart=/opt/mein-assistent/venv/bin/python3 /opt/mein-assistent/plaud_poller.py
 Restart=always
 RestartSec=15
@@ -17,9 +18,17 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=plaud-poller
 
-# Sicherheitseinstellungen
-PrivateTmp=true
+# Verzeichnisse — systemd erstellt sie mit korrekten Rechten (plaud:plaud)
+StateDirectory=plaud
+LogsDirectory=plaud
+
+# systemd-Sandboxing (Least Privilege — HBE-854)
 NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictSUIDSGID=true
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target
