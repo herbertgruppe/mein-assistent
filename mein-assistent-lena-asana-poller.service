@@ -1,0 +1,25 @@
+[Unit]
+Description=Lena Asana Poller — pollt Asana auf @lena-Mentions und neue Assignments
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/mein-assistent
+EnvironmentFile=/opt/mein-assistent/.env
+Environment="LENA_ASANA_LOG_FILE=/var/log/lena-asana-poller.log"
+Environment="LENA_ASANA_STATE_FILE=/opt/mein-assistent/data/lena-asana-poller.state"
+ExecStart=/opt/mein-assistent/venv/bin/python3 /opt/mein-assistent/lena_asana_poller.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lena-asana-poller
+
+# Sicherheitseinstellungen
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -2573,6 +2573,7 @@ async def telegram_lena_webhook(req: Request):
     # An entry is foreign if its assignee is not Lena (guards against stale DB rows from
     # older code paths landing Sven's messages on Mara-owned issues, causing silent 403s).
     active_issue_id = None
+    active_issue_status = None
     with _telegram_db() as db:
         rows = db.execute(
             "SELECT issue_id FROM pending_issues WHERE chat_id = ?", (chat_id,)
@@ -2590,8 +2591,18 @@ async def telegram_lena_webhook(req: Request):
                     )
             else:
                 active_issue_id = row["issue_id"]
+                active_issue_status = status
 
     if active_issue_id:
+        # Reset in_review → in_progress so the agent run is triggered on user messages.
+        # in_review blocks agent wake-up on new comments; a Telegram reply from the user
+        # must always restart the agent to avoid a silent deadlock (HBE-794).
+        if active_issue_status == "in_review":
+            _pc_patch_issue_status(active_issue_id, "in_progress")
+            logger.info(
+                "[telegram] reset issue %s from in_review to in_progress on user message",
+                active_issue_id,
+            )
         _pc_add_comment_to_issue(active_issue_id, username, msg.text)
     else:
         issue_id = _pc_create_issue(
