@@ -350,6 +350,100 @@ pip install -r requirements.txt
 2. API-Key erstellen unter "API Keys"
 3. Key in `.env` als `OPENAI_API_KEY` eintragen
 
+## Lena IMAP-Poller
+
+Hintergrund-Service, der Lenas IMAP-Postfach (`lena@herbertgruppe.com`) periodisch pollt und bei neuen Mails automatisch Paperclip-Issues für Lena erstellt.
+
+### Setup
+
+**1. Env-Vars in `.env` ergänzen:**
+
+```bash
+# IMAP-Zugang (SMTP_USER + SMTP_PASSWORD sind bereits vorhanden)
+SMTP_USER=herbertgruppe-com-0003     # IMAP-Benutzername
+SMTP_PASSWORD=...                     # IMAP-Passwort
+
+# Paperclip-Integration
+PAPERCLIP_API_KEY_MA=...             # Paperclip App-Key (nicht der Agent-Key)
+PAPERCLIP_COMPANY_ID_MA=9df4976b-9ac8-4e8f-a156-c06c7fa40cdc
+
+# Telegram-Alert bei IMAP-Fehlern (optional, aber empfohlen)
+TELEGRAM_ADMIN_CHAT_ID=<svens-chat-id>   # Sven kennt seine Chat-ID
+
+# Optionale Overrides (Defaults sind production-ready)
+# LENA_IMAP_POLL_INTERVAL_SEC=300    # Polling alle 5 Min
+# LENA_IMAP_HOST=imaps.udag.de
+# LENA_IMAP_PORT=993
+# LENA_IMAP_LOG_FILE=/app/data/lena-imap-poller.log  # Docker-Default
+```
+
+**2. Service starten (docker-compose):**
+
+```bash
+docker compose up -d --build lena-imap-poller
+```
+
+### Konfiguration
+
+| Env-Var | Default | Bedeutung |
+|---|---|---|
+| `LENA_IMAP_POLL_INTERVAL_SEC` | `300` | Polling-Intervall in Sekunden |
+| `LENA_IMAP_HOST` | `imaps.udag.de` | IMAP-Server |
+| `LENA_IMAP_PORT` | `993` | IMAP-Port (SSL) |
+| `LENA_IMAP_LOG_FILE` | `/var/log/lena-imap-poller.log` | Log-Datei (Docker: `/app/data/...`) |
+| `LENA_IMAP_DB_PATH` | `data/lena_processed_mails.db` | SQLite-Idempotenz-DB |
+| `LENA_POLLER_MAILBOXES` | _(leer)_ | Multi-Mailbox: `user:agent-id,user2:agent-id2` |
+| `LENA_SVEN_SENDERS` | `s.herbert@herbert.de,...` | Absender für Transkript-Erkennung |
+| `TELEGRAM_ADMIN_CHAT_ID` | _(leer)_ | Sven's Chat-ID für Fehler-Alerts |
+
+**Multi-Mailbox (z.B. Florian hinzufügen):**
+
+```bash
+LENA_POLLER_MAILBOXES=herbertgruppe-com-0003:7517114f-e731-4df5-96cf-a044719e9318,herbertgruppe-com-0002:571688f4-d3e1-4efe-8170-f515da83f8e4
+# Passwort je Mailbox: IMAP_PASSWORD_{USER} (uppercase, - zu _)
+IMAP_PASSWORD_HERBERTGRUPPE_COM_0002=...
+```
+
+### Restart / Monitoring
+
+```bash
+# Status
+docker compose ps lena-imap-poller
+
+# Logs (letzten 50 Zeilen)
+docker compose logs --tail=50 lena-imap-poller
+
+# Log-Datei direkt (persistiert im data-Volume)
+docker compose exec lena-imap-poller tail -f /app/data/lena-imap-poller.log
+
+# Neustart
+docker compose restart lena-imap-poller
+
+# Nach Code-Änderung neu bauen
+docker compose up -d --build lena-imap-poller
+```
+
+**Systemd-Alternative** (falls kein Docker gewünscht):
+
+```bash
+# Service-Datei installieren
+cp mein-assistent-lena-imap-poller.service /etc/systemd/system/
+cp scripts/logrotate-lena-imap-poller /etc/logrotate.d/lena-imap-poller
+systemctl daemon-reload
+systemctl enable --now mein-assistent-lena-imap-poller
+systemctl status mein-assistent-lena-imap-poller
+journalctl -u mein-assistent-lena-imap-poller -f
+```
+
+### Logik
+
+1. Alle `LENA_IMAP_POLL_INTERVAL_SEC` Sekunden: `IMAP SEARCH UNSEEN` auf `INBOX`
+2. Für jede unbekannte Mail (Idempotenz via SQLite `lena_processed_mails`): Paperclip-Issue für Lena erstellen
+3. Mails werden **nicht** als gelesen markiert (`BODY.PEEK[]`)
+4. **Transkript-Erkennung:** Mails von Sven mit Subject-Keyword `transkript`/`plaud` oder `.txt`/`.docx`-Anhang → `📝`-Prefix + `priority: high`
+5. **Spam-Filter:** `noreply`/`no-reply`-Absender → `priority: low`
+6. **Fehlerbehandlung:** Exponential Backoff (max. 5 Min), nach 3 aufeinanderfolgenden Fehlern → Telegram-Alert
+
 ## Lizenz
 
 MIT
