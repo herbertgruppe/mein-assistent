@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <title>Link ungültig – Herbert Gruppe</title>
+    <link rel="stylesheet" href="/static/review.css">
+</head>
+<body>
+    <header class="hg-header">
+        <h1>Herbert Gruppe – Protokoll-Review</h1>
+    </header>
+
+    <main class="hg-main hg-center">
+        <div class="hg-card">
+            <div class="hg-card-icon">🔒</div>
+            {% if reason == 'expired' %}
+            <h2>Link abgelaufen</h2>
+            <p>
+                Dieser Review-Link ist abgelaufen (Gültigkeit: 30 Tage).
+                Bitte fordere einen neuen Link an oder wende dich an Sven Herbert.
+            </p>
+            {% else %}
+            <h2>Link ungültig</h2>
+            <p>
+                Dieser Review-Link ist unbekannt. Bitte prüfe die URL
+                oder fordere einen neuen Link an.
+            </p>
+            {% endif %}
+        </div>
+    </main>
+</body>
+</html>

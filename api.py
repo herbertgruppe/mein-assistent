@@ -32,17 +32,32 @@ import logging
 import os
 import re
 import sqlite3
+import subprocess
 import tempfile
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Literal, Optional, Tuple
 
 import requests as _http
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, Security
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Security,
+)
+from fastapi.responses import HTMLResponse
 from fastapi.security import APIKeyHeader
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
+
+from database.protocols_db import ProtocolsDB
 
 load_dotenv()
 
@@ -78,9 +93,80 @@ def verify_api_key(key: str = Security(_API_KEY_HEADER)) -> str:
             status_code=500,
             detail="API_SECRET_KEY nicht konfiguriert (in .env setzen)",
         )
-    if key != _API_SECRET_KEY:
+    if not hmac.compare_digest(key.encode(), _API_SECRET_KEY.encode()):
         raise HTTPException(status_code=403, detail="Ungültiger API Key")
     return key
+
+
+# ---------------------------------------------------------------------------
+# Protokoll-Review: DB, Templates, Static, Dual-Auth
+# ---------------------------------------------------------------------------
+_BASE_DIR = Path(__file__).resolve().parent
+
+# Öffentliche Basis-URL für Reviewer-Links (hinter nginx/Authentik)
+_PUBLIC_BASE_URL = os.getenv(
+    "PUBLIC_BASE_URL", "https://mein-assistent.herbertgruppe.com"
+).rstrip("/")
+
+_TEMPLATES_DIR = _BASE_DIR / "templates"
+_STATIC_DIR = _BASE_DIR / "static"
+_TEMPLATES_DIR.mkdir(exist_ok=True)
+_STATIC_DIR.mkdir(exist_ok=True)
+
+templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+# protocols.db beim API-Start initialisieren (führt Migration automatisch aus)
+_protocols_db = ProtocolsDB(db_path=str(_BASE_DIR / "data" / "protocols.db"))
+
+# Trusted Proxies: nur von diesen IPs werden Authentik-Header (X-Authentik-Username,
+# X-Forwarded-Email) akzeptiert. nginx läuft auf 127.0.0.1 — daher Default.
+# Mehrere IPs kommasepariert: TRUSTED_PROXIES=127.0.0.1,10.0.0.1
+_TRUSTED_PROXIES: set = set(
+    ip.strip()
+    for ip in os.getenv("TRUSTED_PROXIES", "127.0.0.1").split(",")
+    if ip.strip()
+)
+if not _TRUSTED_PROXIES:
+    logger.warning(
+        "[security] TRUSTED_PROXIES ist leer — Authentik-Header werden nie akzeptiert. "
+        "Setze TRUSTED_PROXIES=127.0.0.1 in .env."
+    )
+
+
+def get_authenticated_user(
+    request: Request,
+    x_authentik_username: Optional[str] = Header(None),
+    x_forwarded_email: Optional[str] = Header(None),
+    api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    token: Optional[str] = Query(None),
+) -> str:
+    """
+    Dual-Auth für Browser-Endpoints (/review/, /api/asana/, /api/calendar/events).
+
+    Akzeptiert (in dieser Reihenfolge):
+      1. Authentik-Session — nginx injiziert X-Authentik-Username / X-Forwarded-Email.
+         Wird nur akzeptiert wenn die Anfrage von einer vertrauenswürdigen Proxy-IP
+         kommt (TRUSTED_PROXIES env, Default 127.0.0.1). Verhindert Header-Spoofing
+         bei direktem FastAPI-Zugriff.
+      2. X-API-Key (für Skill-/Skript-Zugriffe, timing-safe via hmac.compare_digest)
+      3. Gültiger, nicht abgelaufener Reviewer-Token als ?token= Query-Param
+         (review.js sendet den Token bei allen Dropdown-Calls mit)
+    """
+    client_ip = request.client.host if request.client else ""
+    from_trusted_proxy = client_ip in _TRUSTED_PROXIES
+
+    if from_trusted_proxy and x_authentik_username:
+        return x_authentik_username
+    if from_trusted_proxy and x_forwarded_email:
+        return x_forwarded_email
+    if api_key and _API_SECRET_KEY and hmac.compare_digest(api_key, _API_SECRET_KEY):
+        return "api-client"
+    if token:
+        protocol = _protocols_db.get_by_token(token)
+        if protocol and not ProtocolsDB.is_expired(protocol):
+            return "reviewer"
+    raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +230,53 @@ def _tg_send_message(chat_id: str, text: str) -> bool:
     except Exception:
         logger.warning("[telegram] sendMessage failed: unexpected error", exc_info=False)
         return False
+
+
+def _pc_get_issue_status(issue_id: str) -> Optional[str]:
+    """Return the Paperclip issue status string, or None on error / not-found."""
+    status, _ = _pc_get_issue_info(issue_id)
+    return status
+
+
+def _pc_get_issue_info(issue_id: str) -> tuple:
+    """Return (status, assigneeAgentId) for a Paperclip issue, or (None, None) on error."""
+    if not (_PC_API_URL and _PC_API_KEY):
+        return None, None
+    try:
+        resp = _http.get(
+            f"{_PC_API_URL}/api/issues/{issue_id}",
+            headers={"Authorization": f"Bearer {_PC_API_KEY}"},
+            timeout=15,
+        )
+    except Exception:
+        return None, None
+    if resp.status_code == 404:
+        return None, None
+    if not resp.ok:
+        return None, None
+    data = resp.json()
+    return data.get("status"), data.get("assigneeAgentId")
+
+
+def _pc_add_comment_to_issue(issue_id: str, username: str, text: str) -> bool:
+    """Add a Telegram message as a comment on an existing Paperclip issue. Returns True on success."""
+    if not (_PC_API_URL and _PC_API_KEY):
+        return False
+    body = f"Telegram-Nachricht von @{username}\n\n{text}"
+    try:
+        resp = _http.post(
+            f"{_PC_API_URL}/api/issues/{issue_id}/comments",
+            json={"body": body},
+            headers={"Authorization": f"Bearer {_PC_API_KEY}"},
+            timeout=15,
+        )
+    except Exception as exc:
+        logger.warning("[telegram] comment post error for %s: %s", issue_id, type(exc).__name__)
+        return False
+    if resp.ok:
+        return True
+    logger.warning("[telegram] comment post failed for %s: %s %s", issue_id, resp.status_code, resp.text[:200])
+    return False
 
 
 def _pc_create_issue(chat_id: str, message_id: int, username: str, text: str) -> Optional[str]:
@@ -250,10 +383,31 @@ def _start_tg_scheduler() -> None:
         logger.info("[telegram] reply-poll scheduler started (60 s interval)")
 
 
+@app.on_event("startup")  # type: ignore[attr-defined]
+def _start_vault_sync() -> None:
+    """Initialisiert den Vault-Mirror und startet den 2-Min-Pull-Job."""
+    import threading
+    # Clone in background thread so API starts without blocking
+    threading.Thread(target=_vault_init_mirror, daemon=True, name="vault-init").start()
+
+    if _VAULT_BOT_TOKEN:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        vault_sched = BackgroundScheduler(daemon=True)
+        vault_sched.add_job(_vault_pull_from_origin, "interval", seconds=120, id="vault_pull")
+        vault_sched.start()
+        logger.info("[vault] pull-scheduler gestartet (120 s interval)")
+
+
 @app.on_event("shutdown")  # type: ignore[attr-defined]
 def _stop_tg_scheduler() -> None:
     if _tg_scheduler and _tg_scheduler.running:
         _tg_scheduler.shutdown(wait=False)
+
+
+@app.on_event("shutdown")  # type: ignore[attr-defined]
+def _vault_cleanup_askpass() -> None:
+    import shutil
+    shutil.rmtree(_VAULT_ASKPASS_DIR, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -857,10 +1011,13 @@ def get_calendar_events(
     start: Optional[str] = None,
     end: Optional[str] = None,
     include_all_day: bool = False,
-    _key: str = Security(verify_api_key),
+    _user: str = Depends(get_authenticated_user),
 ):
     """
     Liefert Outlook-Kalender-Termine für ein Datum oder einen Zeitraum.
+
+    Auth: Authentik-Session ODER X-API-Key ODER gültiger Reviewer-Token
+    (Dual-Auth für den Web-Review-Editor).
 
     Query-Parameter (alternativ):
       - date=YYYY-MM-DD             → Termine an diesem Tag (00:00–24:00 lokal/UTC)
@@ -1167,6 +1324,559 @@ def process_reviewed_protocol(
         outlook_subject_prefix=outlook_subject,
         errors=errors,
         message="OK" if overall_success else f"{len(errors)} Fehler aufgetreten",
+    )
+
+
+# ===========================================================================
+# Protokoll-Review-Workflow (Web-Editor)
+# ===========================================================================
+# Mara (Paperclip-AI-Agent) legt Drafts via POST /api/protocols/draft ab.
+# Reviewer öffnen /review/{token}, wählen Outlook-Termin + (optional) Asana-
+# Board/-Abschnitt, korrigieren das Markdown und geben frei. Die Finalisierung
+# (PDF → Outlook; optional Asana-Protokoll-Task inkl. Subtasks) läuft als
+# FastAPI-BackgroundTask.
+#
+# --- Nginx-Konfiguration (im Repo portal-herbertgruppe einpflegen, NICHT hier):
+#
+#   # NEU: Review-Editor und API-Endpoints über Authentik zugänglich
+#   location /review/ {
+#       proxy_pass http://127.0.0.1:8502;
+#       proxy_set_header Host $host;
+#       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+#       proxy_set_header X-Forwarded-Proto $scheme;
+#       # Authentik-Auth AKTIV (Standard) — Reviewer muss Herbert-SSO-Login haben
+#   }
+#
+#   location /api/asana/ {
+#       proxy_pass http://127.0.0.1:8502;
+#       proxy_set_header Host $host;
+#       # Auth: Authentik-Session ODER X-API-Key (dual-auth in api.py)
+#   }
+#
+#   location /static/ {
+#       proxy_pass http://127.0.0.1:8502;
+#   }
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Models — Protokoll-Review
+# ---------------------------------------------------------------------------
+class ProtocolDraftRequest(BaseModel):
+    markdown: str = Field(..., description="Protokoll-Markdown von Mara")
+    meeting_name: str
+    meeting_datetime: str = Field(..., description="ISO-8601, Hint für Calendar-Picker")
+    source: str = Field(
+        ...,
+        description="'plaud-poller','email','manual','mara-generated','audio-transcribed'",
+    )
+    teilnehmer: List[str] = []
+    reviewer_emails: List[str] = []
+    ablageort: Optional[str] = None
+    recording_id: Optional[str] = None
+    event_id: Optional[str] = None
+    asana_board_gid: Optional[str] = None
+    asana_section_gid: Optional[str] = None
+    audio_ref: Optional[str] = None
+
+
+class ProtocolDraftResponse(BaseModel):
+    draft_id: str
+    reviewer_url: str
+    expires_at: str
+
+
+class ProtocolPatchRequest(BaseModel):
+    markdown: str
+
+
+class ProtocolApproveRequest(BaseModel):
+    event_id: str = Field(..., description="Outlook-Event-ID (Pflicht)")
+    create_asana_task: bool = Field(
+        True, description="Checkbox: Asana-Protokoll-Task + Subtasks anlegen"
+    )
+    asana_board_gid: Optional[str] = None
+    asana_section_gid: Optional[str] = None
+
+
+class ProtocolRejectRequest(BaseModel):
+    reason: str
+
+
+# ---------------------------------------------------------------------------
+# Asana-Hilfen: Agent-Singleton + 15-Minuten-Cache für Dropdown-Daten
+# ---------------------------------------------------------------------------
+_ASANA_CACHE_TTL_SECONDS = 15 * 60
+_asana_cache: dict = {}
+_asana_agent = None
+
+
+def _get_asana_agent():
+    """Lazy AsanaAgent-Singleton (Init macht einen Workspace-API-Call)."""
+    global _asana_agent
+    if _asana_agent is None:
+        from agents.asana_agent import AsanaAgent
+
+        _asana_agent = AsanaAgent()
+    return _asana_agent
+
+
+def _asana_cached(cache_key: str, loader):
+    """15-Minuten-TTL-Cache für Asana-Dropdown-Daten (Rate-Limit schonen)."""
+    import time
+
+    now = time.time()
+    hit = _asana_cache.get(cache_key)
+    if hit and now - hit[0] < _ASANA_CACHE_TTL_SECONDS:
+        return hit[1]
+    value = loader()
+    _asana_cache[cache_key] = (now, value)
+    return value
+
+
+def _get_protocol_llm():
+    """LLM für die Task-Extraktion (gleiches Muster wie agents/task_agent.py)."""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from langchain_anthropic import ChatAnthropic
+
+        return ChatAnthropic(
+            api_key=api_key,
+            model=os.getenv("TASK_MODEL", "claude-3-5-sonnet-latest"),
+            temperature=0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[api] LLM-Init für Task-Extraktion fehlgeschlagen: {exc}")
+        return None
+
+
+def _parse_due_on(value) -> Optional[str]:
+    """Normalisiert Fälligkeitsdaten aus der LLM-Extraktion zu YYYY-MM-DD."""
+    from datetime import datetime as _dt
+
+    if not value or value == "[?]":
+        return None
+    try:
+        if isinstance(value, str) and "." in value:
+            return _dt.strptime(value, "%d.%m.%Y").strftime("%Y-%m-%d")
+        if isinstance(value, str) and "-" in value:
+            return value
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Hintergrund-Task: Finalisierung nach Freigabe
+# ---------------------------------------------------------------------------
+def _create_asana_protocol_task(protocol: dict) -> tuple:
+    """
+    Legt den Asana-Protokoll-Task an (Muster aus pages/meeting_manager.py):
+      1. Task „📄 Protokoll {Datum} - {Meeting}" in Board/Section, Notes = Markdown
+      2. PDF generieren und an den Task anhängen (Fehler nicht fatal)
+      3. Aufgaben per LLM extrahieren und als Subtasks anlegen (Fehler nicht fatal)
+
+    Returns:
+        (task_gid, task_url)
+
+    Raises:
+        RuntimeError wenn der Protokoll-Task selbst nicht angelegt werden kann.
+    """
+    agent = _get_asana_agent()
+    if not agent.is_connected():
+        raise RuntimeError("Asana nicht konfiguriert (Token fehlt oder ungültig)")
+
+    markdown_text = protocol["current_markdown"]
+    date_str = (protocol.get("meeting_datetime") or "")[:10]
+    task_title = f"📄 Protokoll {date_str} - {protocol['meeting_name']}"
+
+    result = agent.create_task(
+        name=task_title,
+        notes=markdown_text,
+        project_gid=protocol["asana_board_gid"],
+        assignee_gid=None,
+        section_gid=protocol["asana_section_gid"],
+    )
+    if not result.get("success"):
+        raise RuntimeError(
+            f"Asana-Protokoll-Task fehlgeschlagen: {result.get('error', 'Unbekannt')}"
+        )
+    task_gid = result.get("task_gid")
+    task_url = result.get("permalink_url")
+
+    # --- PDF anhängen (nicht fatal) ---
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_path = Path(tmpdir) / f"Protokoll_{_safe_filename(protocol['meeting_name'])}.pdf"
+            if _markdown_to_pdf_standalone(markdown_text, pdf_path):
+                agent.attach_file_to_task(
+                    task_gid=task_gid,
+                    file_path=str(pdf_path),
+                    file_name=pdf_path.name,
+                )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[api] PDF-Anhang an Asana-Task fehlgeschlagen: {exc}")
+
+    # --- Subtasks aus „Weitere Schritte" (nicht fatal) ---
+    try:
+        llm = _get_protocol_llm()
+        if llm is None:
+            print("[api] ⚠️ Kein LLM verfügbar — Subtask-Extraktion übersprungen")
+        else:
+            from utils.protocol import extract_tasks_from_protocol_text
+
+            tasks = extract_tasks_from_protocol_text(markdown_text, llm)
+            for task in tasks:
+                title = task.get("title", "")
+                if not title:
+                    continue
+                origin_lines = [f"📎 Ursprung: {task_title}"]
+                if task.get("top"):
+                    origin_lines.append(f"📋 Tagesordnungspunkt: {task['top']}")
+                assignee_name = task.get("assignee")
+                if assignee_name and assignee_name != "[?]":
+                    origin_lines.append(f"👤 Geplanter Verantwortlicher: {assignee_name}")
+                origin_block = "\n".join(origin_lines)
+                description = task.get("description", "")
+                notes = f"{description}\n\n---\n{origin_block}" if description else origin_block
+
+                sub = agent.create_subtask(
+                    parent_task_gid=task_gid,
+                    name=title,
+                    notes=notes,
+                    due_on=_parse_due_on(task.get("due_date")),
+                    assignee_gid=None,
+                )
+                if not sub.get("success"):
+                    print(f"[api] ⚠️ Subtask fehlgeschlagen: {title}: {sub.get('error')}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[api] Subtask-Extraktion fehlgeschlagen: {exc}")
+
+    return task_gid, task_url
+
+
+def _finalize_protocol(draft_id: str) -> None:
+    """
+    Hintergrund-Job nach Freigabe:
+      1. PDF + Outlook (Anhang, Kategorie, Betreff-Prefix) via bestehender
+         process_reviewed_protocol-Logik (direkter Aufruf, kein HTTP)
+      2. Optional Asana-Protokoll-Task + Subtasks (create_asana_task-Checkbox)
+      3. Erfolg → status 'finalized'; Fehler → 'in_review' + finalization_error
+    """
+    protocol = _protocols_db.get_by_id(draft_id)
+    if not protocol or protocol["status"] != "approved":
+        return
+
+    try:
+        result = process_reviewed_protocol(
+            ProcessProtocolRequest(
+                markdown=protocol["current_markdown"],
+                meeting_name=protocol["meeting_name"],
+                event_id=protocol["event_id"],
+                asana_gid=protocol["asana_board_gid"],
+            ),
+            _key="internal",
+        )
+        if not result.success:
+            raise RuntimeError(
+                "PDF/Outlook fehlgeschlagen: " + "; ".join(result.errors)
+            )
+
+        task_gid = None
+        task_url = None
+        if protocol.get("create_asana_task"):
+            task_gid, task_url = _create_asana_protocol_task(protocol)
+
+        _protocols_db.set_finalized(draft_id, task_gid, task_url)
+
+    except Exception as exc:  # noqa: BLE001
+        _protocols_db.set_finalization_error(draft_id, str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — Protokoll-Review
+# ---------------------------------------------------------------------------
+@app.post(
+    "/api/protocols/draft", response_model=ProtocolDraftResponse, status_code=201
+)
+def create_protocol_draft(
+    req: ProtocolDraftRequest,
+    _key: str = Security(verify_api_key),
+):
+    """Mara legt einen Protokoll-Draft ab und erhält die Reviewer-URL."""
+    result = _protocols_db.create_draft(
+        markdown=req.markdown,
+        meeting_name=req.meeting_name,
+        meeting_datetime=req.meeting_datetime,
+        source=req.source,
+        teilnehmer=req.teilnehmer,
+        reviewer_emails=req.reviewer_emails,
+        ablageort=req.ablageort,
+        recording_id=req.recording_id,
+        event_id=req.event_id,
+        asana_board_gid=req.asana_board_gid,
+        asana_section_gid=req.asana_section_gid,
+        audio_ref=req.audio_ref,
+    )
+    return ProtocolDraftResponse(
+        draft_id=result["id"],
+        reviewer_url=f"{_PUBLIC_BASE_URL}/review/{result['reviewer_token']}",
+        expires_at=result["expires_at"],
+    )
+
+
+# WICHTIG: /finalized muss VOR /{draft_id} deklariert sein (Routing-Reihenfolge)
+@app.get("/api/protocols/finalized")
+def list_finalized_protocols(
+    since: Optional[str] = None,
+    limit: int = 50,
+    _key: str = Security(verify_api_key),
+):
+    """Vault-Sync für Claudian: alle finalisierten Protokolle seit `since`."""
+    protocols = _protocols_db.list_finalized_since(since=since, limit=limit)
+    return {
+        "protocols": [
+            {
+                "id": p["id"],
+                "meeting_name": p["meeting_name"],
+                "meeting_datetime": p["meeting_datetime"],
+                "ablageort": p["ablageort"],
+                "markdown": p["current_markdown"],
+                "frontmatter": {
+                    "asana_protokoll_task_gid": p["asana_task_gid"],
+                    "asana_protokoll_task_url": p["asana_task_url"],
+                    "teilnehmer": p["teilnehmer"],
+                },
+                "finalized_at": p["finalized_at"],
+            }
+            for p in protocols
+        ]
+    }
+
+
+def _get_protocol_for_token(
+    draft_id: str, token: Optional[str], allow_api_key: Optional[str] = None
+) -> dict:
+    """
+    Lädt ein Protokoll und prüft den Reviewer-Token.
+      - 404: draft_id unbekannt
+      - 401: kein Token/Key
+      - 403: Token gehört nicht zu diesem Draft / Key ungültig
+      - 410: Token abgelaufen
+    """
+    protocol = _protocols_db.get_by_id(draft_id)
+    if not protocol:
+        raise HTTPException(status_code=404, detail="Protokoll nicht gefunden")
+
+    if allow_api_key and _API_SECRET_KEY and hmac.compare_digest(allow_api_key, _API_SECRET_KEY):
+        return protocol
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Token fehlt (?token=...)")
+    if not hmac.compare_digest(token, protocol["reviewer_token"]):
+        raise HTTPException(status_code=403, detail="Ungültiger Token")
+    if ProtocolsDB.is_expired(protocol):
+        raise HTTPException(status_code=410, detail="Token abgelaufen")
+    return protocol
+
+
+@app.get("/api/protocols/{draft_id}")
+def get_protocol_draft(
+    draft_id: str,
+    token: Optional[str] = Query(None),
+    api_key: Optional[str] = Header(None, alias="X-API-Key"),
+):
+    """Aktueller Draft-Stand. Auth: Reviewer-Token ODER X-API-Key."""
+    protocol = _get_protocol_for_token(draft_id, token, allow_api_key=api_key)
+    protocol.pop("reviewer_token", None)
+    return protocol
+
+
+@app.patch("/api/protocols/{draft_id}")
+def patch_protocol_markdown(
+    draft_id: str,
+    req: ProtocolPatchRequest,
+    token: Optional[str] = Query(None),
+    x_authentik_username: Optional[str] = Header(None),
+):
+    """Speichert den aktuellen Editor-Stand."""
+    _get_protocol_for_token(draft_id, token)
+    _protocols_db.update_markdown(
+        draft_id, req.markdown, modified_by=x_authentik_username or "reviewer"
+    )
+    return {"status": "saved"}
+
+
+@app.post("/api/protocols/{draft_id}/approve", status_code=202)
+def approve_protocol(
+    draft_id: str,
+    req: ProtocolApproveRequest,
+    background_tasks: BackgroundTasks,
+    token: Optional[str] = Query(None),
+    x_authentik_username: Optional[str] = Header(None),
+):
+    """
+    Freigabe: speichert Termin-/Asana-Auswahl, gibt sofort 202 zurück und
+    startet die Finalisierung als Hintergrund-Task.
+    """
+    protocol = _get_protocol_for_token(draft_id, token)
+
+    if protocol["status"] in ("approved", "finalized"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Protokoll ist bereits {protocol['status']}.",
+        )
+
+    if req.create_asana_task and not (req.asana_board_gid and req.asana_section_gid):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "asana_board_gid und asana_section_gid sind Pflicht, "
+                "wenn create_asana_task=true."
+            ),
+        )
+
+    _protocols_db.set_approved(
+        draft_id,
+        event_id=req.event_id,
+        asana_board_gid=req.asana_board_gid,
+        asana_section_gid=req.asana_section_gid,
+        create_asana_task=req.create_asana_task,
+        approved_by=x_authentik_username or "reviewer",
+    )
+    background_tasks.add_task(_finalize_protocol, draft_id)
+
+    return {
+        "status": "approved",
+        "message": "Protokoll wird im Hintergrund fertiggestellt.",
+    }
+
+
+@app.post("/api/protocols/{draft_id}/reject")
+def reject_protocol(
+    draft_id: str,
+    req: ProtocolRejectRequest,
+    token: Optional[str] = Query(None),
+    x_authentik_username: Optional[str] = Header(None),
+):
+    """Ablehnen: Status 'rejected' + Grund speichern."""
+    _get_protocol_for_token(draft_id, token)
+    _protocols_db.set_rejected(
+        draft_id, req.reason, rejected_by=x_authentik_username or "reviewer"
+    )
+    return {"status": "rejected"}
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — Asana-Dropdown-Daten (15 Minuten gecacht)
+# ---------------------------------------------------------------------------
+@app.get("/api/asana/boards")
+def get_asana_boards(_user: str = Depends(get_authenticated_user)):
+    """Alle Asana-Projekte des Workspace. Auth: Authentik/X-API-Key/Token."""
+
+    def load():
+        agent = _get_asana_agent()
+        if not agent.is_connected():
+            raise HTTPException(status_code=503, detail="Asana nicht konfiguriert.")
+        return [
+            {"gid": p["gid"], "name": p["name"]} for p in agent.list_projects()
+        ]
+
+    return _asana_cached("boards", load)
+
+
+@app.get("/api/asana/boards/{board_gid}/sections")
+def get_asana_board_sections(
+    board_gid: str, _user: str = Depends(get_authenticated_user)
+):
+    """Sections eines Asana-Boards. Auth: Authentik/X-API-Key/Token."""
+
+    def load():
+        agent = _get_asana_agent()
+        if not agent.is_connected():
+            raise HTTPException(status_code=503, detail="Asana nicht konfiguriert.")
+        return [
+            {"gid": s["gid"], "name": s["name"]}
+            for s in agent.get_project_sections(board_gid)
+        ]
+
+    return _asana_cached(f"sections:{board_gid}", load)
+
+
+# ---------------------------------------------------------------------------
+# Endpoint — Review-Editor (HTML)
+# ---------------------------------------------------------------------------
+@app.get("/review/{token}", response_class=HTMLResponse)
+def review_page(
+    request: Request,
+    token: str,
+    x_authentik_username: Optional[str] = Header(None),
+):
+    """
+    Editor-Seite für Reviewer. Auth: Authentik-SSO (erzwungen durch nginx;
+    der Reviewer-Token im Pfad identifiziert das Protokoll).
+    """
+    protocol = _protocols_db.get_by_token(token)
+    if not protocol:
+        return templates.TemplateResponse(
+            request, "review_error.html", {"reason": "unknown"}, status_code=404
+        )
+    if ProtocolsDB.is_expired(protocol):
+        return templates.TemplateResponse(
+            request, "review_error.html", {"reason": "expired"}, status_code=410
+        )
+
+    if protocol["status"] == "draft":
+        _protocols_db.set_status(protocol["id"], "in_review")
+        protocol["status"] = "in_review"
+
+    meeting_dt_fmt = protocol["meeting_datetime"]
+    try:
+        from datetime import datetime as _dt
+
+        meeting_dt_fmt = _dt.fromisoformat(
+            protocol["meeting_datetime"].replace("Z", "+00:00")
+        ).strftime("%d.%m.%Y %H:%M")
+    except (ValueError, AttributeError):
+        pass
+
+    return templates.TemplateResponse(
+        request,
+        "review.html",
+        {
+            "draft_id": protocol["id"],
+            "token": token,
+            "meeting_name": protocol["meeting_name"],
+            "meeting_datetime": protocol["meeting_datetime"],
+            "meeting_datetime_fmt": meeting_dt_fmt,
+            "teilnehmer": protocol["teilnehmer"],
+            "teilnehmer_str": ", ".join(protocol["teilnehmer"]),
+            "current_markdown": protocol["current_markdown"],
+            "status": protocol["status"],
+            "create_asana_task": protocol["create_asana_task"],
+            "finalization_error": protocol["finalization_error"],
+            "reviewer_name": x_authentik_username or "",
+        },
+    )
+
+
+@app.get("/review/{token}/success", response_class=HTMLResponse)
+def review_success_page(request: Request, token: str):
+    """Erfolgsseite nach Freigabe (Redirect-Ziel von review.js)."""
+    protocol = _protocols_db.get_by_token(token)
+    if not protocol:
+        return templates.TemplateResponse(
+            request, "review_error.html", {"reason": "unknown"}, status_code=404
+        )
+    return templates.TemplateResponse(
+        request,
+        "review_success.html",
+        {
+            "meeting_name": protocol["meeting_name"],
+            "create_asana_task": protocol["create_asana_task"],
+        },
     )
 
 
@@ -1528,6 +2238,17 @@ class LenaMarkReadResponse(BaseModel):
     success: bool
 
 
+class LenaContactResult(BaseModel):
+    name: str
+    email: str
+    title: str = ""
+    company: str = ""
+
+
+class LenaContactsSearchResponse(BaseModel):
+    contacts: List[LenaContactResult]
+
+
 @app.post("/api/lena/mail/move", response_model=LenaMoveMailResponse)
 def lena_mail_move(
     req: LenaMoveMailRequest,
@@ -1608,6 +2329,95 @@ def lena_mail_mark_read(
     return LenaMarkReadResponse(success=True)
 
 
+@app.get("/api/lena/contacts/search", response_model=LenaContactsSearchResponse)
+def lena_contacts_search(
+    q: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Sucht Kontakte im Outlook-Adressbuch via Microsoft Graph People API (HBE-647).
+
+    Query-Parameter:
+      - q  Suchbegriff (Name, E-Mail, Firma; max. 100 Zeichen)
+
+    Primäre Suche: GET /me/people?$search={q}
+    Fallback (kein Ergebnis): GET /me/contacts?$filter=startswith(displayName,'{q}')
+    HTTP 503 wenn Token abgelaufen — identisch zu /api/lena/mail/inbox.
+    """
+    import requests as _rq
+
+    q = q.strip()
+    if not q:
+        return LenaContactsSearchResponse(contacts=[])
+    if len(q) > 100:
+        raise HTTPException(status_code=400, detail="Suchbegriff zu lang (max. 100 Zeichen).")
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {"Authorization": f"Bearer {tool.access_token}"}
+
+    # Primary: People API
+    resp = _rq.get(
+        "https://graph.microsoft.com/v1.0/me/people",
+        headers=headers,
+        params={
+            "$search": q,
+            "$top": "10",
+            "$select": "displayName,emailAddresses,jobTitle,companyName",
+        },
+        timeout=30,
+    )
+
+    contacts: List[LenaContactResult] = []
+
+    if resp.status_code == 200:
+        for person in resp.json().get("value", []):
+            emails = person.get("emailAddresses") or []
+            email = emails[0].get("address", "") if emails else ""
+            if not email:
+                continue
+            contacts.append(
+                LenaContactResult(
+                    name=person.get("displayName", ""),
+                    email=email,
+                    title=person.get("jobTitle") or "",
+                    company=person.get("companyName") or "",
+                )
+            )
+
+    # Fallback: Contacts API when People API returned nothing
+    if not contacts:
+        q_esc = q.replace("'", "''")  # OData single-quote escaping
+        resp2 = _rq.get(
+            "https://graph.microsoft.com/v1.0/me/contacts",
+            headers=headers,
+            params={
+                "$filter": f"startswith(displayName,'{q_esc}')",
+                "$top": "10",
+                "$select": "displayName,emailAddresses,jobTitle,companyName",
+            },
+            timeout=30,
+        )
+        if resp2.status_code == 200:
+            for contact in resp2.json().get("value", []):
+                emails = contact.get("emailAddresses") or []
+                email = emails[0].get("address", "") if emails else ""
+                if not email:
+                    continue
+                contacts.append(
+                    LenaContactResult(
+                        name=contact.get("displayName", ""),
+                        email=email,
+                        title=contact.get("jobTitle") or "",
+                        company=contact.get("companyName") or "",
+                    )
+                )
+
+    return LenaContactsSearchResponse(contacts=contacts)
+
+
 # ---------------------------------------------------------------------------
 # Telegram-Bridge Endpoints (HBE-402)
 # ---------------------------------------------------------------------------
@@ -1647,18 +2457,54 @@ async def telegram_lena_webhook(req: Request):
     username = user.username or user.first_name or "Unbekannt"
     chat_id = str(msg.chat.id)
 
-    issue_id = _pc_create_issue(
-        chat_id=chat_id,
-        message_id=msg.message_id,
-        username=username,
-        text=msg.text,
-    )
-    if issue_id:
-        with _telegram_db() as db:
-            db.execute(
-                "INSERT OR REPLACE INTO pending_issues (issue_id, chat_id) VALUES (?, ?)",
-                (issue_id, chat_id),
-            )
+    # Check for an existing active issue for this chat — clean all stale/foreign entries.
+    # An entry is stale if the issue is done, cancelled, blocked, or not found.
+    # An entry is foreign if its assignee is not Lena (guards against stale DB rows from
+    # older code paths landing Sven's messages on Mara-owned issues, causing silent 403s).
+    active_issue_id = None
+    with _telegram_db() as db:
+        rows = db.execute(
+            "SELECT issue_id FROM pending_issues WHERE chat_id = ?", (chat_id,)
+        ).fetchall()
+        for row in rows:
+            status, assignee = _pc_get_issue_info(row["issue_id"])
+            is_stale = status is None or status in {"done", "cancelled", "blocked"}
+            is_foreign = bool(_PC_LENA_AGENT_ID) and assignee != _PC_LENA_AGENT_ID
+            if is_stale or is_foreign:
+                db.execute("DELETE FROM pending_issues WHERE issue_id = ?", (row["issue_id"],))
+                if is_foreign and not is_stale:
+                    logger.warning(
+                        "[telegram] purged foreign pending_issue %s (assignee=%s, expected=%s)",
+                        row["issue_id"], assignee, _PC_LENA_AGENT_ID,
+                    )
+            else:
+                active_issue_id = row["issue_id"]
+
+    if active_issue_id:
+        _pc_add_comment_to_issue(active_issue_id, username, msg.text)
+    else:
+        issue_id = _pc_create_issue(
+            chat_id=chat_id,
+            message_id=msg.message_id,
+            username=username,
+            text=msg.text,
+        )
+        if issue_id:
+            # Variant-1 guard: only track issues that are actually assigned to Lena.
+            # Prevents foreign issue IDs from entering pending_issues if the API ever
+            # ignores our assigneeAgentId or a misconfiguration occurs.
+            _, created_assignee = _pc_get_issue_info(issue_id)
+            if bool(_PC_LENA_AGENT_ID) and created_assignee != _PC_LENA_AGENT_ID:
+                logger.warning(
+                    "[telegram] new issue %s not assigned to Lena (assignee=%s) — not tracking",
+                    issue_id, created_assignee,
+                )
+            else:
+                with _telegram_db() as db:
+                    db.execute(
+                        "INSERT OR REPLACE INTO pending_issues (issue_id, chat_id) VALUES (?, ?)",
+                        (issue_id, chat_id),
+                    )
 
     return {"ok": True}
 
@@ -1677,3 +2523,279 @@ def telegram_lena_send(
     if not _tg_send_message(req.chat_id, req.text):
         raise HTTPException(status_code=502, detail="Telegram sendMessage fehlgeschlagen.")
     return SimpleResult(success=True, message=f"Nachricht an Chat {req.chat_id} gesendet.")
+
+
+# ---------------------------------------------------------------------------
+# Vault-Sync-API (HBE-757) — Lena liest + schreibt Svens Obsidian-Vault
+# ---------------------------------------------------------------------------
+
+_VAULT_MIRROR_PATH = Path(os.getenv("VAULT_MIRROR_PATH", "/opt/vault-mirror")).resolve()
+_VAULT_BOT_TOKEN   = os.getenv("GITHUB_BOT_TOKEN", "").strip()
+_VAULT_AUDIT_LOG   = Path(os.getenv("VAULT_AUDIT_LOG", "/app/data/vault-lena.log"))
+_VAULT_GITHUB_REPO = "https://github.com/herbertgruppe/vault-memory.git"
+
+# Pfad-Whitelist: prefix → Zugriffsart ('full' | 'append_only')
+# append_only: create auf neue Files OK, append OK, overwrite immer → 403
+_VAULT_WRITE_WHITELIST: dict = {
+    "05 Daily Notes/":         "append_only",  # Sven-Bereich schützen: kein overwrite (HBE-757)
+    "09 Lena Inbox/":          "full",
+    "01 Inbox/":               "full",
+    "04 Ressourcen/Personen/": "append_only",
+}
+
+# GIT_ASKPASS helper — token is passed via GIT_PUSH_TOKEN env var, never embedded in URL
+import stat as _stat
+_VAULT_ASKPASS_DIR  = Path(tempfile.mkdtemp(prefix="vault-askpass-"))
+_VAULT_ASKPASS_PATH = _VAULT_ASKPASS_DIR / "askpass.sh"
+_VAULT_ASKPASS_PATH.write_text(
+    "#!/bin/sh\n"
+    "case \"$1\" in\n"
+    "  *sername*) printf 'x-access-token' ;;\n"
+    "  *assword*) printf '%s' \"$GIT_PUSH_TOKEN\" ;;\n"
+    "esac\n",
+    encoding="ascii",
+)
+_VAULT_ASKPASS_PATH.chmod(_stat.S_IRWXU)
+
+
+def _vault_auth_env() -> dict:
+    """Liefert env-Variablen für git-Operationen die den Token benötigen."""
+    return {
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": str(_VAULT_ASKPASS_PATH),
+        "GIT_PUSH_TOKEN": _VAULT_BOT_TOKEN,
+    }
+
+
+def _vault_resolve(path: str) -> Path:
+    """Normalisiert und validiert den Vault-Pfad gegen path-traversal."""
+    path = path.replace("\\", "/").lstrip("/")
+    resolved = (_VAULT_MIRROR_PATH / path).resolve()
+    if not str(resolved).startswith(str(_VAULT_MIRROR_PATH) + "/") and resolved != _VAULT_MIRROR_PATH:
+        raise HTTPException(status_code=400, detail="Ungültiger Pfad: path traversal erkannt.")
+    return resolved
+
+
+def _vault_check_write_access(path: str) -> str:
+    """Gibt den Schreibmodus zurück oder wirft 403."""
+    path = path.replace("\\", "/").lstrip("/")
+    for prefix, mode in _VAULT_WRITE_WHITELIST.items():
+        if path.startswith(prefix):
+            return mode
+    allowed = list(_VAULT_WRITE_WHITELIST.keys())
+    raise HTTPException(
+        status_code=403,
+        detail=f"Schreibzugriff auf '{path}' nicht erlaubt. Erlaubte Pfade: {allowed}",
+    )
+
+
+def _vault_run_git(args: list, extra_env: Optional[dict] = None) -> subprocess.CompletedProcess:
+    env = {**os.environ}
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        ["git"] + args,
+        cwd=str(_VAULT_MIRROR_PATH),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+
+def _vault_push_to_origin() -> str:
+    """Pusht nach GitHub via GIT_ASKPASS (token nie in URL oder Prozessliste)."""
+    if not _VAULT_BOT_TOKEN:
+        return "GITHUB_BOT_TOKEN nicht konfiguriert — Push übersprungen."
+    result = _vault_run_git(
+        ["push", _VAULT_GITHUB_REPO, "master"],
+        extra_env=_vault_auth_env(),
+    )
+    if result.returncode != 0:
+        return f"Push fehlgeschlagen: {result.stderr[:300]}"
+    return ""
+
+
+def _vault_init_mirror() -> None:
+    """Initialisiert den Vault-Mirror beim API-Start falls noch nicht geklont."""
+    if not _VAULT_BOT_TOKEN:
+        logger.info("[vault] GITHUB_BOT_TOKEN nicht gesetzt — Mirror-Init übersprungen.")
+        return
+    if (_VAULT_MIRROR_PATH / ".git").exists():
+        return
+    logger.info(f"[vault] Klone {_VAULT_GITHUB_REPO} nach {_VAULT_MIRROR_PATH} …")
+    _VAULT_MIRROR_PATH.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, **_vault_auth_env()}
+    result = subprocess.run(
+        ["git", "clone", _VAULT_GITHUB_REPO, str(_VAULT_MIRROR_PATH)],
+        capture_output=True, text=True, timeout=120, env=env,
+    )
+    if result.returncode != 0:
+        logger.error(f"[vault] Clone fehlgeschlagen: {result.stderr[:200]}")
+        return
+    subprocess.run(["git", "-C", str(_VAULT_MIRROR_PATH), "config", "user.name", "mein-assistent-bot"], check=False)
+    subprocess.run(["git", "-C", str(_VAULT_MIRROR_PATH), "config", "user.email", "bot@herbertgruppe.com"], check=False)
+    inbox = _VAULT_MIRROR_PATH / "09 Lena Inbox"
+    if not inbox.exists():
+        inbox.mkdir(parents=True, exist_ok=True)
+        (inbox / ".gitkeep").touch()
+    logger.info("[vault] Mirror initialisiert.")
+
+
+def _vault_pull_from_origin() -> None:
+    """Zieht Svens neue Commits (alle 2 Min via APScheduler)."""
+    if not (_VAULT_MIRROR_PATH / ".git").exists():
+        return
+    if not _VAULT_BOT_TOKEN:
+        return
+    try:
+        auth = _vault_auth_env()
+        fetch = _vault_run_git(["fetch", _VAULT_GITHUB_REPO, "master", "--quiet"], extra_env=auth)
+        if fetch.returncode == 0:
+            merge = _vault_run_git(["merge", "--ff-only", "FETCH_HEAD"])
+            if merge.returncode != 0:
+                logger.warning(f"[vault] ff-only merge fehlgeschlagen (lokale Commits vorhanden?): {merge.stderr[:200]}")
+    except Exception as exc:
+        logger.warning(f"[vault] pull fehlgeschlagen: {exc}")
+
+
+def _vault_audit(path: str, mode: str, commit_sha: str, status: str) -> None:
+    try:
+        _VAULT_AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        ts = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        with _VAULT_AUDIT_LOG.open("a", encoding="utf-8") as f:
+            f.write(f"{ts}\t{status}\t{mode}\t{commit_sha or '-'}\t{path}\n")
+    except Exception:
+        pass
+
+
+class VaultWriteRequest(BaseModel):
+    path: str = Field(..., description="Relativer Pfad im Vault, z.B. '05 Daily Notes/2026-06-12.md'")
+    content: str = Field(..., description="Dateiinhalt (Markdown)")
+    mode: Literal["create", "append", "overwrite"] = Field(..., description="create | append | overwrite")
+    commit_message: str = Field(..., description="Git-Commit-Message")
+
+    @field_validator("path")
+    @classmethod
+    def _no_traversal(cls, v: str) -> str:
+        if ".." in v:
+            raise ValueError("Pfad darf '..' nicht enthalten.")
+        return v.strip()
+
+    @field_validator("commit_message")
+    @classmethod
+    def _prefix_lena(cls, v: str) -> str:
+        v = v.strip()
+        return v if v.startswith("[Lena]") else f"[Lena] {v}"
+
+
+class VaultWriteResponse(BaseModel):
+    status: str
+    commit_sha: str
+    path: str
+
+
+class VaultReadResponse(BaseModel):
+    path: str
+    content: str
+    exists: bool
+
+
+@app.get("/api/lena/vault/read", response_model=VaultReadResponse)
+def lena_vault_read(
+    path: str = Query(..., description="Relativer Pfad im Vault"),
+    _key: str = Security(verify_api_key),
+) -> VaultReadResponse:
+    """Liest eine Datei aus dem Vault-Mirror (kein Schreibzugriff nötig)."""
+    if not _VAULT_MIRROR_PATH.exists():
+        raise HTTPException(
+            status_code=503,
+            detail=f"Vault-Mirror nicht gefunden ({_VAULT_MIRROR_PATH}). Phase 1 (Hetzner-Setup) abschließen.",
+        )
+    target = _vault_resolve(path)
+    if not target.exists():
+        return VaultReadResponse(path=path, content="", exists=False)
+    return VaultReadResponse(path=path, content=target.read_text(encoding="utf-8"), exists=True)
+
+
+@app.post("/api/lena/vault/write", response_model=VaultWriteResponse)
+def lena_vault_write(
+    req: VaultWriteRequest,
+    _key: str = Security(verify_api_key),
+) -> VaultWriteResponse:
+    """
+    Schreibt eine Datei in den Vault-Mirror, commitet und pusht via Git.
+
+    Pfad-Whitelist:
+      05 Daily Notes/         — append-only (kein overwrite; Sven-Bereich schützen)
+      09 Lena Inbox/          — voll
+      01 Inbox/               — voll
+      04 Ressourcen/Personen/ — append-only (kein overwrite)
+    """
+    if not _VAULT_MIRROR_PATH.exists():
+        raise HTTPException(
+            status_code=503,
+            detail=f"Vault-Mirror nicht gefunden ({_VAULT_MIRROR_PATH}). Phase 1 (Hetzner-Setup) abschließen.",
+        )
+
+    access_mode = _vault_check_write_access(req.path)
+
+    if access_mode == "append_only" and req.mode == "overwrite":
+        _vault_audit(req.path, req.mode, "", "REJECTED_OVERWRITE_APPEND_ONLY")
+        raise HTTPException(
+            status_code=403,
+            detail="'overwrite' ist auf append-only Pfaden nicht erlaubt. Nutze mode='append' oder 'create'.",
+        )
+
+    target = _vault_resolve(req.path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if req.mode == "create":
+        if target.exists():
+            raise HTTPException(
+                status_code=409,
+                detail=f"Datei existiert bereits: '{req.path}'. Nutze mode='overwrite' oder 'append'.",
+            )
+        target.write_text(req.content, encoding="utf-8")
+    elif req.mode == "append":
+        if target.exists():
+            existing = target.read_text(encoding="utf-8")
+            sep = "\n" if existing and not existing.endswith("\n") else ""
+            target.write_text(existing + sep + req.content, encoding="utf-8")
+        else:
+            target.write_text(req.content, encoding="utf-8")
+    else:  # overwrite
+        target.write_text(req.content, encoding="utf-8")
+
+    lena_env = {
+        "GIT_AUTHOR_NAME": "Lena (HBE)",
+        "GIT_AUTHOR_EMAIL": "lena@herbertgruppe.com",
+        "GIT_COMMITTER_NAME": "Lena (HBE)",
+        "GIT_COMMITTER_EMAIL": "lena@herbertgruppe.com",
+    }
+
+    add_result = _vault_run_git(["add", str(target)])
+    if add_result.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"git add fehlgeschlagen: {add_result.stderr[:200]}")
+
+    commit_result = _vault_run_git(
+        ["commit", "--author=Lena (HBE) <lena@herbertgruppe.com>", "-m", req.commit_message],
+        extra_env=lena_env,
+    )
+    if commit_result.returncode != 0:
+        _vault_audit(req.path, req.mode, "", "COMMIT_FAILED")
+        raise HTTPException(status_code=500, detail=f"git commit fehlgeschlagen: {commit_result.stderr[:300]}")
+
+    sha_result = _vault_run_git(["rev-parse", "--short", "HEAD"])
+    commit_sha = sha_result.stdout.strip() if sha_result.returncode == 0 else "unknown"
+
+    push_error = _vault_push_to_origin()
+    if push_error:
+        _vault_audit(req.path, req.mode, commit_sha, f"PUSH_FAILED")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Commit OK (SHA {commit_sha}), aber Push fehlgeschlagen: {push_error}",
+        )
+
+    _vault_audit(req.path, req.mode, commit_sha, "OK")
+    return VaultWriteResponse(status="ok", commit_sha=commit_sha, path=req.path)

@@ -37,6 +37,9 @@ services:
       - auth:/app/auth
       - users_data:/app/users
       - users_config:/app/config
+      # Vault-Mirror: Sven's Obsidian-Vault (HBE-757)
+      # Wird auf dem Host unter /opt/vault-mirror/ geclont (setup-vault-mirror.sh)
+      - /opt/vault-mirror:/opt/vault-mirror
     depends_on:
       - assistent
     healthcheck:
@@ -44,6 +47,27 @@ services:
       interval: 30s
       timeout: 10s
       start_period: 20s
+
+  lena-imap-poller:
+    build: .
+    container_name: mein-assistent-lena-imap-poller
+    restart: unless-stopped
+    command: ["python3", "lena_imap_poller.py"]
+    env_file:
+      - .env
+    environment:
+      # Logs ins data-Volume schreiben (statt /var/log/ — kein Root-Zugriff im Container)
+      LENA_IMAP_LOG_FILE: /app/data/lena-imap-poller.log
+    volumes:
+      # Nur data-Volume — SQLite-DB + Log-Datei
+      - data:/app/data
+    healthcheck:
+      # Healthy wenn Log-Datei in den letzten 10 Min geschrieben wurde (poll_cycle alle 5 Min)
+      test: ["CMD-SHELL", "find /app/data/lena-imap-poller.log -mmin -10 | grep -q ."]
+      interval: 5m
+      timeout: 10s
+      start_period: 30s
+      retries: 2
 
 volumes:
   transcripts:
