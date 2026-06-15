@@ -5,12 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=plaud
-Group=plaud
+User=mein-assistent
+Group=mein-assistent
 WorkingDirectory=/opt/mein-assistent
 EnvironmentFile=/opt/mein-assistent/.env
-Environment="PLAUD_DB_PATH=/var/lib/plaud/state.db"
-Environment="PLAUD_LOG_FILE=/var/log/plaud/plaud-poller.log"
+Environment="PLAUD_DB_PATH=/var/lib/plaud-poller/state.db"
+Environment="PLAUD_LOG_FILE=/var/log/plaud-poller/plaud-poller.log"
+Environment="PLAUD_ACCOUNTS=/opt/mein-assistent/data:ed26f194-f0a9-4f70-a52d-6e39be9013e3"
 ExecStart=/opt/mein-assistent/venv/bin/python3 /opt/mein-assistent/plaud_poller.py
 Restart=always
 RestartSec=15
@@ -18,17 +19,25 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=plaud-poller
 
-# Verzeichnisse — systemd erstellt sie mit korrekten Rechten (plaud:plaud)
-StateDirectory=plaud
-LogsDirectory=plaud
-
-# systemd-Sandboxing (Least Privilege — HBE-854)
-NoNewPrivileges=true
+# Hardening (HBE-872)
 PrivateTmp=true
+NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 RestrictSUIDSGID=true
 LockPersonality=true
+StateDirectory=plaud-poller
+LogsDirectory=plaud-poller
+# Plaud-CLI tokens (HOME=/opt/mein-assistent/data) müssen schreibbar bleiben
+ReadWritePaths=/opt/mein-assistent/data
+
+# Defense-in-Depth
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
 
 [Install]
 WantedBy=multi-user.target
