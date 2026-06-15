@@ -36,6 +36,7 @@ Env-Vars:
   LENA_MAIL_TRIAGE_LOG_FILE          Log-Datei
   TELEGRAM_BOT_TOKEN                 Fuer Hoch-Prio-Alerts (optional)
   TELEGRAM_ADMIN_CHAT_ID             Chat-ID (Sven)
+  LENA_MAIL_TRIAGE_CONFIG_FILE       Pfad zur Persona-Config (Standard: config/lena-mail-triage.yaml)
 """
 from __future__ import annotations
 
@@ -55,6 +56,11 @@ import requests
 from dotenv import load_dotenv
 
 try:
+    import yaml as _yaml
+except ImportError:
+    _yaml = None  # graceful degradation — Config-File-Loader fällt auf Hardcoded-Default zurück
+
+try:
     from anthropic import Anthropic
 except ImportError:
     Anthropic = None  # graceful degradation, wir checken in main()
@@ -68,6 +74,27 @@ BATCH_LIMIT       = int(os.getenv("LENA_MAIL_TRIAGE_BATCH_LIMIT", "50"))
 RETRIAGE_ALL      = os.getenv("LENA_MAIL_TRIAGE_RETRIAGE_ALL", "0").strip() == "1"
 STATE_FILE        = os.getenv("LENA_MAIL_TRIAGE_STATE_FILE", "/opt/mein-assistent/data/lena-mail-triage-poller.state")
 LOG_FILE          = os.getenv("LENA_MAIL_TRIAGE_LOG_FILE", "/var/log/lena-mail-triage-poller/lena-mail-triage-poller.log")
+
+# Persona-Config-File (externalizes Direktbericht-Liste — Änderungen ohne PR möglich)
+_DEFAULT_CONFIG_PATHS = [
+    Path(__file__).resolve().parent / "config" / "lena-mail-triage.yaml",
+    Path("/opt/mein-assistent/config/lena-mail-triage.yaml"),
+]
+PERSONA_CONFIG_FILE = os.getenv("LENA_MAIL_TRIAGE_CONFIG_FILE", "")
+
+
+def _load_persona_config() -> Dict[str, Any]:
+    """Loads persona config from YAML. Falls back to empty dict if unavailable."""
+    paths = ([Path(PERSONA_CONFIG_FILE)] if PERSONA_CONFIG_FILE else []) + _DEFAULT_CONFIG_PATHS
+    for p in paths:
+        if p.exists():
+            if _yaml is None:
+                break  # PyYAML not installed — use hardcoded fallback
+            try:
+                return _yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            except Exception as exc:
+                print(f"[warn] Cannot parse persona config {p}: {exc}", file=sys.stderr)
+    return {}
 
 API_URL  = os.getenv("MEIN_ASSISTENT_API_URL", "http://127.0.0.1:8502")
 API_KEY  = os.getenv("API_SECRET_KEY", "")
@@ -85,32 +112,71 @@ MAX_BACKOFF_SEC    = 300
 TELEGRAM_HOCH_PRIO_DAILY_CAP = 5  # max alerts/day (anti-spam)
 
 
-# ── LLM-Persona für Sven ───────────────────────────────────────────────────────
-SVEN_PERSONA = """Du bist Lena, persönliche Assistentin von Sven Herbert.
+# ── LLM-Persona für Sven (aus config/lena-mail-triage.yaml) ──────────────────
+# Persona-Text wird beim Start aus YAML gebaut. Direktberichte und externe
+# Kontakte können ohne Code-PR geändert werden — nur YAML updaten + Service neu.
 
-Sven ist Geschäftsführer der Herbert Gruppe (550 Mitarbeiter, Gebäudetechnik/TGA,
-Rhein-Main-Neckar-Raum). Er hat 13 direkte Berichte und führt die Gruppe operativ.
+_PERSONA_CONFIG: Dict[str, Any] = {}  # populated in main() after logging is ready
+
+
+def _build_sven_persona(cfg: Dict[str, Any]) -> str:
+    """Builds the LLM system-prompt from config. Falls back to hardcoded defaults."""
+    persona = cfg.get("sven_persona", {})
+    titel = persona.get("titel", "Geschäftsführer der Herbert Gruppe")
+    mitarbeiter = persona.get("mitarbeiter", 550)
+    branche = persona.get("branche", "Gebäudetechnik/TGA")
+    region = persona.get("region", "Rhein-Main-Neckar-Raum")
+    n_dr = persona.get("direktberichte_count", 13)
+
+    direktberichte = cfg.get("direktberichte", [
+        {"name": "Frank Herbert", "funktion": "Kfm. Leiter & Stellv."},
+        {"name": "Laura Ann Hernandez-Allmann", "funktion": "Persönliche Assistentin"},
+        {"name": "Walter Melcher", "funktion": "Marketing"},
+        {"name": "Sven Walter", "funktion": "IT"},
+        {"name": "Tim Kneusels", "funktion": "Personal"},
+        {"name": "Jan Herbert", "funktion": "Einkauf & Logistik"},
+        {"name": "Philipp Scheidlock", "funktion": "QM"},
+        {"name": "Dragan Mihaljevic", "funktion": "NL-Leiter HBO/Bornemann Frankfurt"},
+        {"name": "Thomas Winzer", "funktion": "NL-Leiter HRN/Rhein-Neckar"},
+        {"name": "Thorsten Vogel", "funktion": "NL-Leiter HS/Service"},
+        {"name": "René Turtschan", "funktion": "NL-Leiter HRE/Reibstein Nauheim"},
+        {"name": "Franjo Senk", "funktion": "Teamleiter TGM"},
+        {"name": "Lev Keimes", "funktion": "NL-Leiter Dimexcon Innovation & Digitalisierung"},
+    ])
+    externe = cfg.get("externe_wichtige_kontakte", [
+        {"name": "Caroline Flick", "context": "Volksbank Aufsichtsrat, künftige AR-Vorsitzende 2027", "default_prioritaet": "hoch"},
+        {"name": "SHK Aktiv", "context": "Verband", "default_prioritaet": "mittel"},
+    ])
+    routing = cfg.get("weiterleitung_routing", {
+        "kfm": "Frank", "marketing": "Walter", "personal": "Tim",
+        "it": "Sven Walter", "regional": "jeweiliger NL-Leiter",
+    })
+
+    dr_lines = "\n".join(f"- {d['name']} ({d.get('funktion', '')})" for d in direktberichte)
+    ext_lines = "\n".join(
+        f"- {e['name']} ({e.get('context', '')}) — {e.get('default_prioritaet', 'mittel').capitalize()}"
+        for e in externe
+    )
+    routing_str = (
+        f"{routing.get('kfm','Frank')} für kfm. Themen, "
+        f"{routing.get('marketing','Walter')} für Marketing, "
+        f"{routing.get('personal','Tim')} für Personal, "
+        f"{routing.get('it','Sven Walter')} für IT, "
+        f"{routing.get('regional','jeweiliger NL-Leiter')} für regionale Themen"
+    )
+
+    return f"""Du bist Lena, persönliche Assistentin von Sven Herbert.
+
+Sven ist {titel} ({mitarbeiter} Mitarbeiter, {branche},
+{region}). Er hat {n_dr} direkte Berichte und führt die Gruppe operativ.
 
 WICHTIGE PERSONEN für E-Mail-Priorität (alle @herbert.de):
 
 DIREKTBERICHTE (Antwort/Aktion meist Hoch- oder Mittel-Prio):
-- Frank Herbert (Kfm. Leiter & Stellv.)
-- Laura Ann Hernandez-Allmann (Persönliche Assistentin)
-- Walter Melcher (Marketing)
-- Sven Walter (IT)
-- Tim Kneusels (Personal)
-- Jan Herbert (Einkauf & Logistik)
-- Philipp Scheidlock (QM)
-- Dragan Mihaljevic (NL-Leiter HBO/Bornemann Frankfurt)
-- Thomas Winzer (NL-Leiter HRN/Rhein-Neckar)
-- Thorsten Vogel (NL-Leiter HS/Service)
-- René Turtschan (NL-Leiter HRE/Reibstein Nauheim)
-- Franjo Senk (Teamleiter TGM)
-- Lev Keimes (NL-Leiter Dimexcon Innovation & Digitalisierung)
+{dr_lines}
 
 EXTERNE WICHTIGE KONTAKTE:
-- Caroline Flick (Volksbank Aufsichtsrat, künftige AR-Vorsitzende 2027) — Hoch
-- SHK Aktiv (Verband) — Mittel
+{ext_lines}
 - Kunden/Lieferanten — Mittel (kontextabhängig)
 
 AKTION-OPTIONEN:
@@ -122,9 +188,7 @@ AKTION-OPTIONEN:
   CC für Awareness)
 - recherchieren: Sven muss erst Vorbereitung machen (großer Anhang lesen,
   Hintergrund klären, mit dritter Person abstimmen)
-- weiterleiten: Geht eigentlich an jemand anderen (Frank für kfm. Themen,
-  Walter für Marketing, Tim für Personal, Sven Walter für IT, jeweiliger
-  NL-Leiter für regionale Themen)
+- weiterleiten: Geht eigentlich an jemand anderen ({routing_str})
 - ablegen: Keine Aktion, nur archivieren (Marketing-Mails, externe Newsletter,
   Werbung, automated Notifications, FYI ohne Erwartung)
 
@@ -138,6 +202,10 @@ PRIORITÄT:
 REGEL: Wenn unsicher → "antworten" + "mittel". Übersetze sparsam zu "weiterleiten"
 (nur wenn klar erkennbar dass jemand anderes zuständig).
 """
+
+
+def _get_sven_persona() -> str:
+    return _build_sven_persona(_PERSONA_CONFIG)
 
 TRIAGE_USER_PROMPT_TEMPLATE = """Triagiere folgende E-Mail.
 
@@ -322,7 +390,7 @@ def _llm_triage(subject: str, sender_email: str, sender_name: str, body_preview:
     response = client.messages.create(
         model=LLM_MODEL,
         max_tokens=LLM_MAX_TOKENS,
-        system=SVEN_PERSONA,
+        system=_get_sven_persona(),
         messages=[{"role": "user", "content": prompt}],
         timeout=LLM_TIMEOUT_SEC,
     )
@@ -516,6 +584,7 @@ def _sig_handler(sig: int, _frame: object) -> None:
 
 
 def main() -> None:
+    global _PERSONA_CONFIG
     if not API_KEY:
         logger.error("API_SECRET_KEY nicht gesetzt — Abbruch.")
         sys.exit(1)
@@ -527,6 +596,16 @@ def main() -> None:
         sys.exit(1)
     signal.signal(signal.SIGTERM, _sig_handler)
     signal.signal(signal.SIGINT, _sig_handler)
+
+    _PERSONA_CONFIG = _load_persona_config()
+    if _PERSONA_CONFIG:
+        dr_count = len(_PERSONA_CONFIG.get("direktberichte", []))
+        logger.info("Persona-Config geladen: %d Direktberichte", dr_count)
+    else:
+        logger.warning(
+            "Persona-Config nicht gefunden oder PyYAML fehlt — nutze Hardcoded-Fallback. "
+            "Empfehlung: pip install pyyaml && config/lena-mail-triage.yaml prüfen."
+        )
 
     state = _load_state()
     logger.info(
