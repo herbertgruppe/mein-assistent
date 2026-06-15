@@ -3061,16 +3061,24 @@ def lena_mail_categorize(
 def lena_mail_inbox_for_triage(
     days: int = 7,
     limit: int = 50,
+    include_categorized: bool = False,
     _key: str = Security(verify_api_key),
 ):
     """
-    Listet UN-KATEGORISIERTE Mails (keine Lena:*- oder Priorität:*-Kategorie)
-    aus dem Posteingang der letzten N Tage. Triage-Poller nutzt das für den
+    Listet Mails aus dem Posteingang der letzten N Tage für die Triage.
+
+    Standardverhalten (`include_categorized=false`): nur UN-kategorisierte Mails
+    (keine Lena:*- oder Priorität:*-Kategorie). Triage-Poller nutzt das für den
     Auto-Categorize-Pass.
+
+    Mit `include_categorized=true`: ALLE Mails der letzten N Tage (auch schon
+    kategorisierte). Wird vom Poller im Re-Triage-Mode genutzt
+    (LENA_MAIL_TRIAGE_RETRIAGE_ALL=1), z.B. um die Bestandsinbox nach einem
+    Logik-Upgrade (Regel → LLM) neu durchzunudeln.
 
     Implementierung:
     - GET /me/mailFolders/Inbox/messages mit $filter receivedDateTime ge <since>
-    - Client-side Filter: Skip Mails mit Lena:*- oder Priorität:*-Kategorie
+    - Client-side Filter nur bei include_categorized=false
     - Over-Fetch (limit*2), weil Categories-Filter via Graph $filter unzuverlässig
     """
     import requests as _rq
@@ -3087,7 +3095,7 @@ def lena_mail_inbox_for_triage(
 
     headers = {"Authorization": f"Bearer {tool.access_token}"}
     since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    over_fetch = min(limit * 2, 200)
+    over_fetch = min(limit, 200) if include_categorized else min(limit * 2, 200)
     url = (
         "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages"
         f"?$filter=receivedDateTime ge {since}"
@@ -3105,9 +3113,10 @@ def lena_mail_inbox_for_triage(
 
     mails: List[LenaTriageInboxMail] = []
     for m in resp.json().get("value", []):
-        cats = m.get("categories", []) or []
-        if any(c.startswith("Lena: ") or c.startswith("Priorität: ") for c in cats):
-            continue
+        if not include_categorized:
+            cats = m.get("categories", []) or []
+            if any(c.startswith("Lena: ") or c.startswith("Priorität: ") for c in cats):
+                continue
         sender = (m.get("from") or {}).get("emailAddress", {}) or {}
         mails.append(LenaTriageInboxMail(
             message_id=m.get("id", "") or "",
