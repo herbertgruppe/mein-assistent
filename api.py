@@ -2749,6 +2749,98 @@ class LenaMarkReadResponse(BaseModel):
     success: bool
 
 
+# ── Mail-Triage (HBE-Mail-Categorize) ─────────────────────────────────────
+LENA_ACTION_CATEGORIES = {
+    "antworten":      "Lena: Antworten",
+    "tun":            "Lena: Tun",
+    "warten":         "Lena: Warten",
+    "recherchieren":  "Lena: Recherchieren",
+    "weiterleiten":   "Lena: Weiterleiten",
+    "ablegen":        "Lena: Ablegen",
+}
+LENA_PRIORITY_CATEGORIES = {
+    "hoch":    "Priorität: Hoch",
+    "mittel":  "Priorität: Mittel",
+    "niedrig": "Priorität: Niedrig",
+}
+# Outlook-Color-Presets siehe Graph-Docs (preset0=Red, preset1=Orange, preset2=Brown,
+# preset3=Yellow, preset4=Green, preset5=Teal, preset6=Olive, preset7=Blue, preset8=Purple,
+# preset9=Cranberry, preset10=Steel, preset11=DarkSteel, preset12=Grey, preset13=DarkGrey,
+# preset14=Black, preset15=DarkRed, preset16=DarkOrange, preset17=DarkBrown, preset18=DarkYellow,
+# preset19=DarkGreen, preset20=DarkTeal, preset21=DarkOlive, preset22=DarkBlue, preset23=DarkPurple,
+# preset24=DarkCranberry)
+LENA_MASTER_CATEGORIES = [
+    {"displayName": "Lena: Antworten",     "color": "preset0"},   # Red
+    {"displayName": "Lena: Tun",           "color": "preset1"},   # Orange
+    {"displayName": "Lena: Warten",        "color": "preset3"},   # Yellow
+    {"displayName": "Lena: Recherchieren", "color": "preset7"},   # Blue
+    {"displayName": "Lena: Weiterleiten",  "color": "preset8"},   # Purple
+    {"displayName": "Lena: Ablegen",       "color": "preset12"},  # Grey
+    {"displayName": "Priorität: Hoch",     "color": "preset15"},  # DarkRed
+    {"displayName": "Priorität: Mittel",   "color": "preset10"},  # Steel (LightBlue-ish)
+    {"displayName": "Priorität: Niedrig",  "color": "preset13"},  # DarkGrey
+]
+
+
+def _check_lena_action(v: str) -> str:
+    if v not in LENA_ACTION_CATEGORIES:
+        raise ValueError(f"action muss eines sein: {', '.join(LENA_ACTION_CATEGORIES.keys())}")
+    return v
+
+
+def _check_lena_priority(v: str) -> str:
+    if v not in LENA_PRIORITY_CATEGORIES:
+        raise ValueError(f"priority muss eines sein: {', '.join(LENA_PRIORITY_CATEGORIES.keys())}")
+    return v
+
+
+class LenaCategorizeRequest(BaseModel):
+    message_id: str
+    action: str
+    priority: str
+
+    @field_validator("message_id")
+    @classmethod
+    def _vid_message_id(cls, v: str) -> str:
+        return _check_message_id(v)
+
+    @field_validator("action")
+    @classmethod
+    def _vid_action(cls, v: str) -> str:
+        return _check_lena_action(v)
+
+    @field_validator("priority")
+    @classmethod
+    def _vid_priority(cls, v: str) -> str:
+        return _check_lena_priority(v)
+
+
+class LenaCategorizeResponse(BaseModel):
+    success: bool
+    message_id: str
+    categories: List[str]
+
+
+class LenaSyncCategoriesResponse(BaseModel):
+    success: bool
+    created: List[str]
+    existing: List[str]
+
+
+class LenaTriageInboxMail(BaseModel):
+    message_id: str
+    subject: str
+    sender_email: str
+    sender_name: str
+    received_at: str
+    body_preview: str
+    has_attachments: bool
+
+
+class LenaTriageInboxResponse(BaseModel):
+    mails: List[LenaTriageInboxMail]
+
+
 class LenaContactResult(BaseModel):
     name: str
     email: str
@@ -2838,6 +2930,198 @@ def lena_mail_mark_read(
         )
 
     return LenaMarkReadResponse(success=True)
+
+
+# ── Mail-Triage Endpoints (HBE-Mail-Categorize) ───────────────────────────
+
+
+@app.post("/api/lena/outlook/master-categories/sync", response_model=LenaSyncCategoriesResponse)
+def lena_outlook_master_categories_sync(
+    _key: str = Security(verify_api_key),
+):
+    """
+    Legt die 9 Outlook-MasterCategories für Lena-Triage idempotent an.
+
+    Schema:
+      - 6 Aktion-Kategorien (Lena: Antworten | Tun | Warten | Recherchieren | Weiterleiten | Ablegen)
+      - 3 Prioritäts-Kategorien (Priorität: Hoch | Mittel | Niedrig)
+
+    Existierende Kategorien werden NICHT überschrieben — nur fehlende neu angelegt.
+    Implementierung: POST /me/outlook/masterCategories pro fehlende Kategorie.
+    """
+    import requests as _rq
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Content-Type": "application/json",
+    }
+
+    get_resp = _rq.get(
+        "https://graph.microsoft.com/v1.0/me/outlook/masterCategories",
+        headers=headers,
+        timeout=30,
+    )
+    if get_resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler beim Lesen der MasterCategories: HTTP {get_resp.status_code} — {get_resp.text[:300]}",
+        )
+    existing_names = {c.get("displayName", "") for c in get_resp.json().get("value", [])}
+
+    created: List[str] = []
+    existing: List[str] = []
+    for cat in LENA_MASTER_CATEGORIES:
+        name = cat["displayName"]
+        if name in existing_names:
+            existing.append(name)
+            continue
+        post_resp = _rq.post(
+            "https://graph.microsoft.com/v1.0/me/outlook/masterCategories",
+            headers=headers,
+            json=cat,
+            timeout=30,
+        )
+        if post_resp.status_code in (200, 201):
+            created.append(name)
+        else:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Graph API Fehler beim Anlegen von '{name}': HTTP {post_resp.status_code} — {post_resp.text[:200]}",
+            )
+
+    return LenaSyncCategoriesResponse(success=True, created=created, existing=existing)
+
+
+@app.post("/api/lena/mail/categorize", response_model=LenaCategorizeResponse)
+def lena_mail_categorize(
+    req: LenaCategorizeRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Setzt zwei Outlook-Kategorien auf eine Mail: 1× Aktion + 1× Priorität.
+
+    Bestehende Lena:*- und Priorität:*-Kategorien werden ERSETZT (nicht dupliziert),
+    andere bestehende User-Kategorien bleiben erhalten. Implementierung:
+    1) GET /me/messages/{id}?$select=categories  → bestehende lesen
+    2) Filter: Nicht-Lena/Priorität-Kategorien behalten
+    3) PATCH /me/messages/{id} mit { categories: kept + [action, priority] }
+    """
+    import requests as _rq
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Content-Type": "application/json",
+    }
+
+    get_resp = _rq.get(
+        f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}?$select=categories",
+        headers=headers,
+        timeout=30,
+    )
+    if get_resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler beim Lesen der Mail-Kategorien: HTTP {get_resp.status_code} — {get_resp.text[:300]}",
+        )
+    existing_cats = get_resp.json().get("categories", []) or []
+    kept = [c for c in existing_cats if not (c.startswith("Lena: ") or c.startswith("Priorität: "))]
+
+    action_cat = LENA_ACTION_CATEGORIES[req.action]
+    prio_cat = LENA_PRIORITY_CATEGORIES[req.priority]
+    new_categories = kept + [action_cat, prio_cat]
+
+    patch_resp = _rq.patch(
+        f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
+        headers=headers,
+        json={"categories": new_categories},
+        timeout=30,
+    )
+    if patch_resp.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler beim Setzen der Kategorien: HTTP {patch_resp.status_code} — {patch_resp.text[:300]}",
+        )
+
+    return LenaCategorizeResponse(
+        success=True,
+        message_id=req.message_id,
+        categories=new_categories,
+    )
+
+
+@app.get("/api/lena/mail/inbox-for-triage", response_model=LenaTriageInboxResponse)
+def lena_mail_inbox_for_triage(
+    days: int = 7,
+    limit: int = 50,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Listet UN-KATEGORISIERTE Mails (keine Lena:*- oder Priorität:*-Kategorie)
+    aus dem Posteingang der letzten N Tage. Triage-Poller nutzt das für den
+    Auto-Categorize-Pass.
+
+    Implementierung:
+    - GET /me/mailFolders/Inbox/messages mit $filter receivedDateTime ge <since>
+    - Client-side Filter: Skip Mails mit Lena:*- oder Priorität:*-Kategorie
+    - Over-Fetch (limit*2), weil Categories-Filter via Graph $filter unzuverlässig
+    """
+    import requests as _rq
+    from datetime import datetime, timezone, timedelta
+
+    if days < 1 or days > 90:
+        raise HTTPException(status_code=400, detail="days muss zwischen 1 und 90 liegen.")
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit muss zwischen 1 und 200 liegen.")
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {"Authorization": f"Bearer {tool.access_token}"}
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    over_fetch = min(limit * 2, 200)
+    url = (
+        "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages"
+        f"?$filter=receivedDateTime ge {since}"
+        f"&$top={over_fetch}"
+        "&$select=id,subject,from,receivedDateTime,bodyPreview,hasAttachments,categories"
+        "&$orderby=receivedDateTime desc"
+    )
+
+    resp = _rq.get(url, headers=headers, timeout=30)
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler beim Laden der Inbox: HTTP {resp.status_code} — {resp.text[:300]}",
+        )
+
+    mails: List[LenaTriageInboxMail] = []
+    for m in resp.json().get("value", []):
+        cats = m.get("categories", []) or []
+        if any(c.startswith("Lena: ") or c.startswith("Priorität: ") for c in cats):
+            continue
+        sender = (m.get("from") or {}).get("emailAddress", {}) or {}
+        mails.append(LenaTriageInboxMail(
+            message_id=m.get("id", "") or "",
+            subject=(m.get("subject") or ""),
+            sender_email=(sender.get("address") or ""),
+            sender_name=(sender.get("name") or ""),
+            received_at=(m.get("receivedDateTime") or ""),
+            body_preview=(m.get("bodyPreview") or "")[:500],
+            has_attachments=bool(m.get("hasAttachments")),
+        ))
+        if len(mails) >= limit:
+            break
+
+    return LenaTriageInboxResponse(mails=mails)
 
 
 @app.get("/api/lena/contacts/search", response_model=LenaContactsSearchResponse)
