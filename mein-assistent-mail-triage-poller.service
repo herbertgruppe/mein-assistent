@@ -1,0 +1,42 @@
+[Unit]
+Description=Lena Mail Triage Poller — kategorisiert un-kategorisierte Outlook-Mails (Aktion + Priorität)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mein-assistent
+Group=mein-assistent
+WorkingDirectory=/opt/mein-assistent
+EnvironmentFile=/opt/mein-assistent/.env
+Environment="LENA_MAIL_TRIAGE_STATE_FILE=/var/lib/mail-triage-poller/state.json"
+Environment="LENA_MAIL_TRIAGE_LOG_FILE=/var/log/mail-triage-poller/lena-mail-triage-poller.log"
+Environment="MEIN_ASSISTENT_API_URL=http://127.0.0.1:8502"
+ExecStart=/opt/mein-assistent/venv/bin/python3 /opt/mein-assistent/lena_mail_triage_poller.py
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lena-mail-triage-poller
+
+# Hardening (analog plaud-poller + lena-asana-poller)
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictSUIDSGID=true
+LockPersonality=true
+StateDirectory=mail-triage-poller
+LogsDirectory=mail-triage-poller
+ReadWritePaths=/opt/mein-assistent/data
+
+# Defense-in-Depth
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+[Install]
+WantedBy=multi-user.target
