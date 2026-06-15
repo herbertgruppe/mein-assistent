@@ -69,25 +69,15 @@ services:
       start_period: 30s
       retries: 2
 
-  lena-asana-poller:
-    build: .
-    container_name: mein-assistent-lena-asana-poller
-    restart: unless-stopped
-    command: ["python3", "lena_asana_poller.py"]
-    env_file:
-      - .env
-    environment:
-      LENA_ASANA_LOG_FILE: /app/data/lena-asana-poller.log
-      LENA_ASANA_STATE_FILE: /app/data/lena-asana-poller.state
-    volumes:
-      - data:/app/data
-    healthcheck:
-      # Healthy wenn Log-Datei in den letzten 10 Min geschrieben wurde (poll_cycle alle 5 Min)
-      test: ["CMD-SHELL", "find /app/data/lena-asana-poller.log -mmin -10 | grep -q ."]
-      interval: 5m
-      timeout: 10s
-      start_period: 60s
-      retries: 2
+  # HINWEIS (HBE-928, 2026-06-15): lena-asana-poller läuft nicht mehr als
+  # Docker-Container, sondern als systemd-Service auf dem Host
+  # (mein-assistent-lena-asana-poller.service). Die Service-Datei in diesem
+  # Repo ist die Source-of-Truth. Hintergrund: Konsistenz mit plaud-poller
+  # (auch systemd) + native Hardening (ProtectSystem=strict, ProtectHome,
+  # NoNewPrivileges, PrivateTmp, User=mein-assistent — siehe PR #65/HBE-893).
+  # Container-Hardening war nicht praktikabel, weil shared Dockerfile/Image
+  # alle 5 mein-assistent-Services (Streamlit-App, API, Pollers, Worker)
+  # betroffen hätte. Architektur-Trennung jetzt: UI/App = Docker, Poller = systemd.
 
 volumes:
   transcripts:
