@@ -2841,6 +2841,23 @@ class LenaTriageInboxResponse(BaseModel):
     mails: List[LenaTriageInboxMail]
 
 
+class LenaTriageSummaryResponse(BaseModel):
+    # Aktion-Buckets
+    antworten: int
+    tun: int
+    warten: int
+    recherchieren: int
+    weiterleiten: int
+    ablegen: int
+    # Priorität-Buckets
+    hoch: int
+    mittel: int
+    niedrig: int
+    # Metadaten
+    since: str
+    total_categorized: int
+
+
 class LenaContactResult(BaseModel):
     id: str = ""
     name: str
@@ -3142,6 +3159,104 @@ def lena_mail_inbox_for_triage(
             break
 
     return LenaTriageInboxResponse(mails=mails)
+
+
+@app.get("/api/lena/mail/triage-summary", response_model=LenaTriageSummaryResponse)
+def lena_mail_triage_summary(
+    since: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Liefert Zähler pro Triage-Bucket für Mails, die seit `since` empfangen wurden
+    und bereits kategorisiert sind (d.h. eine Lena:*-Kategorie haben).
+
+    Wird von SKILL_BRIEFING.md für das Tages-Briefing genutzt.
+
+    Query-Parameter:
+      - since  ISO 8601 UTC-Zeitstempel (z.B. "2026-06-15T00:00:00Z").
+               MUSS UTC sein — kein lokaler Server-Zeitstempel.
+
+    Response: Zähler pro Aktion (antworten/tun/warten/recherchieren/weiterleiten/ablegen)
+              + Zähler pro Priorität (hoch/mittel/niedrig) + Metadaten.
+
+    Implementierung: GET /me/mailFolders/Inbox/messages mit receivedDateTime-Filter,
+    nur Mails MIT Lena:*-Kategorie zählen (client-side, analog inbox-for-triage).
+    """
+    import requests as _rq
+    from datetime import datetime, timezone
+
+    if not since:
+        raise HTTPException(status_code=400, detail="since-Parameter ist Pflicht (ISO 8601 UTC).")
+    try:
+        # Parse and normalize to UTC — reject timestamps without tz info
+        since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        if since_dt.tzinfo is None:
+            raise ValueError("No timezone")
+        since_dt = since_dt.astimezone(timezone.utc)
+        since_str = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, OverflowError):
+        raise HTTPException(
+            status_code=400,
+            detail="since muss ein gültiger ISO 8601 UTC-Zeitstempel sein (z.B. '2026-06-15T00:00:00Z').",
+        )
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {"Authorization": f"Bearer {tool.access_token}"}
+
+    # Fetch categorized mails since `since` — up to 200 (over-fetch, filter client-side)
+    url = (
+        "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages"
+        f"?$filter=receivedDateTime ge {since_str}"
+        "&$top=200"
+        "&$select=id,categories"
+        "&$orderby=receivedDateTime desc"
+    )
+    resp = _rq.get(url, headers=headers, timeout=30)
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler: HTTP {resp.status_code} — {resp.text[:300]}",
+        )
+
+    # Map Outlook category display names → internal bucket keys
+    action_map = {v: k for k, v in LENA_ACTION_CATEGORIES.items()}
+    priority_map = {v: k for k, v in LENA_PRIORITY_CATEGORIES.items()}
+
+    counts: dict = {
+        "antworten": 0, "tun": 0, "warten": 0,
+        "recherchieren": 0, "weiterleiten": 0, "ablegen": 0,
+        "hoch": 0, "mittel": 0, "niedrig": 0,
+    }
+    total = 0
+
+    for m in resp.json().get("value", []):
+        cats = m.get("categories", []) or []
+        lena_cats = [c for c in cats if c.startswith("Lena: ") or c.startswith("Priorität: ")]
+        if not lena_cats:
+            continue  # skip un-categorized mails
+        total += 1
+        for c in lena_cats:
+            if c in action_map:
+                counts[action_map[c]] += 1
+            elif c in priority_map:
+                counts[priority_map[c]] += 1
+
+    return LenaTriageSummaryResponse(
+        antworten=counts["antworten"],
+        tun=counts["tun"],
+        warten=counts["warten"],
+        recherchieren=counts["recherchieren"],
+        weiterleiten=counts["weiterleiten"],
+        ablegen=counts["ablegen"],
+        hoch=counts["hoch"],
+        mittel=counts["mittel"],
+        niedrig=counts["niedrig"],
+        since=since_str,
+        total_categorized=total,
+    )
 
 
 @app.get("/api/lena/contacts/search", response_model=LenaContactsSearchResponse)

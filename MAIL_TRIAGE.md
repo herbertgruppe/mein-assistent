@@ -94,6 +94,7 @@ Svens Outlook-Posteingang (Microsoft Graph)
 | `POST` | `/api/lena/outlook/master-categories/sync` | Legt 9 MasterCategories idempotent an |
 | `POST` | `/api/lena/mail/categorize` | Setzt Aktion + Priorität auf eine Mail |
 | `GET` | `/api/lena/mail/inbox-for-triage` | Liefert un-kategorisierte Mails (Poller-Inbox) |
+| `GET` | `/api/lena/mail/triage-summary` | Zähler pro Bucket seit `?since=<iso-utc>` (Briefing) |
 
 ---
 
