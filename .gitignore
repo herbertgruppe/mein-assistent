@@ -53,6 +53,8 @@ newsletter_archiv/
 # Multi-User data (sensitive: tokens, user data)
 users/
 config/
+# Non-sensitive config files that should be tracked
+!config/lena-mail-triage.yaml
 
 # Databases
 *.db

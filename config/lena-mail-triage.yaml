@@ -1,0 +1,72 @@
+# lena-mail-triage.yaml
+#
+# Sven-Persona und Direktbericht-Konfiguration für den Mail-Triage-Poller.
+# Änderungen hier (z.B. neue Direktberichte) werden beim nächsten Poller-Neustart
+# aktiv — kein Code-PR nötig.
+#
+# PFLICHT nach Direktbericht-Wechsel: diese Datei aktualisieren + Service neustarten.
+#   sudo systemctl restart mein-assistent-mail-triage-poller
+
+sven_persona:
+  titel: "Geschäftsführer der Herbert Gruppe"
+  mitarbeiter: 550
+  branche: "Gebäudetechnik/TGA"
+  region: "Rhein-Main-Neckar-Raum"
+  direktberichte_count: 13
+
+direktberichte:
+  - name: "Frank Herbert"
+    funktion: "Kfm. Leiter & Stellv."
+    email_domain: "@herbert.de"
+  - name: "Laura Ann Hernandez-Allmann"
+    funktion: "Persönliche Assistentin"
+    email_domain: "@herbert.de"
+  - name: "Walter Melcher"
+    funktion: "Marketing"
+    email_domain: "@herbert.de"
+  - name: "Sven Walter"
+    funktion: "IT"
+    email_domain: "@herbert.de"
+  - name: "Tim Kneusels"
+    funktion: "Personal"
+    email_domain: "@herbert.de"
+  - name: "Jan Herbert"
+    funktion: "Einkauf & Logistik"
+    email_domain: "@herbert.de"
+  - name: "Philipp Scheidlock"
+    funktion: "QM"
+    email_domain: "@herbert.de"
+  - name: "Dragan Mihaljevic"
+    funktion: "NL-Leiter HBO/Bornemann Frankfurt"
+    email_domain: "@herbert.de"
+  - name: "Thomas Winzer"
+    funktion: "NL-Leiter HRN/Rhein-Neckar"
+    email_domain: "@herbert.de"
+  - name: "Thorsten Vogel"
+    funktion: "NL-Leiter HS/Service"
+    email_domain: "@herbert.de"
+  - name: "René Turtschan"
+    funktion: "NL-Leiter HRE/Reibstein Nauheim"
+    email_domain: "@herbert.de"
+  - name: "Franjo Senk"
+    funktion: "Teamleiter TGM"
+    email_domain: "@herbert.de"
+  - name: "Lev Keimes"
+    funktion: "NL-Leiter Dimexcon Innovation & Digitalisierung"
+    email_domain: "@herbert.de"
+
+externe_wichtige_kontakte:
+  - name: "Caroline Flick"
+    context: "Volksbank Aufsichtsrat, künftige AR-Vorsitzende 2027"
+    default_prioritaet: "hoch"
+  - name: "SHK Aktiv"
+    context: "Verband"
+    default_prioritaet: "mittel"
+
+# Weiterleitung-Routing: wer übernimmt welche Themen
+weiterleitung_routing:
+  kfm: "Frank"          # kaufmännische Themen
+  marketing: "Walter"   # Marketing
+  personal: "Tim"       # Personal
+  it: "Sven Walter"     # IT
+  regional: "jeweiliger NL-Leiter"  # regionale Themen
