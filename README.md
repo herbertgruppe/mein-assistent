@@ -350,6 +350,28 @@ pip install -r requirements.txt
 2. API-Key erstellen unter "API Keys"
 3. Key in `.env` als `OPENAI_API_KEY` eintragen
 
+## Hintergrunddienste (systemd-Poller)
+
+Die App selbst läuft als Docker-Container. Daneben gibt es eigenständige systemd-Services,
+die als `mein-assistent`-User laufen und per FastAPI-Endpoints mit der App kommunizieren.
+
+| Service | Datei | Funktion |
+|---|---|---|
+| `plaud-poller` | `plaud_poller.py` | Plaud-Transkripte aus OneDrive holen + verarbeiten |
+| `lena-asana-poller` | `lena_asana_poller.py` | Asana @mentions + Assignments für Lena pollen |
+| `lena-mail-triage-poller` | `lena_mail_triage_poller.py` | Outlook-Posteingang automatisch kategorisieren |
+| `lena-imap-poller` | `lena_imap_poller.py` | Lenas IMAP-Postfach pollen + Paperclip-Issues erstellen |
+
+Alle Poller teilen dasselbe Muster: systemd-Service (User=mein-assistent, voll gehärtet) +
+FastAPI-Endpoints auf localhost:8502 für Graph/Outlook/Asana-Operationen.
+
+Vollständige Doku:
+- [Mail-Triage (Outlook)](MAIL_TRIAGE.md)
+- [Plaud-Poller](PLAUD_POLLER_README.md)
+- [IMAP-Poller (Lena)](README.md#lena-imap-poller)
+
+---
+
 ## Lena IMAP-Poller
 
 Hintergrund-Service, der Lenas IMAP-Postfach (`lena@herbertgruppe.com`) periodisch pollt und bei neuen Mails automatisch Paperclip-Issues für Lena erstellt.
