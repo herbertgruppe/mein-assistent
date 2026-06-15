@@ -2859,6 +2859,7 @@ class LenaTriageSummaryResponse(BaseModel):
 
 
 class LenaContactResult(BaseModel):
+    id: str = ""
     name: str
     email: str
     title: str = ""
@@ -2867,6 +2868,16 @@ class LenaContactResult(BaseModel):
 
 class LenaContactsSearchResponse(BaseModel):
     contacts: List[LenaContactResult]
+
+
+class LenaContactUpdateRequest(BaseModel):
+    mobilePhone: Optional[str] = None
+    businessPhone: Optional[str] = None
+
+
+class LenaContactUpdateResponse(BaseModel):
+    success: bool
+    contact_id: str
 
 
 @app.post("/api/lena/mail/move", response_model=LenaMoveMailResponse)
@@ -3284,7 +3295,7 @@ def lena_contacts_search(
         params={
             "$search": q,
             "$top": "10",
-            "$select": "displayName,emailAddresses,jobTitle,companyName",
+            "$select": "id,displayName,emailAddresses,jobTitle,companyName",
         },
         timeout=30,
     )
@@ -3299,6 +3310,7 @@ def lena_contacts_search(
                 continue
             contacts.append(
                 LenaContactResult(
+                    id=person.get("id", ""),
                     name=person.get("displayName", ""),
                     email=email,
                     title=person.get("jobTitle") or "",
@@ -3315,7 +3327,7 @@ def lena_contacts_search(
             params={
                 "$filter": f"startswith(displayName,'{q_esc}')",
                 "$top": "10",
-                "$select": "displayName,emailAddresses,jobTitle,companyName",
+                "$select": "id,displayName,emailAddresses,jobTitle,companyName",
             },
             timeout=30,
         )
@@ -3327,6 +3339,7 @@ def lena_contacts_search(
                     continue
                 contacts.append(
                     LenaContactResult(
+                        id=contact.get("id", ""),
                         name=contact.get("displayName", ""),
                         email=email,
                         title=contact.get("jobTitle") or "",
@@ -3335,6 +3348,66 @@ def lena_contacts_search(
                 )
 
     return LenaContactsSearchResponse(contacts=contacts)
+
+
+@app.patch("/api/lena/contacts/{contact_id}", response_model=LenaContactUpdateResponse)
+def lena_contact_update(
+    contact_id: str,
+    req: LenaContactUpdateRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Aktualisiert Telefonnummern eines Outlook-Kontakts via Microsoft Graph (HBE-940).
+
+    Path-Parameter:
+      - contact_id  Outlook-Kontakt-ID (aus /api/lena/contacts/search)
+
+    Body (mind. ein Feld erforderlich):
+      - mobilePhone    Mobilnummer
+      - businessPhone  Geschäftliche Telefonnummer
+
+    Unter der Haube: PATCH https://graph.microsoft.com/v1.0/me/contacts/{id}
+    HTTP 503 wenn Token abgelaufen, HTTP 404 wenn Kontakt nicht gefunden.
+    """
+    import requests as _rq
+
+    payload: dict = {}
+    if req.mobilePhone is not None:
+        payload["mobilePhone"] = req.mobilePhone
+    if req.businessPhone is not None:
+        payload["businessPhones"] = [req.businessPhone]
+
+    if not payload:
+        raise HTTPException(
+            status_code=400,
+            detail="Mindestens ein Feld (mobilePhone oder businessPhone) muss angegeben werden.",
+        )
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Content-Type": "application/json",
+    }
+
+    resp = _rq.patch(
+        f"https://graph.microsoft.com/v1.0/me/contacts/{contact_id}",
+        headers=headers,
+        json=payload,
+        timeout=30,
+    )
+
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail=f"Kontakt '{contact_id}' nicht gefunden.")
+    if resp.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler beim Aktualisieren: HTTP {resp.status_code} — {resp.text[:300]}",
+        )
+
+    return LenaContactUpdateResponse(success=True, contact_id=contact_id)
 
 
 # ---------------------------------------------------------------------------
