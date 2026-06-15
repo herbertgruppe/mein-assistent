@@ -7,21 +7,31 @@ Mails mit zwei Outlook-Kategorien: 1× Aktion (Lena: Antworten | Tun | Warten |
 Recherchieren | Weiterleiten | Ablegen) + 1× Priorität (Priorität: Hoch | Mittel
 | Niedrig).
 
-v1 (heutige Implementierung): regelbasiert mit drei Pattern-Klassen
-(Newsletter/Automated, Kalender-Notification, Dringlichkeits-Signal). Default
-"Antworten + Mittel". Designziel: harmlose Vor-Sortierung mit hoher Recall —
-Sven korrigiert manuell, in v2 fließt das via Hindsight-Recall in die Logik
-zurück.
+Hybrid-Triage:
+1) Schnelle Regeln zuerst (sparen LLM-Cost):
+   - Newsletter/Automated-Sender -> Ablegen + Niedrig
+   - Kalender-Notifications -> Ablegen + Niedrig
+2) Alles andere -> Claude-Haiku LLM-Call mit Sven-Persona-Context
+   und Direktbericht-Liste fuer informierte Priorisierung.
 
-v2 (Folge-Issue): LLM-basierte Triage (Claude/OpenAI) mit Hindsight-Recall auf
-Sven's bisherige Korrekturen pro Absender/Subject-Pattern.
+v1 (regelbasiert) war zu konservativ — Default-Bucket "Antworten + Mittel"
+hat 80%+ der Mails getroffen. LLM-Triage liest jetzt Subject + Sender +
+Body-Preview und entscheidet kontextuell, mit Audit-Trail-Reasoning.
+
+Re-Triage-Mode: LENA_MAIL_TRIAGE_RETRIAGE_ALL=1 ignoriert
+processed_message_ids + nutzt include_categorized=true, damit Bestandsinbox
+nach Logik-Upgrade neu durchgenudelt wird. Nach einem Lauf ENV wieder
+entfernen (oder Service auf normalen Mode restarten).
 
 Env-Vars:
   MEIN_ASSISTENT_API_URL          API-Basis (Standard: http://127.0.0.1:8502)
   API_SECRET_KEY                  X-API-Key Header-Wert fuer /api/lena/*
+  ANTHROPIC_API_KEY               Anthropic API-Key fuer LLM-Triage (Pflicht)
+  LENA_MAIL_TRIAGE_LLM_MODEL      Claude-Modell (Standard: claude-haiku-4-5)
   LENA_MAIL_TRIAGE_POLL_INTERVAL_SEC  Polling-Intervall (Standard: 600 = 10 Min)
   LENA_MAIL_TRIAGE_LOOKBACK_DAYS     Erst-Lauf Lookback (Standard: 7)
   LENA_MAIL_TRIAGE_BATCH_LIMIT       Max Mails pro Cycle (Standard: 50)
+  LENA_MAIL_TRIAGE_RETRIAGE_ALL      "1" = ALL Mails neu triagieren (Bestandsinbox-Lauf)
   LENA_MAIL_TRIAGE_STATE_FILE        State-File
   LENA_MAIL_TRIAGE_LOG_FILE          Log-Datei
   TELEGRAM_BOT_TOKEN                 Fuer Hoch-Prio-Alerts (optional)
@@ -44,17 +54,28 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 from dotenv import load_dotenv
 
+try:
+    from anthropic import Anthropic
+except ImportError:
+    Anthropic = None  # graceful degradation, wir checken in main()
+
 load_dotenv()
 
 # ── Config ────────────────────────────────────────────────────────────────────
 POLL_INTERVAL_SEC = int(os.getenv("LENA_MAIL_TRIAGE_POLL_INTERVAL_SEC", "600"))
 LOOKBACK_DAYS     = int(os.getenv("LENA_MAIL_TRIAGE_LOOKBACK_DAYS", "7"))
 BATCH_LIMIT       = int(os.getenv("LENA_MAIL_TRIAGE_BATCH_LIMIT", "50"))
+RETRIAGE_ALL      = os.getenv("LENA_MAIL_TRIAGE_RETRIAGE_ALL", "0").strip() == "1"
 STATE_FILE        = os.getenv("LENA_MAIL_TRIAGE_STATE_FILE", "/opt/mein-assistent/data/lena-mail-triage-poller.state")
 LOG_FILE          = os.getenv("LENA_MAIL_TRIAGE_LOG_FILE", "/var/log/lena-mail-triage-poller/lena-mail-triage-poller.log")
 
 API_URL  = os.getenv("MEIN_ASSISTENT_API_URL", "http://127.0.0.1:8502")
 API_KEY  = os.getenv("API_SECRET_KEY", "")
+
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+LLM_MODEL         = os.getenv("LENA_MAIL_TRIAGE_LLM_MODEL", "claude-haiku-4-5")
+LLM_MAX_TOKENS    = 200
+LLM_TIMEOUT_SEC   = 30
 
 TG_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_ADMIN_CHAT = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
@@ -62,6 +83,74 @@ TG_ADMIN_CHAT = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
 MAX_PROCESSED_IDS  = 5_000   # cap to prevent unbounded state
 MAX_BACKOFF_SEC    = 300
 TELEGRAM_HOCH_PRIO_DAILY_CAP = 5  # max alerts/day (anti-spam)
+
+
+# ── LLM-Persona für Sven ───────────────────────────────────────────────────────
+SVEN_PERSONA = """Du bist Lena, persönliche Assistentin von Sven Herbert.
+
+Sven ist Geschäftsführer der Herbert Gruppe (550 Mitarbeiter, Gebäudetechnik/TGA,
+Rhein-Main-Neckar-Raum). Er hat 13 direkte Berichte und führt die Gruppe operativ.
+
+WICHTIGE PERSONEN für E-Mail-Priorität (alle @herbert.de):
+
+DIREKTBERICHTE (Antwort/Aktion meist Hoch- oder Mittel-Prio):
+- Frank Herbert (Kfm. Leiter & Stellv.)
+- Laura Ann Hernandez-Allmann (Persönliche Assistentin)
+- Walter Melcher (Marketing)
+- Sven Walter (IT)
+- Tim Kneusels (Personal)
+- Jan Herbert (Einkauf & Logistik)
+- Philipp Scheidlock (QM)
+- Dragan Mihaljevic (NL-Leiter HBO/Bornemann Frankfurt)
+- Thomas Winzer (NL-Leiter HRN/Rhein-Neckar)
+- Thorsten Vogel (NL-Leiter HS/Service)
+- René Turtschan (NL-Leiter HRE/Reibstein Nauheim)
+- Franjo Senk (Teamleiter TGM)
+- Lev Keimes (NL-Leiter Dimexcon Innovation & Digitalisierung)
+
+EXTERNE WICHTIGE KONTAKTE:
+- Caroline Flick (Volksbank Aufsichtsrat, künftige AR-Vorsitzende 2027) — Hoch
+- SHK Aktiv (Verband) — Mittel
+- Kunden/Lieferanten — Mittel (kontextabhängig)
+
+AKTION-OPTIONEN:
+- antworten: Sven muss zurückschreiben (echte Frage, Bitte um Stellungnahme,
+  persönliche Anfrage, AW/Re-Faden mit Frage)
+- tun: Sven muss aktiv handeln, aber keine Mail-Antwort (z.B. Dokument
+  unterschreiben, Link prüfen, Vereinbarung umsetzen)
+- warten: Reine Info, Sven wartet auf Folge von anderen (FYI, Status-Update,
+  CC für Awareness)
+- recherchieren: Sven muss erst Vorbereitung machen (großer Anhang lesen,
+  Hintergrund klären, mit dritter Person abstimmen)
+- weiterleiten: Geht eigentlich an jemand anderen (Frank für kfm. Themen,
+  Walter für Marketing, Tim für Personal, Sven Walter für IT, jeweiliger
+  NL-Leiter für regionale Themen)
+- ablegen: Keine Aktion, nur archivieren (Marketing-Mails, externe Newsletter,
+  Werbung, automated Notifications, FYI ohne Erwartung)
+
+PRIORITÄT:
+- hoch: Frist heute/diese Woche, oder von Direktbericht mit konkretem
+  Action-Bezug, oder Eskalation/Mahnung
+- mittel: Sollte diese Woche erledigt werden (Standard für Direktberichte,
+  laufende Themen)
+- niedrig: Kann auch mal liegenbleiben (FYI, optional, externe Info)
+
+REGEL: Wenn unsicher → "antworten" + "mittel". Übersetze sparsam zu "weiterleiten"
+(nur wenn klar erkennbar dass jemand anderes zuständig).
+"""
+
+TRIAGE_USER_PROMPT_TEMPLATE = """Triagiere folgende E-Mail.
+
+Absender: {sender_name} <{sender_email}>
+Betreff: {subject}
+Vorschau (erste 500 Zeichen):
+{body_preview}
+
+Antworte AUSSCHLIESSLICH mit einem JSON-Objekt der Form:
+{{"action": "...", "priority": "...", "reasoning": "kurzer deutscher Satz, max 80 Zeichen"}}
+
+KEIN Markdown, KEIN ```json``` Block, KEIN Fließtext drumherum.
+"""
 
 
 # ── Triage-Regeln (v1, regelbasiert) ──────────────────────────────────────────
@@ -189,34 +278,104 @@ def _try_parse_iso(ts: str) -> Optional[datetime]:
         return None
 
 
-# ── Triage-Logik (v1: regelbasiert) ───────────────────────────────────────────
-def triage_mail(subject: str, sender_email: str, body_preview: str) -> Tuple[str, str, str]:
-    """
-    Returns (action, priority, rule_id).
+# ── Triage-Logik (Hybrid: Regeln + LLM) ───────────────────────────────────────
+_VALID_ACTIONS = {"antworten", "tun", "warten", "recherchieren", "weiterleiten", "ablegen"}
+_VALID_PRIORITIES = {"hoch", "mittel", "niedrig"}
 
-    rule_id ist eine kurze Begründung für Audit-Trail (z.B. "newsletter_sender",
-    "calendar_subject", "urgency_keyword", "default"). Hilft beim spaeteren
-    LLM-Migrationsschritt (v2): Sven sieht warum eine Mail wie kategorisiert
-    wurde.
+_llm_client: Optional[Any] = None
+
+
+def _get_llm_client():
+    """Lazy-init Anthropic-Client (Singleton)."""
+    global _llm_client
+    if _llm_client is None and Anthropic is not None and ANTHROPIC_API_KEY:
+        _llm_client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    return _llm_client
+
+
+def _strip_json_fences(raw: str) -> str:
+    """Falls LLM trotz Anweisung Markdown-Fences sendet, entfernen."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r'^```(?:json)?\s*', '', raw)
+        raw = re.sub(r'\s*```\s*$', '', raw)
+    return raw.strip()
+
+
+def _llm_triage(subject: str, sender_email: str, sender_name: str, body_preview: str) -> Tuple[str, str, str]:
+    """LLM-basierte Triage. Returns (action, priority, reasoning_with_prefix).
+
+    Raises Exception bei nicht-recoverable LLM-Fehlern — _triage_mail faengt
+    das ab und nutzt Fallback.
+    """
+    client = _get_llm_client()
+    if client is None:
+        raise RuntimeError("Anthropic-Client nicht verfuegbar (kein API-Key oder kein Package).")
+
+    prompt = TRIAGE_USER_PROMPT_TEMPLATE.format(
+        sender_name=sender_name or "(unbekannt)",
+        sender_email=sender_email or "(keine)",
+        subject=subject or "(kein Betreff)",
+        body_preview=(body_preview or "(leer)")[:500],
+    )
+
+    response = client.messages.create(
+        model=LLM_MODEL,
+        max_tokens=LLM_MAX_TOKENS,
+        system=SVEN_PERSONA,
+        messages=[{"role": "user", "content": prompt}],
+        timeout=LLM_TIMEOUT_SEC,
+    )
+    raw = _strip_json_fences(response.content[0].text)
+    data = json.loads(raw)  # raises if malformed → caught by caller
+
+    action = str(data.get("action", "")).strip().lower()
+    priority = str(data.get("priority", "")).strip().lower()
+    reasoning = str(data.get("reasoning", "")).strip()[:120]
+
+    if action not in _VALID_ACTIONS:
+        raise ValueError(f"LLM returned invalid action: {action!r}")
+    if priority not in _VALID_PRIORITIES:
+        raise ValueError(f"LLM returned invalid priority: {priority!r}")
+
+    return action, priority, f"llm:{reasoning}"
+
+
+def triage_mail(subject: str, sender_email: str, body_preview: str, sender_name: str = "") -> Tuple[str, str, str]:
+    """
+    Hybrid-Triage: schnelle Regeln fuer eindeutige Faelle, LLM fuer den Rest.
+
+    Returns (action, priority, reasoning).
+
+    Reasoning-Prefixes als Audit-Trail:
+      "calendar_subject"      → Regel: Kalender-Notification
+      "newsletter_sender"     → Regel: Automated-Sender
+      "llm:<text>"            → LLM-Entscheidung mit Begruendung
+      "llm_failed_<reason>"   → LLM-Aufruf fehlgeschlagen, Default-Fallback
     """
     subj = subject or ""
     sender = (sender_email or "").lower()
-    body = (body_preview or "")
 
-    # Regel 1: Kalender-Notifications -> Ablegen + Niedrig
+    # Regel 1: Kalender-Notifications -> Ablegen + Niedrig (kein LLM-Aufruf)
     if CALENDAR_SUBJECT_RE.search(subj):
         return "ablegen", "niedrig", "calendar_subject"
 
-    # Regel 2: Newsletter/Automated-Sender -> Ablegen + Niedrig
+    # Regel 2: Newsletter/Automated-Sender -> Ablegen + Niedrig (kein LLM-Aufruf)
     if NEWSLETTER_SENDER_RE.search(sender):
         return "ablegen", "niedrig", "newsletter_sender"
 
-    # Regel 3: Dringlichkeit in Subject ODER Body -> Antworten + Hoch
-    if URGENCY_RE.search(subj) or URGENCY_RE.search(body):
-        return "antworten", "hoch", "urgency_keyword"
-
-    # Default: Antworten + Mittel
-    return "antworten", "mittel", "default"
+    # Alles andere: LLM-Triage
+    try:
+        return _llm_triage(subj, sender_email, sender_name, body_preview or "")
+    except Exception as exc:
+        logger.warning(
+            "LLM triage failed for sender=%s subject=%s: %s",
+            sender_email, subj[:60], exc,
+        )
+        # Fallback: regelbasiert mit Urgency-Check
+        if URGENCY_RE.search(subj) or URGENCY_RE.search(body_preview or ""):
+            return "antworten", "hoch", "llm_failed_urgency_fallback"
+        return "antworten", "mittel", "llm_failed_default"
 
 
 # ── API-Helpers ───────────────────────────────────────────────────────────────
@@ -229,7 +388,9 @@ def _api_headers() -> Dict[str, str]:
 
 def _fetch_inbox_for_triage() -> List[Dict[str, Any]]:
     url = f"{API_URL.rstrip('/')}/api/lena/mail/inbox-for-triage"
-    params = {"days": LOOKBACK_DAYS, "limit": BATCH_LIMIT}
+    params: Dict[str, Any] = {"days": LOOKBACK_DAYS, "limit": BATCH_LIMIT}
+    if RETRIAGE_ALL:
+        params["include_categorized"] = "true"
     resp = requests.get(url, headers=_api_headers(), params=params, timeout=60)
     if resp.status_code != 200:
         raise RuntimeError(f"inbox-for-triage HTTP {resp.status_code}: {resp.text[:300]}")
@@ -282,8 +443,13 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
     mails = _fetch_inbox_for_triage()
     counters["fetched"] = len(mails)
 
-    processed = set(state.get("processed_message_ids", []))
-    new_processed: List[str] = list(state.get("processed_message_ids", []))
+    if RETRIAGE_ALL:
+        # Im Re-Triage-Mode processed_message_ids ignorieren — alles neu durchnudeln.
+        processed: set = set()
+        new_processed: List[str] = list(state.get("processed_message_ids", []))
+    else:
+        processed = set(state.get("processed_message_ids", []))
+        new_processed = list(state.get("processed_message_ids", []))
 
     for m in mails:
         mid = m.get("message_id", "")
@@ -297,6 +463,7 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
             m.get("subject", ""),
             m.get("sender_email", ""),
             m.get("body_preview", ""),
+            m.get("sender_name", ""),
         )
 
         ok = _categorize_mail(mid, action, priority)
@@ -305,6 +472,13 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
             continue
         counters["categorized"] += 1
         new_processed.append(mid)
+
+        # Rate-Limit-Safety bei großem Re-Triage-Burst:
+        # Anthropic SDK macht 429-Retry automatisch, aber wir entlasten den Burst
+        # zusätzlich mit einer kleinen Pause zwischen LLM-getriebenen Cycles.
+        # Regel-Pfade (calendar_subject, newsletter_sender) brauchen das nicht.
+        if rule_id.startswith("llm"):
+            time.sleep(0.4)
 
         logger.info(json.dumps({
             "event":       "mail_categorized",
@@ -345,13 +519,21 @@ def main() -> None:
     if not API_KEY:
         logger.error("API_SECRET_KEY nicht gesetzt — Abbruch.")
         sys.exit(1)
+    if Anthropic is None:
+        logger.error("anthropic Python-Package nicht installiert — pip install anthropic")
+        sys.exit(1)
+    if not ANTHROPIC_API_KEY:
+        logger.error("ANTHROPIC_API_KEY nicht gesetzt — Abbruch (LLM-Triage erforderlich).")
+        sys.exit(1)
     signal.signal(signal.SIGTERM, _sig_handler)
     signal.signal(signal.SIGINT, _sig_handler)
 
     state = _load_state()
     logger.info(
-        "lena_mail_triage_poller starting — interval=%ds lookback_days=%d batch_limit=%d api=%s state_file=%s",
-        POLL_INTERVAL_SEC, LOOKBACK_DAYS, BATCH_LIMIT, API_URL, STATE_FILE,
+        "lena_mail_triage_poller starting — interval=%ds lookback_days=%d batch_limit=%d "
+        "retriage_all=%s llm_model=%s api=%s state_file=%s",
+        POLL_INTERVAL_SEC, LOOKBACK_DAYS, BATCH_LIMIT,
+        RETRIAGE_ALL, LLM_MODEL, API_URL, STATE_FILE,
     )
 
     backoff = 0
