@@ -51,6 +51,7 @@ import signal
 import sqlite3
 import sys
 import time
+import unicodedata
 from datetime import datetime, timezone, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -225,7 +226,7 @@ Absender: {sender_name} <{sender_email}>
 Betreff: {subject}
 Vorschau (erste 500 Zeichen):
 {body_preview}
-
+{hint_block}
 Antworte AUSSCHLIESSLICH mit einem JSON-Objekt der Form:
 {{"action": "...", "priority": "...", "reasoning": "kurzer deutscher Satz, max 80 Zeichen"}}
 
@@ -476,6 +477,163 @@ CALENDAR_SUBJECT_RE  = re.compile('|'.join(CALENDAR_SUBJECT_PATTERNS), re.IGNORE
 URGENCY_RE           = re.compile('|'.join(URGENCY_PATTERNS), re.IGNORECASE)
 
 
+def _normalize_subject_prefix(subject: str) -> str:
+    # NFC + lowercase + strip whitespace, then first 30 chars.
+    # Write-path (override recording) and read-path (recall) MUST use this exact function.
+    return unicodedata.normalize("NFC", (subject or "").strip().lower())[:30]
+
+
+# ── Hindsight-Lern-Loop (HBE-945) ────────────────────────────────────────────
+
+class TriageLearningDB:
+    """SQLite-Backend für Pattern-Learning. Thread-safe via per-call connections."""
+
+    def __init__(self, db_path: str) -> None:
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_schema()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_schema(self) -> None:
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS triage_patterns (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sender_domain    TEXT NOT NULL,
+                    subject_prefix   TEXT NOT NULL,
+                    learned_action   TEXT NOT NULL,
+                    learned_priority TEXT NOT NULL,
+                    count            INTEGER NOT NULL DEFAULT 1,
+                    first_seen_at    TEXT NOT NULL,
+                    last_seen_at     TEXT NOT NULL
+                )
+            """)
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_pattern_key
+                    ON triage_patterns(sender_domain, subject_prefix, learned_action, learned_priority)
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS triage_overrides (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id        TEXT NOT NULL UNIQUE,
+                    sender_domain     TEXT NOT NULL,
+                    subject_prefix    TEXT NOT NULL,
+                    original_action   TEXT,
+                    original_priority TEXT,
+                    override_action   TEXT NOT NULL,
+                    override_priority TEXT NOT NULL,
+                    detected_at       TEXT NOT NULL
+                )
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def record_override(
+        self,
+        message_id: str,
+        sender_domain: str,
+        subject_prefix: str,
+        original_action: Optional[str],
+        original_priority: Optional[str],
+        override_action: str,
+        override_priority: str,
+    ) -> bool:
+        """Insert override into audit log. Returns True if new (not a duplicate)."""
+        now = datetime.now(timezone.utc).isoformat()
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO triage_overrides "
+                "(message_id, sender_domain, subject_prefix, original_action, original_priority, "
+                "override_action, override_priority, detected_at) VALUES (?,?,?,?,?,?,?,?)",
+                (message_id, sender_domain, subject_prefix, original_action, original_priority,
+                 override_action, override_priority, now),
+            )
+            changed = conn.execute("SELECT changes()").fetchone()[0]
+            conn.commit()
+            return changed > 0
+        except Exception as exc:
+            logger.warning("TriageLearningDB.record_override error: %s", exc)
+            return False
+        finally:
+            conn.close()
+
+    def upsert_pattern(
+        self,
+        sender_domain: str,
+        subject_prefix: str,
+        learned_action: str,
+        learned_priority: str,
+    ) -> int:
+        """Upsert aggregated pattern. Returns updated count."""
+        now = datetime.now(timezone.utc).isoformat()
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT INTO triage_patterns "
+                "(sender_domain, subject_prefix, learned_action, learned_priority, count, first_seen_at, last_seen_at) "
+                "VALUES (?,?,?,?,1,?,?) "
+                "ON CONFLICT(sender_domain, subject_prefix, learned_action, learned_priority) "
+                "DO UPDATE SET count = count + 1, last_seen_at = excluded.last_seen_at",
+                (sender_domain, subject_prefix, learned_action, learned_priority, now, now),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT count FROM triage_patterns WHERE sender_domain=? AND subject_prefix=? "
+                "AND learned_action=? AND learned_priority=?",
+                (sender_domain, subject_prefix, learned_action, learned_priority),
+            ).fetchone()
+            return int(row[0]) if row else 0
+        except Exception as exc:
+            logger.warning("TriageLearningDB.upsert_pattern error: %s", exc)
+            return 0
+        finally:
+            conn.close()
+
+    def recall_pattern(
+        self,
+        sender_domain: str,
+        subject_prefix: str,
+        threshold: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Return dominant learned pattern if count >= threshold, else None."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT learned_action, learned_priority, count FROM triage_patterns "
+                "WHERE sender_domain=? AND subject_prefix=? AND count >= ? "
+                "ORDER BY count DESC LIMIT 1",
+                (sender_domain, subject_prefix, threshold),
+            ).fetchone()
+            if row:
+                return {"action": str(row[0]), "priority": str(row[1]), "count": int(row[2])}
+        except Exception as exc:
+            logger.warning("TriageLearningDB.recall_pattern error: %s", exc)
+        finally:
+            conn.close()
+        return None
+
+
+_learning_db: Optional["TriageLearningDB"] = None
+
+
+def _get_learning_db() -> Optional["TriageLearningDB"]:
+    global _learning_db
+    if _learning_db is None:
+        try:
+            _learning_db = TriageLearningDB(LEARNING_DB)
+        except Exception as exc:
+            logger.warning("TriageLearningDB init failed — learning disabled: %s", exc)
+    return _learning_db
+
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -577,10 +735,16 @@ def _strip_json_fences(raw: str) -> str:
     return raw.strip()
 
 
-def _llm_triage(subject: str, sender_email: str, sender_name: str, body_preview: str) -> Tuple[str, str, str]:
+def _llm_triage(
+    subject: str,
+    sender_email: str,
+    sender_name: str,
+    body_preview: str,
+    hindsight_hint: Optional[str] = None,
+) -> Tuple[str, str, str]:
     """LLM-basierte Triage. Returns (action, priority, reasoning_with_prefix).
 
-    Raises Exception bei nicht-recoverable LLM-Fehlern — _triage_mail faengt
+    Raises Exception bei nicht-recoverable LLM-Fehlern — triage_mail faengt
     das ab und nutzt Fallback.
     """
     client = _get_llm_client()
@@ -592,6 +756,7 @@ def _llm_triage(subject: str, sender_email: str, sender_name: str, body_preview:
         sender_email=sender_email or "(keine)",
         subject=subject or "(kein Betreff)",
         body_preview=(body_preview or "(leer)")[:500],
+        hint_block=f"\n{hindsight_hint}" if hindsight_hint else "",
     )
 
     response = client.messages.create(
@@ -616,11 +781,17 @@ def _llm_triage(subject: str, sender_email: str, sender_name: str, body_preview:
     return action, priority, f"llm:{reasoning}"
 
 
-def triage_mail(subject: str, sender_email: str, body_preview: str, sender_name: str = "") -> Tuple[str, str, str]:
+def triage_mail(
+    subject: str,
+    sender_email: str,
+    body_preview: str,
+    sender_name: str = "",
+) -> Tuple[str, str, str, Optional[int]]:
     """
     Hybrid-Triage: schnelle Regeln → Hindsight-Recall → LLM.
 
-    Returns (action, priority, reasoning).
+    Returns (action, priority, rule_id, learned_from).
+    learned_from: count der Overrides die das angewendete Pattern erzeugt haben, sonst None.
 
     Reasoning-Prefixes als Audit-Trail:
       "calendar_subject"           → Regel: Kalender-Notification
@@ -634,23 +805,35 @@ def triage_mail(subject: str, sender_email: str, body_preview: str, sender_name:
 
     # Regel 1: Kalender-Notifications -> Ablegen + Niedrig (kein LLM-Aufruf)
     if CALENDAR_SUBJECT_RE.search(subj):
-        return "ablegen", "niedrig", "calendar_subject"
+        return "ablegen", "niedrig", "calendar_subject", None
 
     # Regel 2: Newsletter/Automated-Sender -> Ablegen + Niedrig (kein LLM-Aufruf)
     if NEWSLETTER_SENDER_RE.search(sender):
-        return "ablegen", "niedrig", "newsletter_sender"
+        return "ablegen", "niedrig", "newsletter_sender", None
 
-    # Regel 3: Hindsight-Recall — gelerntes Pattern (Sven-Override × LEARN_THRESHOLD)
-    domain = sender.split("@")[-1] if "@" in sender else sender
-    prefix = _normalize_subject_prefix(subj)
-    recall = _hindsight_recall(domain, prefix)
-    if recall:
-        action, priority, count = recall
-        return action, priority, f"llm+memory:{domain}/{prefix}(n={count})"
+    # Hindsight-Recall: gelerntes Pattern als Hint an LLM übergeben
+    sender_domain = sender_email.split("@")[-1].lower() if "@" in sender_email else ""
+    subject_prefix = _normalize_subject_prefix(subj)
+    hindsight_hint: Optional[str] = None
+    hindsight_pattern: Optional[Dict[str, Any]] = None
 
-    # Alles andere: LLM-Triage
+    db = _get_learning_db()
+    if db:
+        hindsight_pattern = db.recall_pattern(sender_domain, subject_prefix, LEARN_THRESHOLD)
+        if hindsight_pattern:
+            hindsight_hint = (
+                f"Sven hat in der Vergangenheit ähnliche Mails von {sender_domain} auf "
+                f"\"{hindsight_pattern['action']} + {hindsight_pattern['priority']}\" gesetzt "
+                f"({hindsight_pattern['count']}× — Lena-Hinweis: bitte dieses Pattern berücksichtigen)."
+            )
+
+    # LLM-Triage mit optionalem Hindsight-Hint
     try:
-        return _llm_triage(subj, sender_email, sender_name, body_preview or "")
+        action, priority, reasoning = _llm_triage(subj, sender_email, sender_name, body_preview or "", hindsight_hint)
+        if hindsight_pattern and action == hindsight_pattern["action"] and priority == hindsight_pattern["priority"]:
+            rule_id = f"llm+memory:{sender_domain}/{subject_prefix}"
+            return action, priority, rule_id, hindsight_pattern["count"]
+        return action, priority, reasoning, None
     except Exception as exc:
         logger.warning(
             "LLM triage failed for sender=%s subject=%s: %s",
@@ -658,8 +841,8 @@ def triage_mail(subject: str, sender_email: str, body_preview: str, sender_name:
         )
         # Fallback: regelbasiert mit Urgency-Check
         if URGENCY_RE.search(subj) or URGENCY_RE.search(body_preview or ""):
-            return "antworten", "hoch", "llm_failed_urgency_fallback"
-        return "antworten", "mittel", "llm_failed_default"
+            return "antworten", "hoch", "llm_failed_urgency_fallback", None
+        return "antworten", "mittel", "llm_failed_default", None
 
 
 # ── API-Helpers ───────────────────────────────────────────────────────────────
@@ -714,6 +897,78 @@ def _tg_alert(text: str, state: Dict[str, Any]) -> None:
         logger.warning("Telegram alert failed: %s", exc)
 
 
+# ── Hindsight-Lern-Pass ───────────────────────────────────────────────────────
+
+def _learn_from_overrides(since: str, state: Dict[str, Any], db: "TriageLearningDB") -> int:
+    """
+    Erkennt Svens manuelle Overrides (Mails mit Lena:*-Kategorien, die nach `since`
+    modifiziert wurden) und trägt sie ins Lern-Backend ein.
+    Gibt die Anzahl neuer (bisher unbekannter) Overrides zurück.
+    """
+    if not since:
+        since = (datetime.now(timezone.utc) - timedelta(days=OVERRIDE_LOOKBACK_DAYS)).isoformat()
+
+    url = f"{API_URL.rstrip('/')}/api/lena/mail/categorized-overrides"
+    try:
+        resp = requests.get(
+            url,
+            headers=_api_headers(),
+            params={"since": since, "limit": 100},
+            timeout=60,
+        )
+        if resp.status_code != 200:
+            logger.warning("categorized-overrides HTTP %d: %s", resp.status_code, resp.text[:200])
+            return 0
+    except Exception as exc:
+        logger.warning("categorized-overrides request failed: %s", exc)
+        return 0
+
+    processed = set(state.get("processed_message_ids", []))
+    new_count = 0
+
+    for mail in resp.json().get("mails", []):
+        mid = mail.get("message_id", "")
+        if not mid or mid not in processed:
+            # Nur Mails lernen, die der Poller selbst triagiert hat
+            continue
+
+        sender_email = mail.get("sender_email", "") or ""
+        sender_domain = mail.get("sender_domain", "") or (
+            sender_email.split("@")[-1].lower() if "@" in sender_email else ""
+        )
+        subject_prefix = _normalize_subject_prefix(mail.get("subject", "") or "")
+        override_action = mail.get("current_action", "") or ""
+        override_priority = mail.get("current_priority", "") or ""
+
+        if not override_action or not override_priority:
+            continue
+
+        is_new = db.record_override(
+            message_id=mid,
+            sender_domain=sender_domain,
+            subject_prefix=subject_prefix,
+            original_action=None,
+            original_priority=None,
+            override_action=override_action,
+            override_priority=override_priority,
+        )
+
+        if is_new:
+            new_count += 1
+            count = db.upsert_pattern(sender_domain, subject_prefix, override_action, override_priority)
+            logger.info(json.dumps({
+                "event":             "override_learned",
+                "message_id":        mid,
+                "sender_domain":     sender_domain,
+                "subject_prefix":    subject_prefix,
+                "override_action":   override_action,
+                "override_priority": override_priority,
+                "pattern_count":     count,
+            }, ensure_ascii=False))
+
+    return new_count
+
+
 # ── Polling-Loop ──────────────────────────────────────────────────────────────
 def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
     """Run one triage pass. Returns counter dict for logging."""
@@ -723,7 +978,12 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
         "categorized": 0,
         "failed": 0,
         "high_priority": 0,
+        "overrides_learned": 0,
     }
+
+    # Save before the pass — used as `since` for override detection below
+    prev_last_triage_at = state.get("last_triage_at", "")
+
     mails = _fetch_inbox_for_triage()
     counters["fetched"] = len(mails)
 
@@ -743,7 +1003,7 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
             counters["skipped_processed"] += 1
             continue
 
-        action, priority, rule_id = triage_mail(
+        action, priority, rule_id, learned_from = triage_mail(
             m.get("subject", ""),
             m.get("sender_email", ""),
             m.get("body_preview", ""),
@@ -773,7 +1033,7 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
         if rule_id.startswith("llm"):
             time.sleep(0.4)
 
-        logger.info(json.dumps({
+        log_entry: Dict[str, Any] = {
             "event":       "mail_categorized",
             "message_id":  mid,
             "subject":     (m.get("subject", "") or "")[:120],
@@ -781,7 +1041,10 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
             "action":      action,
             "priority":    priority,
             "rule":        rule_id,
-        }, ensure_ascii=False))
+        }
+        if learned_from is not None:
+            log_entry["learned_from"] = learned_from
+        logger.info(json.dumps(log_entry, ensure_ascii=False))
 
         if priority == "hoch":
             counters["high_priority"] += 1
@@ -798,9 +1061,13 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
     state["last_triage_at"] = datetime.now(timezone.utc).isoformat()
     _save_state(state)
 
-    # Hindsight-Lern-Pass: Overrides seit dem letzten Triage-Cycle erkennen
-    if not RETRIAGE_ALL and last_triage_at:
-        _run_learning_pass(last_triage_at, counters)
+    # Lern-Pass: Overrides seit letztem Lauf erkennen und ins Pattern-Backend schreiben
+    db = _get_learning_db()
+    if db:
+        n_new = _learn_from_overrides(prev_last_triage_at, state, db)
+        counters["overrides_learned"] = n_new
+        if n_new:
+            logger.info("Override-Learning: %d neue Override(s) aufgezeichnet", n_new)
 
     return counters
 
