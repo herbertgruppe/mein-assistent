@@ -113,6 +113,7 @@ TG_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_ADMIN_CHAT = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
 
 MAX_PROCESSED_IDS  = 5_000   # cap to prevent unbounded state
+MAX_TRIAGE_RESULTS = 500     # cap for triage_results cache in state
 MAX_BACKOFF_SEC    = 300
 TELEGRAM_HOCH_PRIO_DAILY_CAP = 5  # max alerts/day (anti-spam)
 
@@ -692,6 +693,12 @@ def _save_state(state: Dict[str, Any]) -> None:
     ids = state.get("processed_message_ids", [])
     if len(ids) > MAX_PROCESSED_IDS:
         state["processed_message_ids"] = ids[-MAX_PROCESSED_IDS:]
+    # Cap triage_results (LRU by insertion order — oldest keys evicted first)
+    tr = state.get("triage_results")
+    if isinstance(tr, dict) and len(tr) > MAX_TRIAGE_RESULTS:
+        excess = len(tr) - MAX_TRIAGE_RESULTS
+        for old_key in list(tr.keys())[:excess]:
+            del tr[old_key]
     # Cap telegram_alerts_today to last 24h
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
     state["telegram_alerts_today"] = [
@@ -943,12 +950,13 @@ def _learn_from_overrides(since: str, state: Dict[str, Any], db: "TriageLearning
         if not override_action or not override_priority:
             continue
 
+        cached = state.get("triage_results", {}).get(mid)
         is_new = db.record_override(
             message_id=mid,
             sender_domain=sender_domain,
             subject_prefix=subject_prefix,
-            original_action=None,
-            original_priority=None,
+            original_action=cached["action"] if cached else None,
+            original_priority=cached["priority"] if cached else None,
             override_action=override_action,
             override_priority=override_priority,
         )
@@ -1016,6 +1024,14 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
             continue
         counters["categorized"] += 1
         new_processed.append(mid)
+
+        # Cache Lena's triage result so _learn_from_overrides can fill original_action/priority
+        triage_results = state.setdefault("triage_results", {})
+        triage_results[mid] = {"action": action, "priority": priority}
+        if len(triage_results) > MAX_TRIAGE_RESULTS:
+            excess = len(triage_results) - MAX_TRIAGE_RESULTS
+            for old_key in list(triage_results.keys())[:excess]:
+                del triage_results[old_key]
 
         # Hindsight: Kategorie-Entscheidung für spätere Override-Detection speichern
         sender_email = m.get("sender_email", "") or ""
