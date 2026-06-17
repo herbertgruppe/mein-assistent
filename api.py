@@ -117,7 +117,7 @@ _TEMPLATES_DIR.mkdir(exist_ok=True)
 _STATIC_DIR.mkdir(exist_ok=True)
 
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
-app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+app.mount("/review-static", StaticFiles(directory=str(_STATIC_DIR)), name="review-static")
 
 # protocols.db beim API-Start initialisieren (führt Migration automatisch aus)
 _protocols_db = ProtocolsDB(db_path=str(_BASE_DIR / "data" / "protocols.db"))
