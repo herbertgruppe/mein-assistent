@@ -2895,6 +2895,37 @@ class LenaContactUpdateResponse(BaseModel):
     contact_id: str
 
 
+class LenaContactCreateRequest(BaseModel):
+    givenName: str = Field(..., description="Vorname (Pflicht)")
+    surname: str = Field(..., description="Nachname (Pflicht)")
+    emailAddresses: List[str] = Field(default_factory=list, description="E-Mail-Adressen (max. 3)")
+    mobilePhone: Optional[str] = None
+    businessPhones: List[str] = Field(default_factory=list)
+    jobTitle: Optional[str] = None
+    companyName: Optional[str] = None
+    fileAs: Optional[str] = None
+
+    @field_validator("givenName", "surname")
+    @classmethod
+    def must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("darf nicht leer sein")
+        return v.strip()
+
+    @field_validator("emailAddresses")
+    @classmethod
+    def max_three_emails(cls, v: List[str]) -> List[str]:
+        if len(v) > 3:
+            raise ValueError("maximal 3 E-Mail-Adressen erlaubt")
+        return v
+
+
+class LenaContactCreateResponse(BaseModel):
+    success: bool
+    contact_id: str
+    display_name: str
+
+
 @app.post("/api/lena/mail/move", response_model=LenaMoveMailResponse)
 def lena_mail_move(
     req: LenaMoveMailRequest,
@@ -3450,6 +3481,73 @@ def lena_contacts_search(
                 )
 
     return LenaContactsSearchResponse(contacts=contacts)
+
+
+@app.post("/api/lena/contacts", response_model=LenaContactCreateResponse)
+def lena_contact_create(
+    req: LenaContactCreateRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Legt einen neuen Outlook-Kontakt an (HBE-979).
+
+    Pflichtfelder: givenName, surname.
+    Optional: emailAddresses (max. 3), mobilePhone, businessPhones, jobTitle, companyName, fileAs.
+
+    Unter der Haube: POST https://graph.microsoft.com/v1.0/me/contacts
+    HTTP 400 bei leeren Pflichtfeldern oder mehr als 3 E-Mail-Adressen.
+    HTTP 503 wenn Token abgelaufen.
+    HTTP 502 bei Graph-API-Fehler.
+    """
+    import requests as _rq
+
+    payload: dict = {
+        "givenName": req.givenName,
+        "surname": req.surname,
+    }
+    if req.emailAddresses:
+        payload["emailAddresses"] = [
+            {"address": email, "name": email} for email in req.emailAddresses
+        ]
+    if req.mobilePhone is not None:
+        payload["mobilePhone"] = req.mobilePhone
+    if req.businessPhones:
+        payload["businessPhones"] = req.businessPhones
+    if req.jobTitle is not None:
+        payload["jobTitle"] = req.jobTitle
+    if req.companyName is not None:
+        payload["companyName"] = req.companyName
+    if req.fileAs is not None:
+        payload["fileAs"] = req.fileAs
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Content-Type": "application/json",
+    }
+
+    resp = _rq.post(
+        "https://graph.microsoft.com/v1.0/me/contacts",
+        headers=headers,
+        json=payload,
+        timeout=30,
+    )
+
+    if resp.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler beim Anlegen: HTTP {resp.status_code} — {resp.text[:300]}",
+        )
+
+    data = resp.json()
+    return LenaContactCreateResponse(
+        success=True,
+        contact_id=data.get("id", ""),
+        display_name=data.get("displayName", f"{req.givenName} {req.surname}"),
+    )
 
 
 @app.patch("/api/lena/contacts/{contact_id}", response_model=LenaContactUpdateResponse)
