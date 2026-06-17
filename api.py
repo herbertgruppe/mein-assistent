@@ -2858,6 +2858,21 @@ class LenaTriageSummaryResponse(BaseModel):
     total_categorized: int
 
 
+class LenaTriageOverride(BaseModel):
+    message_id: str
+    subject: str
+    sender_email: str
+    sender_domain: str
+    current_action: str   # aktuell gesetzte Lena-Kategorie (nach Sven-Override)
+    current_priority: str
+    last_modified_at: str
+
+
+class LenaTriageOverridesResponse(BaseModel):
+    overrides: List[LenaTriageOverride]
+    since: str
+
+
 class LenaContactResult(BaseModel):
     id: str = ""
     name: str
@@ -3257,6 +3272,93 @@ def lena_mail_triage_summary(
         since=since_str,
         total_categorized=total,
     )
+
+
+@app.get("/api/lena/mail/categorized-overrides", response_model=LenaTriageOverridesResponse)
+def lena_mail_categorized_overrides(
+    since: str,
+    limit: int = 50,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Liefert Mails bei denen eine Lena:*-Kategorie existiert und die seit `since`
+    verändert wurden (lastModifiedDateTime >= since).
+
+    Wird vom Mail-Triage-Poller für den Hindsight-Lern-Pass genutzt: der Poller
+    vergleicht die aktuellen Kategorien mit seinen gespeicherten Originalen und
+    erkennt so Sven-Overrides.
+
+    Query-Parameter:
+      - since  ISO 8601 UTC-Zeitstempel — MUSS UTC sein.
+      - limit  Max Ergebnisse (1–200, Standard: 50).
+
+    Implementierung: GET /me/mailFolders/Inbox/messages?$filter=lastModifiedDateTime ge {since}
+    Client-side Filter: nur Mails MIT Lena:*-Kategorie zurückgeben.
+    """
+    import requests as _rq
+    from datetime import datetime, timezone
+
+    if not since:
+        raise HTTPException(status_code=400, detail="since-Parameter ist Pflicht (ISO 8601 UTC).")
+    try:
+        since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        if since_dt.tzinfo is None:
+            raise ValueError("No timezone")
+        since_dt = since_dt.astimezone(timezone.utc)
+        since_str = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, OverflowError):
+        raise HTTPException(
+            status_code=400,
+            detail="since muss ein gültiger ISO 8601 UTC-Zeitstempel sein.",
+        )
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit muss zwischen 1 und 200 liegen.")
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {"Authorization": f"Bearer {tool.access_token}"}
+    action_map = {v: k for k, v in LENA_ACTION_CATEGORIES.items()}
+    priority_map = {v: k for k, v in LENA_PRIORITY_CATEGORIES.items()}
+
+    url = (
+        "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages"
+        f"?$filter=lastModifiedDateTime ge {since_str}"
+        f"&$top={min(limit * 3, 200)}"
+        "&$select=id,subject,from,lastModifiedDateTime,categories"
+        "&$orderby=lastModifiedDateTime desc"
+    )
+    resp = _rq.get(url, headers=headers, timeout=30)
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler: HTTP {resp.status_code} — {resp.text[:300]}",
+        )
+
+    overrides: List[LenaTriageOverride] = []
+    for m in resp.json().get("value", []):
+        cats = m.get("categories", []) or []
+        lena_action = next((action_map[c] for c in cats if c in action_map), None)
+        lena_priority = next((priority_map[c] for c in cats if c in priority_map), None)
+        if not lena_action or not lena_priority:
+            continue  # skip un-categorized mails
+        sender = (m.get("from") or {}).get("emailAddress", {}) or {}
+        email_addr = (sender.get("address") or "").lower()
+        domain = email_addr.split("@")[-1] if "@" in email_addr else email_addr
+        overrides.append(LenaTriageOverride(
+            message_id=m.get("id", ""),
+            subject=(m.get("subject") or ""),
+            sender_email=email_addr,
+            sender_domain=domain,
+            current_action=lena_action,
+            current_priority=lena_priority,
+            last_modified_at=(m.get("lastModifiedDateTime") or ""),
+        ))
+        if len(overrides) >= limit:
+            break
+
+    return LenaTriageOverridesResponse(overrides=overrides, since=since_str)
 
 
 @app.get("/api/lena/contacts/search", response_model=LenaContactsSearchResponse)
