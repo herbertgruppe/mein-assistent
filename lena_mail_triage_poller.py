@@ -37,6 +37,9 @@ Env-Vars:
   TELEGRAM_BOT_TOKEN                 Fuer Hoch-Prio-Alerts (optional)
   TELEGRAM_ADMIN_CHAT_ID             Chat-ID (Sven)
   LENA_MAIL_TRIAGE_CONFIG_FILE       Pfad zur Persona-Config (Standard: config/lena-mail-triage.yaml)
+  LENA_MAIL_TRIAGE_LEARN_THRESHOLD   Anzahl Override-Ereignisse bis Pattern gelernt (Standard: 3)
+  LENA_MAIL_TRIAGE_LEARNING_DB       SQLite-Datei fuer Hindsight-Lernloop (Standard: /var/lib/...)
+  LENA_MAIL_TRIAGE_OVERRIDE_LOOKBACK_DAYS  Lookback fuer Override-Detection (Standard: 30)
 """
 from __future__ import annotations
 
@@ -45,6 +48,7 @@ import logging
 import os
 import re
 import signal
+import sqlite3
 import sys
 import time
 from datetime import datetime, timezone, timedelta
@@ -110,6 +114,14 @@ TG_ADMIN_CHAT = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
 MAX_PROCESSED_IDS  = 5_000   # cap to prevent unbounded state
 MAX_BACKOFF_SEC    = 300
 TELEGRAM_HOCH_PRIO_DAILY_CAP = 5  # max alerts/day (anti-spam)
+
+# ── Hindsight-Lernloop-Config ──────────────────────────────────────────────────
+LEARN_THRESHOLD     = int(os.getenv("LENA_MAIL_TRIAGE_LEARN_THRESHOLD", "3"))
+LEARNING_DB         = os.getenv(
+    "LENA_MAIL_TRIAGE_LEARNING_DB",
+    "/var/lib/mail-triage-poller/triage_learning.db",
+)
+OVERRIDE_LOOKBACK_DAYS = int(os.getenv("LENA_MAIL_TRIAGE_OVERRIDE_LOOKBACK_DAYS", "30"))
 
 
 # ── LLM-Persona für Sven (aus config/lena-mail-triage.yaml) ──────────────────
@@ -219,6 +231,201 @@ Antworte AUSSCHLIESSLICH mit einem JSON-Objekt der Form:
 
 KEIN Markdown, KEIN ```json``` Block, KEIN Fließtext drumherum.
 """
+
+
+# ── Hindsight-Lernloop (SQLite-Backend) ───────────────────────────────────────
+
+def _init_learning_db() -> None:
+    """Erstellt SQLite-Schema für den Hindsight-Lernloop (idempotent)."""
+    db_path = Path(LEARNING_DB)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS triage_history (
+                message_id      TEXT PRIMARY KEY,
+                sender_domain   TEXT NOT NULL,
+                subject_prefix  TEXT NOT NULL,
+                action          TEXT NOT NULL,
+                priority        TEXT NOT NULL,
+                categorized_at  TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS triage_overrides (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id        TEXT NOT NULL UNIQUE,
+                sender_domain     TEXT NOT NULL,
+                subject_prefix    TEXT NOT NULL,
+                original_action   TEXT NOT NULL,
+                original_priority TEXT NOT NULL,
+                override_action   TEXT NOT NULL,
+                override_priority TEXT NOT NULL,
+                detected_at       TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS triage_patterns (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                sender_domain    TEXT NOT NULL,
+                subject_prefix   TEXT NOT NULL,
+                learned_action   TEXT NOT NULL,
+                learned_priority TEXT NOT NULL,
+                count            INTEGER NOT NULL DEFAULT 1,
+                first_seen_at    TEXT NOT NULL,
+                last_seen_at     TEXT NOT NULL
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pattern_key
+                ON triage_patterns(sender_domain, subject_prefix, learned_action, learned_priority);
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _normalize_subject_prefix(subject: str) -> str:
+    """Normalisiert Subject für Pattern-Matching (lowercase, erste 30 Zeichen)."""
+    # Strip common reply/forward prefixes
+    s = re.sub(r'^(re|aw|fwd|wg):\s*', '', (subject or "").lower().strip(), flags=re.IGNORECASE)
+    return s[:30].strip()
+
+
+def _record_categorization(message_id: str, sender_domain: str, subject_prefix: str,
+                            action: str, priority: str) -> None:
+    """Speichert Lenas Kategorie-Entscheidung für spätere Override-Detection."""
+    try:
+        conn = sqlite3.connect(LEARNING_DB)
+        try:
+            conn.execute(
+                """INSERT OR REPLACE INTO triage_history
+                   (message_id, sender_domain, subject_prefix, action, priority, categorized_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (message_id, sender_domain, subject_prefix, action, priority,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("Failed to record categorization for %s: %s", message_id, exc)
+
+
+def _detect_and_store_overrides(overrides_from_api: List[Dict[str, Any]]) -> int:
+    """
+    Vergleicht API-Overrides mit gespeicherten Originalen und speichert echte Overrides.
+    Returns: Anzahl neu erkannter Overrides.
+    """
+    if not overrides_from_api:
+        return 0
+    new_count = 0
+    try:
+        conn = sqlite3.connect(LEARNING_DB)
+        try:
+            for item in overrides_from_api:
+                mid = item.get("message_id", "")
+                if not mid:
+                    continue
+                row = conn.execute(
+                    "SELECT action, priority FROM triage_history WHERE message_id = ?", (mid,)
+                ).fetchone()
+                if not row:
+                    continue  # kein Original gespeichert → kein Override erkennbar
+                orig_action, orig_priority = row
+                cur_action = item.get("current_action", "")
+                cur_priority = item.get("current_priority", "")
+                if cur_action == orig_action and cur_priority == orig_priority:
+                    continue  # keine Änderung
+                # Echter Override — speichern (IGNORE falls schon bekannt)
+                try:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO triage_overrides
+                           (message_id, sender_domain, subject_prefix,
+                            original_action, original_priority,
+                            override_action, override_priority, detected_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            mid,
+                            item.get("sender_domain", ""),
+                            _normalize_subject_prefix(item.get("subject", "")),
+                            orig_action, orig_priority,
+                            cur_action, cur_priority,
+                            datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
+                    if conn.execute("SELECT changes()").fetchone()[0] > 0:
+                        new_count += 1
+                except Exception as e:
+                    logger.warning("Failed to store override for %s: %s", mid, e)
+            conn.commit()
+            # Aggregiere Patterns nach neuem Override
+            if new_count > 0:
+                _aggregate_patterns(conn)
+                conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("Override detection DB error: %s", exc)
+    return new_count
+
+
+def _aggregate_patterns(conn: sqlite3.Connection) -> None:
+    """Aktualisiert triage_patterns aus triage_overrides (INSERT OR REPLACE by count)."""
+    conn.executescript("""
+        INSERT INTO triage_patterns
+            (sender_domain, subject_prefix, learned_action, learned_priority, count, first_seen_at, last_seen_at)
+        SELECT
+            sender_domain, subject_prefix, override_action, override_priority,
+            COUNT(*) as cnt,
+            MIN(detected_at), MAX(detected_at)
+        FROM triage_overrides
+        GROUP BY sender_domain, subject_prefix, override_action, override_priority
+        ON CONFLICT(sender_domain, subject_prefix, learned_action, learned_priority) DO UPDATE SET
+            count = excluded.count,
+            last_seen_at = excluded.last_seen_at;
+    """)
+
+
+def _hindsight_recall(sender_domain: str, subject_prefix: str) -> Optional[Tuple[str, str, int]]:
+    """
+    Schaut nach ob ein gelerntes Pattern (threshold erreicht) für diesen Absender/Betreff existiert.
+    Returns (action, priority, count) wenn Pattern >= LEARN_THRESHOLD, sonst None.
+    """
+    if not Path(LEARNING_DB).exists():
+        return None
+    try:
+        conn = sqlite3.connect(LEARNING_DB)
+        try:
+            row = conn.execute(
+                """SELECT learned_action, learned_priority, count
+                   FROM triage_patterns
+                   WHERE sender_domain = ? AND subject_prefix = ? AND count >= ?
+                   ORDER BY count DESC LIMIT 1""",
+                (sender_domain, subject_prefix, LEARN_THRESHOLD),
+            ).fetchone()
+            return (row[0], row[1], row[2]) if row else None
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("Hindsight recall DB error: %s", exc)
+        return None
+
+
+def _fetch_categorized_overrides(since_iso: str) -> List[Dict[str, Any]]:
+    """Ruft kategorisierte Mails die seit `since_iso` verändert wurden vom Backend ab."""
+    url = f"{API_URL.rstrip('/')}/api/lena/mail/categorized-overrides"
+    try:
+        resp = requests.get(
+            url,
+            headers=_api_headers(),
+            params={"since": since_iso, "limit": "100"},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            logger.warning("categorized-overrides HTTP %d: %s", resp.status_code, resp.text[:200])
+            return []
+        return resp.json().get("overrides", [])
+    except Exception as exc:
+        logger.warning("categorized-overrides fetch error: %s", exc)
+        return []
 
 
 # ── Triage-Regeln (v1, regelbasiert) ──────────────────────────────────────────
@@ -411,15 +618,16 @@ def _llm_triage(subject: str, sender_email: str, sender_name: str, body_preview:
 
 def triage_mail(subject: str, sender_email: str, body_preview: str, sender_name: str = "") -> Tuple[str, str, str]:
     """
-    Hybrid-Triage: schnelle Regeln fuer eindeutige Faelle, LLM fuer den Rest.
+    Hybrid-Triage: schnelle Regeln → Hindsight-Recall → LLM.
 
     Returns (action, priority, reasoning).
 
     Reasoning-Prefixes als Audit-Trail:
-      "calendar_subject"      → Regel: Kalender-Notification
-      "newsletter_sender"     → Regel: Automated-Sender
-      "llm:<text>"            → LLM-Entscheidung mit Begruendung
-      "llm_failed_<reason>"   → LLM-Aufruf fehlgeschlagen, Default-Fallback
+      "calendar_subject"           → Regel: Kalender-Notification
+      "newsletter_sender"          → Regel: Automated-Sender
+      "llm+memory:<domain>/<pfx>"  → Gelerntes Pattern angewendet (Hindsight)
+      "llm:<text>"                 → LLM-Entscheidung mit Begruendung
+      "llm_failed_<reason>"        → LLM-Aufruf fehlgeschlagen, Default-Fallback
     """
     subj = subject or ""
     sender = (sender_email or "").lower()
@@ -431,6 +639,14 @@ def triage_mail(subject: str, sender_email: str, body_preview: str, sender_name:
     # Regel 2: Newsletter/Automated-Sender -> Ablegen + Niedrig (kein LLM-Aufruf)
     if NEWSLETTER_SENDER_RE.search(sender):
         return "ablegen", "niedrig", "newsletter_sender"
+
+    # Regel 3: Hindsight-Recall — gelerntes Pattern (Sven-Override × LEARN_THRESHOLD)
+    domain = sender.split("@")[-1] if "@" in sender else sender
+    prefix = _normalize_subject_prefix(subj)
+    recall = _hindsight_recall(domain, prefix)
+    if recall:
+        action, priority, count = recall
+        return action, priority, f"llm+memory:{domain}/{prefix}(n={count})"
 
     # Alles andere: LLM-Triage
     try:
@@ -541,6 +757,15 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
         counters["categorized"] += 1
         new_processed.append(mid)
 
+        # Hindsight: Kategorie-Entscheidung für spätere Override-Detection speichern
+        sender_email = m.get("sender_email", "") or ""
+        domain = sender_email.lower().split("@")[-1] if "@" in sender_email else sender_email.lower()
+        _record_categorization(
+            mid, domain,
+            _normalize_subject_prefix(m.get("subject", "") or ""),
+            action, priority,
+        )
+
         # Rate-Limit-Safety bei großem Re-Triage-Burst:
         # Anthropic SDK macht 429-Retry automatisch, aber wir entlasten den Burst
         # zusätzlich mit einer kleinen Pause zwischen LLM-getriebenen Cycles.
@@ -569,9 +794,31 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
             )
 
     state["processed_message_ids"] = new_processed
+    last_triage_at = state.get("last_triage_at", "")
     state["last_triage_at"] = datetime.now(timezone.utc).isoformat()
     _save_state(state)
+
+    # Hindsight-Lern-Pass: Overrides seit dem letzten Triage-Cycle erkennen
+    if not RETRIAGE_ALL and last_triage_at:
+        _run_learning_pass(last_triage_at, counters)
+
     return counters
+
+
+def _run_learning_pass(since_iso: str, counters: Dict[str, Any]) -> None:
+    """Lern-Pass: holt Override-Liste vom Backend und aktualisiert SQLite-Patterns."""
+    try:
+        overrides = _fetch_categorized_overrides(since_iso)
+        new_overrides = _detect_and_store_overrides(overrides)
+        counters["learned_overrides"] = new_overrides
+        if new_overrides:
+            logger.info(json.dumps({
+                "event": "hindsight_overrides_detected",
+                "count": new_overrides,
+                "threshold": LEARN_THRESHOLD,
+            }, ensure_ascii=False))
+    except Exception as exc:
+        logger.warning("Learning pass error: %s", exc)
 
 
 _RUNNING = True
@@ -606,6 +853,16 @@ def main() -> None:
             "Persona-Config nicht gefunden oder PyYAML fehlt — nutze Hardcoded-Fallback. "
             "Empfehlung: pip install pyyaml && config/lena-mail-triage.yaml prüfen."
         )
+
+    # Hindsight-Lernloop: SQLite-Schema initialisieren
+    try:
+        _init_learning_db()
+        logger.info(
+            "Hindsight-Lernloop aktiv: db=%s threshold=%d lookback_days=%d",
+            LEARNING_DB, LEARN_THRESHOLD, OVERRIDE_LOOKBACK_DAYS,
+        )
+    except Exception as exc:
+        logger.warning("Hindsight-DB init fehlgeschlagen (Lernloop deaktiviert): %s", exc)
 
     state = _load_state()
     logger.info(
