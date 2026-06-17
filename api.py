@@ -2410,6 +2410,7 @@ class LenaInboxMessage(BaseModel):
     importance: str = "normal"
     body_preview: str = ""
     has_attachments: bool = False
+    categories: List[str] = []
 
 
 class LenaInboxResponse(BaseModel):
@@ -2480,7 +2481,7 @@ def lena_mail_inbox(
     params: dict = {
         "$top": limit,
         "$orderby": "receivedDateTime desc",
-        "$select": "id,subject,from,receivedDateTime,isRead,importance,bodyPreview,hasAttachments",
+        "$select": "id,subject,from,receivedDateTime,isRead,importance,bodyPreview,hasAttachments,categories",
     }
     if unread_only:
         params["$filter"] = "isRead eq false"
@@ -2506,6 +2507,7 @@ def lena_mail_inbox(
                 importance=m.get("importance", "normal") or "normal",
                 body_preview=m.get("bodyPreview", "") or "",
                 has_attachments=bool(m.get("hasAttachments", False)),
+                categories=m.get("categories") or [],
             )
         )
 
@@ -2747,6 +2749,22 @@ class LenaMarkReadRequest(BaseModel):
 
 class LenaMarkReadResponse(BaseModel):
     success: bool
+
+
+class LenaArchiveByCategoryRequest(BaseModel):
+    category: str
+
+    @field_validator("category")
+    @classmethod
+    def _vid_category(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("category darf nicht leer sein")
+        return v.strip()
+
+
+class LenaArchiveByCategoryResponse(BaseModel):
+    archived_count: int
+    message_ids: List[str]
 
 
 # ── Mail-Triage (HBE-Mail-Categorize) ─────────────────────────────────────
@@ -3004,6 +3022,72 @@ def lena_mail_mark_read(
         )
 
     return LenaMarkReadResponse(success=True)
+
+
+@app.post("/api/lena/mail/archive-by-category", response_model=LenaArchiveByCategoryResponse)
+def lena_mail_archive_by_category(
+    req: LenaArchiveByCategoryRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Archiviert alle Inbox-Mails, die die angegebene Outlook-Kategorie tragen (HBE-987).
+
+    Logik:
+      1. Alle Inbox-Mails mit categories/any(c:c eq '<category>') abrufen
+      2. Jede gefundene Mail in den Archive-Ordner verschieben
+      3. Zusammenfassung zurückgeben
+    """
+    import requests as _rq
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Content-Type": "application/json",
+    }
+
+    escaped = req.category.replace("'", "''")
+    params = {
+        "$select": "id,categories",
+        "$filter": f"categories/any(c:c eq '{escaped}')",
+        "$top": 100,
+    }
+
+    resp = _rq.get(
+        "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages",
+        headers=headers,
+        params=params,
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler beim Abrufen: HTTP {resp.status_code} — {resp.text[:300]}",
+        )
+
+    messages = resp.json().get("value", [])
+    archive_folder_id = _resolve_folder_id("archive", headers)
+
+    archived_ids: List[str] = []
+    for msg in messages:
+        msg_id = msg.get("id", "")
+        if not msg_id:
+            continue
+        move_resp = _rq.patch(
+            f"https://graph.microsoft.com/v1.0/me/messages/{msg_id}",
+            headers=headers,
+            json={"parentFolderId": archive_folder_id},
+            timeout=30,
+        )
+        if move_resp.status_code in (200, 201):
+            archived_ids.append(msg_id)
+
+    return LenaArchiveByCategoryResponse(
+        archived_count=len(archived_ids),
+        message_ids=archived_ids,
+    )
 
 
 # ── Mail-Triage Endpoints (HBE-Mail-Categorize) ───────────────────────────
