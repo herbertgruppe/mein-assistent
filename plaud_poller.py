@@ -196,16 +196,18 @@ def _parse_recent_ids(output: str) -> List[str]:
         except json.JSONDecodeError:
             pass
 
-    # Line-by-line: first whitespace-separated token that looks like an ID
-    id_re = re.compile(r'^[a-zA-Z0-9_-]{8,}$')
+    # Line-by-line: first whitespace-separated token that looks like a Plaud file ID.
+    # Plaud file IDs are exactly 32 lowercase hex characters (UUID without dashes).
+    id_re = re.compile(r'^[0-9a-f]{32}$')
     for line in stripped.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        # Skip header lines
         first = line.split()[0] if line.split() else ""
-        if id_re.match(first) and first.lower() not in ("id", "recording"):
+        if id_re.match(first):
             ids.append(first)
+        elif first:
+            logger.debug("Ignoring non-ID token from plaud recent output: %r", first)
 
     return ids
 
