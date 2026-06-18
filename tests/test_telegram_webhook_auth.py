@@ -359,6 +359,56 @@ class TelegramReplyThreadingTest(unittest.TestCase):
         )
         self.assertIn("Okay, verstanden.", comment_body)
 
+    def test_reply_with_mapping_uses_lena_send_timestamp(self):
+        """Quote-Block enthält die UTC-Zeit aus reply_to_message.date (Lena-Sendezeit)."""
+        issue_id = "HBE-1026-test-d"
+        outbound_row = mock.MagicMock()
+        outbound_row.__getitem__ = mock.MagicMock(side_effect=lambda k: {
+            "comment_id": "deadbeef-1234-5678-ab",
+            "comment_excerpt": "Wann ist der Termin?",
+        }[k])
+
+        mock_db = self._make_db_with_pending_issue(issue_id, outbound_row=outbound_row)
+        mock_get_info = mock.MagicMock(return_value=("in_progress", "lena-agent-id"))
+        mock_add_comment = mock.MagicMock(return_value=True)
+
+        # Unix timestamp for 2026-06-18 14:30:00 UTC
+        lena_ts = 1750257000
+
+        class _Req:
+            headers = {"X-Telegram-Bot-Api-Secret-Token": "correct-secret"}
+
+            async def json(self):
+                return {
+                    "update_id": 20,
+                    "message": {
+                        "message_id": 300,
+                        "chat": {"id": 88888},
+                        "text": "Morgen um 10 Uhr.",
+                        "from": {"id": 1, "is_bot": False, "first_name": "Sven"},
+                        "date": 1750257060,
+                        "reply_to_message": {
+                            "message_id": 250,
+                            "chat": {"id": 88888},
+                            "text": "Wann ist der Termin?",
+                            "date": lena_ts,
+                        },
+                    },
+                }
+
+        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "correct-secret"), \
+             mock.patch.object(self.api, "_PC_LENA_AGENT_ID", "lena-agent-id"), \
+             mock.patch.object(self.api, "_telegram_db", return_value=mock_db), \
+             mock.patch.object(self.api, "_pc_get_issue_info", mock_get_info), \
+             mock.patch.object(self.api, "_pc_add_comment_to_issue", mock_add_comment):
+            result = asyncio.run(self.api.telegram_lena_webhook(_Req()))
+
+        self.assertEqual(result, {"ok": True})
+        comment_body = mock_add_comment.call_args[0][2]
+        # 14:30 UTC expected for lena_ts = 1750257000
+        self.assertIn("14:30 UTC", comment_body, f"Expected UTC time in quote, got: {comment_body!r}")
+        self.assertIn("deadbeef", comment_body)
+
     def test_normal_message_no_reply_unchanged(self):
         """Regression: normal Sven message without reply_to_message → no quote block."""
         issue_id = "HBE-1026-test-c"

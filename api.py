@@ -35,7 +35,7 @@ import sqlite3
 import subprocess
 import tempfile
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import List, Literal, Optional, Tuple
 
@@ -842,6 +842,7 @@ class _TgMsg(BaseModel):
     chat: _TgChat
     from_: Optional[_TgUser] = Field(None, alias="from")
     text: Optional[str] = None
+    date: Optional[int] = None
     reply_to_message: Optional["_TgMsg"] = None
 
     model_config = {"populate_by_name": True}
@@ -3804,7 +3805,11 @@ async def telegram_lena_webhook(req: Request):
         if row:
             excerpt = (row["comment_excerpt"] or "")[:200]
             comment_short = row["comment_id"][:8] if row["comment_id"] else "?"
-            time_label = datetime.now().strftime("%H:%M")
+            ts = msg.reply_to_message.date
+            if ts:
+                time_label = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M UTC")
+            else:
+                time_label = datetime.now().strftime("%H:%M")
             quote_block = f'> **Re Lena [Comment {comment_short}, {time_label}]:** „{excerpt}"\n\n'
         elif msg.reply_to_message.text:
             raw = msg.reply_to_message.text[:200]
