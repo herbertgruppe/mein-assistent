@@ -2969,10 +2969,10 @@ def lena_mail_move(
 
     folder_id = _resolve_folder_id(req.target_folder, headers)
 
-    resp = _rq.patch(
-        f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
+    resp = _rq.post(
+        f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}/move",
         headers=headers,
-        json={"parentFolderId": folder_id},
+        json={"destinationId": folder_id},
         timeout=30,
     )
     if resp.status_code not in (200, 201):
@@ -2981,9 +2981,14 @@ def lena_mail_move(
             detail=f"Graph API Fehler beim Verschieben: HTTP {resp.status_code} — {resp.text[:300]}",
         )
 
+    try:
+        new_id = resp.json().get("id") or req.message_id
+    except Exception:
+        new_id = req.message_id
+
     return LenaMoveMailResponse(
         success=True,
-        message_id=req.message_id,
+        message_id=new_id,
         folder=req.target_folder,
     )
 
