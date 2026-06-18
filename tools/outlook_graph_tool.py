@@ -213,7 +213,9 @@ class OutlookGraphTool:
                 "Calendars.ReadWrite",
                 "Mail.ReadWrite",
                 "Mail.Send",
-                "Contacts.ReadWrite"
+                "Contacts.ReadWrite",
+                "Files.ReadWrite",
+                "Sites.Read.All"
             ]
 
             result = app.acquire_token_by_refresh_token(
@@ -291,7 +293,7 @@ class OutlookGraphTool:
                 )
 
             # Scopes
-            scopes = ["Calendars.Read", "Calendars.ReadWrite", "User.Read", "Mail.Send", "Contacts.Read", "Contacts.ReadWrite", "Mail.Read", "Mail.ReadWrite"]
+            scopes = ["Calendars.Read", "Calendars.ReadWrite", "User.Read", "Mail.Send", "Contacts.Read", "Contacts.ReadWrite", "Mail.Read", "Mail.ReadWrite", "Files.ReadWrite", "Sites.Read.All"]
 
             # Initiiere Flow
             flow = app.initiate_device_flow(scopes=scopes)
@@ -418,7 +420,7 @@ class OutlookGraphTool:
                 )
 
             # Scopes für Kalender-Zugriff, Mail-Versand und Kontakte
-            scopes = ["Calendars.Read", "Calendars.ReadWrite", "User.Read", "Mail.Send", "Contacts.Read", "Contacts.ReadWrite", "Mail.Read", "Mail.ReadWrite"]
+            scopes = ["Calendars.Read", "Calendars.ReadWrite", "User.Read", "Mail.Send", "Contacts.Read", "Contacts.ReadWrite", "Mail.Read", "Mail.ReadWrite", "Files.ReadWrite", "Sites.Read.All"]
 
             # Device Code Flow initiieren
             flow = app.initiate_device_flow(scopes=scopes)
