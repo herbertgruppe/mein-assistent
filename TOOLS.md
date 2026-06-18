@@ -1,6 +1,6 @@
 # TOOLS.md — Lena API-Referenz
 
-> Zuletzt aktualisiert: 2026-06-13 (HBE-788 — Kalender-CRUD hinzugefügt)
+> Zuletzt aktualisiert: 2026-06-17 (HBE-979 — Kontakt anlegen hinzugefügt)
 
 Alle Endpoints erfordern den Header `X-Api-Key: {MEIN_ASSISTENT_API_KEY}`.
 Bei abgelaufenem Outlook-Token: HTTP 503 `"Outlook nicht authentifiziert."`.
@@ -60,12 +60,43 @@ Response:
 ```json
 {
   "contacts": [
-    { "name": "Jannik Lorenz", "email": "jannik.lorenz@mytga.de", "title": "Projektleiter", "company": "myTGA" }
+    { "id": "AAM...", "name": "Jannik Lorenz", "email": "jannik.lorenz@mytga.de", "title": "Projektleiter", "company": "myTGA" }
   ]
 }
 ```
 
 Leeres Array wenn keine Treffer. HTTP 400 wenn `q` zu lang. HTTP 503 bei abgelaufenem Token.
+
+### Neuen Kontakt anlegen
+```
+POST /api/lena/contacts
+{
+  "givenName": "Max",
+  "surname": "Mustermann",
+  "emailAddresses": ["m.muster@firma.de"],
+  "mobilePhone": "+49 151 12345678",
+  "businessPhones": ["+49 89 1234567"],
+  "jobTitle": "Projektleiter",
+  "companyName": "Muster GmbH",
+  "fileAs": "Mustermann, Max"
+}
+```
+
+Pflichtfelder: `givenName`, `surname`. Alle anderen Felder optional.
+`emailAddresses` — max. 3 Einträge.
+
+Response: `{ "success": true, "contact_id": "AAM...", "display_name": "Max Mustermann" }`
+
+HTTP 400 bei leeren Pflichtfeldern oder mehr als 3 E-Mail-Adressen.
+HTTP 503 bei abgelaufenem Token. HTTP 502 bei Graph-API-Fehler.
+
+### Kontakt bearbeiten (Telefonnummern)
+```
+PATCH /api/lena/contacts/{contact_id}
+{ "mobilePhone": "+49 151 ...", "businessPhone": "+49 89 ..." }
+```
+`contact_id` aus `/api/lena/contacts/search`. Mind. ein Feld erforderlich.
+Response: `{ "success": true, "contact_id": "..." }`
 
 ---
 
