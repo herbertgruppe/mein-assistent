@@ -31,9 +31,10 @@ rules:
       - "**/migrations/**"
       - "migrations/**"
       - "database/**"
-      # CI/CD und CODEOWNERS selbst
+      # CI/CD, CODEOWNERS und Meta-Schutz (CODEOWNERS-Sync — HBE-989)
       - ".github/workflows/**"
       - ".github/CODEOWNERS"
+      - ".github/risk-rules.yml"
     risk: HIGH
   # --- LOW: Docs, Tests, Lockfiles ---
   - if_paths_match:
@@ -65,4 +66,3 @@ rules:
     risk_min: MEDIUM
   - default:
       risk: MEDIUM
-
