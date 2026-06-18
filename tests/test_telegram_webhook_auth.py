@@ -228,5 +228,171 @@ class TelegramInReviewResetTest(unittest.TestCase):
         mock_add_comment.assert_called_once()
 
 
+class TelegramReplyThreadingTest(unittest.TestCase):
+    """Tests for HBE-1026: Sven-Replies als Quote-prefixed Comments an Lena."""
+
+    @classmethod
+    def setUpClass(cls):
+        env = {
+            "TELEGRAM_BOT_TOKEN": "",
+            "TELEGRAM_WEBHOOK_SECRET": "",
+            "API_SECRET_KEY": "test-key",
+        }
+        cls.api = _load_api_module("api_reply_threading_test", env)
+
+    def _make_db_with_pending_issue(self, issue_id, outbound_row=None):
+        """Mock _telegram_db with one pending issue and optional outbound_messages row."""
+        pending_row = mock.MagicMock()
+        pending_row.__getitem__ = mock.MagicMock(
+            side_effect=lambda k: issue_id if k == "issue_id" else None
+        )
+
+        def _execute(sql, params=()):
+            result = mock.MagicMock()
+            if "pending_issues" in sql and "SELECT" in sql:
+                result.fetchall.return_value = [pending_row]
+                result.fetchone.return_value = None
+            elif "outbound_messages" in sql and "SELECT" in sql:
+                result.fetchone.return_value = outbound_row
+                result.fetchall.return_value = []
+            else:
+                result.fetchone.return_value = None
+                result.fetchall.return_value = []
+            return result
+
+        db = mock.MagicMock()
+        db.__enter__ = mock.MagicMock(return_value=db)
+        db.__exit__ = mock.MagicMock(return_value=False)
+        db.execute = mock.MagicMock(side_effect=_execute)
+        return db
+
+    def test_reply_with_mapping_produces_quote_block(self):
+        """Sven replies to a Lena message that IS in outbound_messages → quote block with comment ref."""
+        issue_id = "HBE-1026-test-a"
+        outbound_row = mock.MagicMock()
+        outbound_row.__getitem__ = mock.MagicMock(side_effect=lambda k: {
+            "comment_id": "abc12345-def6-7890-gh",
+            "comment_excerpt": "Bitte schick mir die Unterlagen",
+        }[k])
+
+        mock_db = self._make_db_with_pending_issue(issue_id, outbound_row=outbound_row)
+        mock_get_info = mock.MagicMock(return_value=("in_progress", "lena-agent-id"))
+        mock_add_comment = mock.MagicMock(return_value=True)
+
+        class _Req:
+            headers = {"X-Telegram-Bot-Api-Secret-Token": "correct-secret"}
+
+            async def json(self):
+                return {
+                    "update_id": 10,
+                    "message": {
+                        "message_id": 200,
+                        "chat": {"id": 99999},
+                        "text": "Hier sind die Unterlagen.",
+                        "from": {"id": 1, "is_bot": False, "first_name": "Sven"},
+                        "date": 1700002000,
+                        "reply_to_message": {
+                            "message_id": 150,
+                            "chat": {"id": 99999},
+                            "text": "Bitte schick mir die Unterlagen",
+                        },
+                    },
+                }
+
+        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "correct-secret"), \
+             mock.patch.object(self.api, "_PC_LENA_AGENT_ID", "lena-agent-id"), \
+             mock.patch.object(self.api, "_telegram_db", return_value=mock_db), \
+             mock.patch.object(self.api, "_pc_get_issue_info", mock_get_info), \
+             mock.patch.object(self.api, "_pc_add_comment_to_issue", mock_add_comment):
+            result = asyncio.run(self.api.telegram_lena_webhook(_Req()))
+
+        self.assertEqual(result, {"ok": True})
+        mock_add_comment.assert_called_once()
+        comment_body = mock_add_comment.call_args[0][2]
+        self.assertTrue(
+            comment_body.startswith("> **Re Lena [Comment abc12345,"),
+            f"Expected quote-block prefix, got: {comment_body!r}",
+        )
+        self.assertIn("Bitte schick mir die Unterlagen", comment_body)
+        self.assertIn("Hier sind die Unterlagen.", comment_body)
+
+    def test_reply_without_mapping_uses_raw_text(self):
+        """Sven replies to a message NOT in outbound_messages → best-effort raw quote."""
+        issue_id = "HBE-1026-test-b"
+        mock_db = self._make_db_with_pending_issue(issue_id, outbound_row=None)
+        mock_get_info = mock.MagicMock(return_value=("in_progress", "lena-agent-id"))
+        mock_add_comment = mock.MagicMock(return_value=True)
+
+        class _Req:
+            headers = {"X-Telegram-Bot-Api-Secret-Token": "correct-secret"}
+
+            async def json(self):
+                return {
+                    "update_id": 11,
+                    "message": {
+                        "message_id": 201,
+                        "chat": {"id": 99999},
+                        "text": "Okay, verstanden.",
+                        "from": {"id": 1, "is_bot": False, "first_name": "Sven"},
+                        "date": 1700002100,
+                        "reply_to_message": {
+                            "message_id": 100,
+                            "chat": {"id": 99999},
+                            "text": "Eine alte Nachricht vor der Migration",
+                        },
+                    },
+                }
+
+        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "correct-secret"), \
+             mock.patch.object(self.api, "_PC_LENA_AGENT_ID", "lena-agent-id"), \
+             mock.patch.object(self.api, "_telegram_db", return_value=mock_db), \
+             mock.patch.object(self.api, "_pc_get_issue_info", mock_get_info), \
+             mock.patch.object(self.api, "_pc_add_comment_to_issue", mock_add_comment):
+            result = asyncio.run(self.api.telegram_lena_webhook(_Req()))
+
+        self.assertEqual(result, {"ok": True})
+        mock_add_comment.assert_called_once()
+        comment_body = mock_add_comment.call_args[0][2]
+        self.assertTrue(
+            comment_body.startswith('> **Re:** „Eine alte Nachricht'),
+            f"Expected raw-quote prefix, got: {comment_body!r}",
+        )
+        self.assertIn("Okay, verstanden.", comment_body)
+
+    def test_normal_message_no_reply_unchanged(self):
+        """Regression: normal Sven message without reply_to_message → no quote block."""
+        issue_id = "HBE-1026-test-c"
+        mock_db = self._make_db_with_pending_issue(issue_id)
+        mock_get_info = mock.MagicMock(return_value=("in_progress", "lena-agent-id"))
+        mock_add_comment = mock.MagicMock(return_value=True)
+
+        class _Req:
+            headers = {"X-Telegram-Bot-Api-Secret-Token": "correct-secret"}
+
+            async def json(self):
+                return {
+                    "update_id": 12,
+                    "message": {
+                        "message_id": 202,
+                        "chat": {"id": 99999},
+                        "text": "Normale Nachricht ohne Reply",
+                        "from": {"id": 1, "is_bot": False, "first_name": "Sven"},
+                        "date": 1700002200,
+                    },
+                }
+
+        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "correct-secret"), \
+             mock.patch.object(self.api, "_PC_LENA_AGENT_ID", "lena-agent-id"), \
+             mock.patch.object(self.api, "_telegram_db", return_value=mock_db), \
+             mock.patch.object(self.api, "_pc_get_issue_info", mock_get_info), \
+             mock.patch.object(self.api, "_pc_add_comment_to_issue", mock_add_comment):
+            result = asyncio.run(self.api.telegram_lena_webhook(_Req()))
+
+        self.assertEqual(result, {"ok": True})
+        mock_add_comment.assert_called_once()
+        comment_body = mock_add_comment.call_args[0][2]
+        self.assertEqual(comment_body, "Normale Nachricht ohne Reply")
+
+
 if __name__ == "__main__":
     unittest.main()
