@@ -161,6 +161,10 @@ def _load_api_module():
             for k, v in kw.items():
                 setattr(self, k, v)
 
+        @classmethod
+        def model_rebuild(cls, **kw):
+            pass
+
     def _field(default=None, **kw):
         return default
 

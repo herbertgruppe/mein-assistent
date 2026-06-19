@@ -35,7 +35,7 @@ import sqlite3
 import subprocess
 import tempfile
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import List, Literal, Optional, Tuple
 
@@ -215,6 +215,18 @@ def _telegram_db():
         issue_id   TEXT NOT NULL,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS outbound_messages (
+        telegram_msg_id INTEGER NOT NULL,
+        chat_id         TEXT NOT NULL,
+        issue_id        TEXT NOT NULL,
+        comment_id      TEXT NOT NULL,
+        comment_excerpt TEXT,
+        sent_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (telegram_msg_id, chat_id)
+    )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_outbound_issue ON outbound_messages(issue_id)"
+    )
     conn.commit()
     try:
         yield conn
@@ -442,10 +454,18 @@ def _poll_telegram_replies() -> None:
                 ).fetchone():
                     continue
             reply_text = body[len("TELEGRAM_REPLY:"):].strip()
-            if _tg_send_message(chat_id, reply_text):
+            sent_msg_id = _tg_send_message(chat_id, reply_text)
+            if sent_msg_id:
+                excerpt = reply_text[:200]
                 with _telegram_db() as db:
                     db.execute(
                         "INSERT OR IGNORE INTO processed_comments (comment_id) VALUES (?)", (cid,)
+                    )
+                    db.execute(
+                        "INSERT OR REPLACE INTO outbound_messages "
+                        "(telegram_msg_id, chat_id, issue_id, comment_id, comment_excerpt) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (sent_msg_id, chat_id, issue_id, cid, excerpt),
                     )
 
 
@@ -822,8 +842,13 @@ class _TgMsg(BaseModel):
     chat: _TgChat
     from_: Optional[_TgUser] = Field(None, alias="from")
     text: Optional[str] = None
+    date: Optional[int] = None
+    reply_to_message: Optional["_TgMsg"] = None
 
     model_config = {"populate_by_name": True}
+
+
+_TgMsg.model_rebuild()
 
 
 class _TgCallbackQuery(BaseModel):
@@ -3767,6 +3792,31 @@ async def telegram_lena_webhook(req: Request):
                 active_issue_id = row["issue_id"]
                 active_issue_status = status
 
+    # Build quote_block if Sven replied to a specific Lena message (HBE-1026).
+    quote_block = ""
+    if msg.reply_to_message:
+        replied_id = msg.reply_to_message.message_id
+        with _telegram_db() as db:
+            row = db.execute(
+                "SELECT comment_id, comment_excerpt FROM outbound_messages "
+                "WHERE telegram_msg_id = ? AND chat_id = ?",
+                (replied_id, chat_id),
+            ).fetchone()
+        if row:
+            excerpt = (row["comment_excerpt"] or "")[:200]
+            comment_short = row["comment_id"][:8] if row["comment_id"] else "?"
+            ts = msg.reply_to_message.date
+            if ts:
+                time_label = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M UTC")
+            else:
+                time_label = datetime.now().strftime("%H:%M")
+            quote_block = f'> **Re Lena [Comment {comment_short}, {time_label}]:** „{excerpt}"\n\n'
+        elif msg.reply_to_message.text:
+            raw = msg.reply_to_message.text[:200]
+            quote_block = f'> **Re:** „{raw}"\n\n'
+
+    comment_text = quote_block + (msg.text or "")
+
     if active_issue_id:
         # Reset in_review → in_progress so the agent run is triggered on user messages.
         # in_review blocks agent wake-up on new comments; a Telegram reply from the user
@@ -3777,7 +3827,7 @@ async def telegram_lena_webhook(req: Request):
                 "[telegram] reset issue %s from in_review to in_progress on user message",
                 active_issue_id,
             )
-        _pc_add_comment_to_issue(active_issue_id, username, msg.text)
+        _pc_add_comment_to_issue(active_issue_id, username, comment_text)
     else:
         issue_id = _pc_create_issue(
             chat_id=chat_id,
