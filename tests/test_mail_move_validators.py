@@ -133,6 +133,11 @@ def _load_api_module() -> types.ModuleType:
             for k, v in kw.items():
                 setattr(self, k, v)
 
+        @classmethod
+        def model_rebuild(cls, *args, **kwargs):
+            """Pydantic v2 forward-ref resolver — no-op stub for tests."""
+            return None
+
     def _field(default=None, **kw):
         return default
 
