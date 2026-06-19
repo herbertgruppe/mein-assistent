@@ -319,7 +319,7 @@ class TestResolveFolderId(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestLenaMailMove(unittest.TestCase):
-    """Smoke-test the lena_mail_move endpoint function directly."""
+    """Smoke-test the lena_mail_move endpoint — verifies POST /move with destinationId (HBE-1040)."""
 
     def _make_resp(self, status_code: int, body: dict = None):
         r = mock.MagicMock()
@@ -340,30 +340,51 @@ class TestLenaMailMove(unittest.TestCase):
         tool.access_token = "fake-access-token"
         return tool
 
-    def test_happy_path(self):
-        """Valid move request returns LenaMoveMailResponse with success=True."""
+    def test_happy_path_calls_post_move_with_destination_id(self):
+        """lena_mail_move must call POST /messages/{id}/move with destinationId — not PATCH."""
         req = self._make_req()
         folder_resp = self._make_resp(200, {"id": "FOLDER_ID"})
-        patch_resp = self._make_resp(200, {"id": "AAMkABC123"})
+        move_resp = self._make_resp(201, {"id": "AAMkNEWID456"})
 
         with mock.patch.object(_api, "_get_outlook_tool", return_value=self._make_tool()), \
              mock.patch("requests.get", return_value=folder_resp), \
-             mock.patch("requests.patch", return_value=patch_resp):
+             mock.patch("requests.post", return_value=move_resp) as mock_post:
+            result = _api.lena_mail_move(req)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.message_id, "AAMkNEWID456")
+        self.assertEqual(result.folder, "Archiv")
+
+        call_args = mock_post.call_args
+        url = call_args[0][0] if call_args[0] else call_args.kwargs.get("url", "")
+        self.assertIn("/move", url)
+        body = call_args[1].get("json") or (call_args[0][1] if len(call_args[0]) > 1 else {})
+        self.assertIn("destinationId", body)
+        self.assertNotIn("parentFolderId", body)
+
+    def test_happy_path_fallback_to_original_id_when_no_new_id(self):
+        """If Graph response lacks 'id', fall back to the original message_id."""
+        req = self._make_req()
+        folder_resp = self._make_resp(200, {"id": "FOLDER_ID"})
+        move_resp = self._make_resp(200, {})
+
+        with mock.patch.object(_api, "_get_outlook_tool", return_value=self._make_tool()), \
+             mock.patch("requests.get", return_value=folder_resp), \
+             mock.patch("requests.post", return_value=move_resp):
             result = _api.lena_mail_move(req)
 
         self.assertTrue(result.success)
         self.assertEqual(result.message_id, "AAMkABC123")
-        self.assertEqual(result.folder, "Archiv")
 
-    def test_graph_502_on_patch_error(self):
-        """Graph returns 502 on PATCH → HTTPException 502 is raised."""
+    def test_graph_502_on_move_error(self):
+        """Graph returns 502 on POST /move → HTTPException 502 is raised."""
         req = self._make_req()
         folder_resp = self._make_resp(200, {"id": "FOLDER_ID"})
-        patch_resp = self._make_resp(502)
+        move_resp = self._make_resp(502)
 
         with mock.patch.object(_api, "_get_outlook_tool", return_value=self._make_tool()), \
              mock.patch("requests.get", return_value=folder_resp), \
-             mock.patch("requests.patch", return_value=patch_resp):
+             mock.patch("requests.post", return_value=move_resp):
             with self.assertRaises(_HTTPException) as ctx:
                 _api.lena_mail_move(req)
 
