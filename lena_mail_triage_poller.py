@@ -3,9 +3,9 @@
 lena_mail_triage_poller.py
 
 Pollt Svens Outlook-Posteingang alle N Sekunden und kategorisiert un-kategorisierte
-Mails mit zwei Outlook-Kategorien: 1× Aktion (Lena: Antworten | Tun | Warten |
-Recherchieren | Weiterleiten | Ablegen) + 1× Priorität (Priorität: Hoch | Mittel
-| Niedrig).
+Mails mit genau einer Outlook-Kategorie (Aktion: Lena: Antworten | Tun | Warten |
+Recherchieren | Weiterleiten | Ablegen) und setzt die Outlook-Wichtigkeit (importance:
+high | normal | low) statt einer zweiten Kategorie.
 
 Hybrid-Triage:
 1) Schnelle Regeln zuerst (sparen LLM-Cost):
@@ -871,12 +871,26 @@ def _fetch_inbox_for_triage() -> List[Dict[str, Any]]:
     return resp.json().get("mails", [])
 
 
-def _categorize_mail(message_id: str, action: str, priority: str) -> bool:
+_PRIORITY_TO_IMPORTANCE = {"hoch": "high", "mittel": "normal", "niedrig": "low"}
+
+
+def _categorize_mail(message_id: str, action: str) -> bool:
     url = f"{API_URL.rstrip('/')}/api/lena/mail/categorize"
-    payload = {"message_id": message_id, "action": action, "priority": priority}
+    payload = {"message_id": message_id, "action": action}
     resp = requests.post(url, headers=_api_headers(), json=payload, timeout=30)
     if resp.status_code != 200:
         logger.warning("categorize HTTP %d: %s", resp.status_code, resp.text[:200])
+        return False
+    return True
+
+
+def _set_importance(message_id: str, priority: str) -> bool:
+    importance = _PRIORITY_TO_IMPORTANCE.get(priority, "normal")
+    url = f"{API_URL.rstrip('/')}/api/lena/mail/set-importance"
+    payload = {"message_id": message_id, "importance": importance}
+    resp = requests.post(url, headers=_api_headers(), json=payload, timeout=30)
+    if resp.status_code != 200:
+        logger.warning("set-importance HTTP %d: %s", resp.status_code, resp.text[:200])
         return False
     return True
 
@@ -1018,10 +1032,11 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
             m.get("sender_name", ""),
         )
 
-        ok = _categorize_mail(mid, action, priority)
+        ok = _categorize_mail(mid, action)
         if not ok:
             counters["failed"] += 1
             continue
+        _set_importance(mid, priority)  # best-effort; category is the primary categorization
         counters["categorized"] += 1
         new_processed.append(mid)
 

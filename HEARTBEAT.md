@@ -41,11 +41,18 @@ Beim Erkennen von Mail-Schlüsselwörtern in Sven-Telegram-Nachricht oder Issue-
 
 ```
 1. SKILL_EMAIL.md laden (falls vorhanden)
-2. Aktion extrahieren (Entwurf | Senden | Verschieben | Lesen)
+2. Aktion extrahieren (Entwurf | Senden | Verschieben | Lesen | Kategorisieren)
 3. Approval-Gate für Sende-Aktionen
-4. API-Call: /api/lena/mail/...
+4a. Kategorie setzen: POST /api/lena/mail/categorize { message_id, action }
+    → Setzt genau eine Outlook-Kategorie (Lena: Antworten | Tun | Warten | ...)
+4b. Wichtigkeit setzen: POST /api/lena/mail/set-importance { message_id, importance }
+    → Setzt Outlook-Prioritätsspalte (high | normal | low), KEIN Kategorie-Tag mehr
 5. Bestätigung per Telegram
 ```
+
+Hinweis: Seit HBE-1064 (2026-06-20) wird die Priorität nicht mehr als Outlook-Kategorie
+(Priorität: Hoch/Mittel/Niedrig) gesetzt, sondern als Outlook-Wichtigkeitsspalte via
+`set-importance`. Pro Mail wird nur noch eine einzige Kategorie gesetzt.
 
 ---
 
