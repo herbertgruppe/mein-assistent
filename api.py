@@ -2801,11 +2801,15 @@ LENA_ACTION_CATEGORIES = {
     "weiterleiten":   "Lena: Weiterleiten",
     "ablegen":        "Lena: Ablegen",
 }
-LENA_PRIORITY_CATEGORIES = {
-    "hoch":    "Priorität: Hoch",
-    "mittel":  "Priorität: Mittel",
-    "niedrig": "Priorität: Niedrig",
+# Importance wird jetzt über das Outlook-Priorität-Feld (importance) gesetzt,
+# nicht mehr als Kategorie.
+LENA_IMPORTANCE_MAP = {
+    "hoch":    "high",
+    "mittel":  "normal",
+    "niedrig": "low",
 }
+OUTLOOK_IMPORTANCE_TO_LENA = {v: k for k, v in LENA_IMPORTANCE_MAP.items()}
+
 # Outlook-Color-Presets siehe Graph-Docs (preset0=Red, preset1=Orange, preset2=Brown,
 # preset3=Yellow, preset4=Green, preset5=Teal, preset6=Olive, preset7=Blue, preset8=Purple,
 # preset9=Cranberry, preset10=Steel, preset11=DarkSteel, preset12=Grey, preset13=DarkGrey,
@@ -2819,9 +2823,6 @@ LENA_MASTER_CATEGORIES = [
     {"displayName": "Lena: Recherchieren", "color": "preset7"},   # Blue
     {"displayName": "Lena: Weiterleiten",  "color": "preset8"},   # Purple
     {"displayName": "Lena: Ablegen",       "color": "preset12"},  # Grey
-    {"displayName": "Priorität: Hoch",     "color": "preset15"},  # DarkRed
-    {"displayName": "Priorität: Mittel",   "color": "preset10"},  # Steel (LightBlue-ish)
-    {"displayName": "Priorität: Niedrig",  "color": "preset13"},  # DarkGrey
 ]
 
 
@@ -2831,16 +2832,16 @@ def _check_lena_action(v: str) -> str:
     return v
 
 
-def _check_lena_priority(v: str) -> str:
-    if v not in LENA_PRIORITY_CATEGORIES:
-        raise ValueError(f"priority muss eines sein: {', '.join(LENA_PRIORITY_CATEGORIES.keys())}")
+def _check_lena_importance(v: str) -> str:
+    valid = {"high", "normal", "low"}
+    if v not in valid:
+        raise ValueError(f"importance muss eines sein: {', '.join(sorted(valid))}")
     return v
 
 
 class LenaCategorizeRequest(BaseModel):
     message_id: str
     action: str
-    priority: str
 
     @field_validator("message_id")
     @classmethod
@@ -2852,10 +2853,26 @@ class LenaCategorizeRequest(BaseModel):
     def _vid_action(cls, v: str) -> str:
         return _check_lena_action(v)
 
-    @field_validator("priority")
+
+class LenaSetImportanceRequest(BaseModel):
+    message_id: str
+    importance: str  # "high" | "normal" | "low"
+
+    @field_validator("message_id")
     @classmethod
-    def _vid_priority(cls, v: str) -> str:
-        return _check_lena_priority(v)
+    def _vid_message_id(cls, v: str) -> str:
+        return _check_message_id(v)
+
+    @field_validator("importance")
+    @classmethod
+    def _vid_importance(cls, v: str) -> str:
+        return _check_lena_importance(v)
+
+
+class LenaSetImportanceResponse(BaseModel):
+    success: bool
+    message_id: str
+    importance: str
 
 
 class LenaCategorizeResponse(BaseModel):
@@ -3190,13 +3207,15 @@ def lena_mail_categorize(
     _key: str = Security(verify_api_key),
 ):
     """
-    Setzt zwei Outlook-Kategorien auf eine Mail: 1× Aktion + 1× Priorität.
+    Setzt genau eine Outlook-Kategorie auf eine Mail (Aktion/Typ).
 
     Bestehende Lena:*- und Priorität:*-Kategorien werden ERSETZT (nicht dupliziert),
     andere bestehende User-Kategorien bleiben erhalten. Implementierung:
     1) GET /me/messages/{id}?$select=categories  → bestehende lesen
     2) Filter: Nicht-Lena/Priorität-Kategorien behalten
-    3) PATCH /me/messages/{id} mit { categories: kept + [action, priority] }
+    3) PATCH /me/messages/{id} mit { categories: kept + [action] }
+
+    Wichtigkeit/Priorität wird separat via POST /api/lena/mail/set-importance gesetzt.
     """
     import requests as _rq
 
@@ -3220,11 +3239,11 @@ def lena_mail_categorize(
             detail=f"Graph API Fehler beim Lesen der Mail-Kategorien: HTTP {get_resp.status_code} — {get_resp.text[:300]}",
         )
     existing_cats = get_resp.json().get("categories", []) or []
+    # Strip existing Lena:* and legacy Priorität:* categories (clean up old format)
     kept = [c for c in existing_cats if not (c.startswith("Lena: ") or c.startswith("Priorität: "))]
 
     action_cat = LENA_ACTION_CATEGORIES[req.action]
-    prio_cat = LENA_PRIORITY_CATEGORIES[req.priority]
-    new_categories = kept + [action_cat, prio_cat]
+    new_categories = kept + [action_cat]
 
     patch_resp = _rq.patch(
         f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
@@ -3242,6 +3261,47 @@ def lena_mail_categorize(
         success=True,
         message_id=req.message_id,
         categories=new_categories,
+    )
+
+
+@app.post("/api/lena/mail/set-importance", response_model=LenaSetImportanceResponse)
+def lena_mail_set_importance(
+    req: LenaSetImportanceRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Setzt die Outlook-Wichtigkeit (importance) einer Mail via Microsoft Graph.
+
+    Mögliche Werte: "high" | "normal" | "low"
+    Entspricht in Outlook der Prioritätsspalte (Hoch / Normal / Niedrig).
+    """
+    import requests as _rq
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Content-Type": "application/json",
+    }
+
+    patch_resp = _rq.patch(
+        f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
+        headers=headers,
+        json={"importance": req.importance},
+        timeout=30,
+    )
+    if patch_resp.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler beim Setzen der Wichtigkeit: HTTP {patch_resp.status_code} — {patch_resp.text[:300]}",
+        )
+
+    return LenaSetImportanceResponse(
+        success=True,
+        message_id=req.message_id,
+        importance=req.importance,
     )
 
 
@@ -3303,7 +3363,7 @@ def lena_mail_inbox_for_triage(
     for m in resp.json().get("value", []):
         if not include_categorized:
             cats = m.get("categories", []) or []
-            if any(c.startswith("Lena: ") or c.startswith("Priorität: ") for c in cats):
+            if any(c.startswith("Lena: ") for c in cats):
                 continue
         sender = (m.get("from") or {}).get("emailAddress", {}) or {}
         mails.append(LenaTriageInboxMail(
@@ -3367,11 +3427,12 @@ def lena_mail_triage_summary(
     headers = {"Authorization": f"Bearer {tool.access_token}"}
 
     # Fetch categorized mails since `since` — up to 200 (over-fetch, filter client-side)
+    # importance field added to track priority (replaces Priorität:* categories)
     url = (
         "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages"
         f"?$filter=receivedDateTime ge {since_str}"
         "&$top=200"
-        "&$select=id,categories"
+        "&$select=id,categories,importance"
         "&$orderby=receivedDateTime desc"
     )
     resp = _rq.get(url, headers=headers, timeout=30)
@@ -3383,7 +3444,6 @@ def lena_mail_triage_summary(
 
     # Map Outlook category display names → internal bucket keys
     action_map = {v: k for k, v in LENA_ACTION_CATEGORIES.items()}
-    priority_map = {v: k for k, v in LENA_PRIORITY_CATEGORIES.items()}
 
     counts: dict = {
         "antworten": 0, "tun": 0, "warten": 0,
@@ -3394,15 +3454,16 @@ def lena_mail_triage_summary(
 
     for m in resp.json().get("value", []):
         cats = m.get("categories", []) or []
-        lena_cats = [c for c in cats if c.startswith("Lena: ") or c.startswith("Priorität: ")]
+        lena_cats = [c for c in cats if c.startswith("Lena: ")]
         if not lena_cats:
             continue  # skip un-categorized mails
         total += 1
         for c in lena_cats:
             if c in action_map:
                 counts[action_map[c]] += 1
-            elif c in priority_map:
-                counts[priority_map[c]] += 1
+        # Priority from Outlook importance field (replaces Priorität:* categories)
+        imp = (m.get("importance") or "normal").lower()
+        counts[OUTLOOK_IMPORTANCE_TO_LENA.get(imp, "mittel")] += 1
 
     return LenaTriageSummaryResponse(
         antworten=counts["antworten"],
@@ -3465,13 +3526,12 @@ def lena_mail_categorized_overrides(
 
     headers = {"Authorization": f"Bearer {tool.access_token}"}
     action_map = {v: k for k, v in LENA_ACTION_CATEGORIES.items()}
-    priority_map = {v: k for k, v in LENA_PRIORITY_CATEGORIES.items()}
 
     url = (
         "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages"
         f"?$filter=lastModifiedDateTime ge {since_str}"
         f"&$top={min(limit * 3, 200)}"
-        "&$select=id,subject,from,lastModifiedDateTime,categories"
+        "&$select=id,subject,from,lastModifiedDateTime,categories,importance"
         "&$orderby=lastModifiedDateTime desc"
     )
     resp = _rq.get(url, headers=headers, timeout=30)
@@ -3485,9 +3545,11 @@ def lena_mail_categorized_overrides(
     for m in resp.json().get("value", []):
         cats = m.get("categories", []) or []
         lena_action = next((action_map[c] for c in cats if c in action_map), None)
-        lena_priority = next((priority_map[c] for c in cats if c in priority_map), None)
-        if not lena_action or not lena_priority:
+        if not lena_action:
             continue  # skip un-categorized mails
+        # Priority from Outlook importance field (replaces Priorität:* categories)
+        imp = (m.get("importance") or "normal").lower()
+        lena_priority = OUTLOOK_IMPORTANCE_TO_LENA.get(imp, "mittel")
         sender = (m.get("from") or {}).get("emailAddress", {}) or {}
         email_addr = (sender.get("address") or "").lower()
         domain = email_addr.split("@")[-1] if "@" in email_addr else email_addr
