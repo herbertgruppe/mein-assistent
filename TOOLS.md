@@ -1,6 +1,6 @@
 # TOOLS.md — Lena API-Referenz
 
-> Zuletzt aktualisiert: 2026-06-17 (HBE-979 — Kontakt anlegen hinzugefügt)
+> Zuletzt aktualisiert: 2026-06-20 (HBE-1067 — Geburtstag, Kategorie, DELETE hinzugefügt)
 
 Alle Endpoints erfordern den Header `X-Api-Key: {MEIN_ASSISTENT_API_KEY}`.
 Bei abgelaufenem Outlook-Token: HTTP 503 `"Outlook nicht authentifiziert."`.
@@ -78,25 +78,46 @@ POST /api/lena/contacts
   "businessPhones": ["+49 89 1234567"],
   "jobTitle": "Projektleiter",
   "companyName": "Muster GmbH",
-  "fileAs": "Mustermann, Max"
+  "fileAs": "Mustermann, Max",
+  "birthday": "1982-03-15",
+  "categories": ["Kunden", "Führungskreis"]
 }
 ```
 
 Pflichtfelder: `givenName`, `surname`. Alle anderen Felder optional.
-`emailAddresses` — max. 3 Einträge.
+- `emailAddresses` — max. 3 Einträge
+- `birthday` — Format `YYYY-MM-DD`
+- `categories` — Liste von Strings (z.B. `["Kunden"]`, `["Privat"]`, `["Führungskreis"]`)
 
 Response: `{ "success": true, "contact_id": "AAM...", "display_name": "Max Mustermann" }`
 
-HTTP 400 bei leeren Pflichtfeldern oder mehr als 3 E-Mail-Adressen.
+HTTP 400 bei leeren Pflichtfeldern, mehr als 3 E-Mail-Adressen oder falschem Datumsformat.
 HTTP 503 bei abgelaufenem Token. HTTP 502 bei Graph-API-Fehler.
 
-### Kontakt bearbeiten (Telefonnummern)
+### Kontakt bearbeiten
 ```
 PATCH /api/lena/contacts/{contact_id}
-{ "mobilePhone": "+49 151 ...", "businessPhone": "+49 89 ..." }
+{
+  "mobilePhone": "+49 151 ...",
+  "businessPhone": "+49 89 ...",
+  "birthday": "1982-03-15",
+  "categories": ["Kunden"]
+}
 ```
 `contact_id` aus `/api/lena/contacts/search`. Mind. ein Feld erforderlich.
+- `birthday` — Format `YYYY-MM-DD`
+- `categories` — überschreibt die gesamte Kategorienliste
+
 Response: `{ "success": true, "contact_id": "..." }`
+
+### Kontakt löschen
+```
+DELETE /api/lena/contacts/{contact_id}
+```
+`contact_id` aus `/api/lena/contacts/search`.
+Response: `{ "success": true, "contact_id": "..." }`
+
+HTTP 404 wenn Kontakt nicht gefunden. HTTP 503 bei abgelaufenem Token. HTTP 502 bei Graph-API-Fehler.
 
 ---
 

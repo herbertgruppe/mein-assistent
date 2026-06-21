@@ -2948,6 +2948,8 @@ class LenaContactsSearchResponse(BaseModel):
 class LenaContactUpdateRequest(BaseModel):
     mobilePhone: Optional[str] = None
     businessPhone: Optional[str] = None
+    birthday: Optional[str] = None
+    categories: Optional[List[str]] = None
 
 
 class LenaContactUpdateResponse(BaseModel):
@@ -2964,6 +2966,8 @@ class LenaContactCreateRequest(BaseModel):
     jobTitle: Optional[str] = None
     companyName: Optional[str] = None
     fileAs: Optional[str] = None
+    birthday: Optional[str] = None
+    categories: List[str] = Field(default_factory=list)
 
     @field_validator("givenName", "surname")
     @classmethod
@@ -2979,11 +2983,26 @@ class LenaContactCreateRequest(BaseModel):
             raise ValueError("maximal 3 E-Mail-Adressen erlaubt")
         return v
 
+    @field_validator("birthday")
+    @classmethod
+    def birthday_format(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        import re
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+            raise ValueError("birthday muss im Format YYYY-MM-DD sein")
+        return v
+
 
 class LenaContactCreateResponse(BaseModel):
     success: bool
     contact_id: str
     display_name: str
+
+
+class LenaContactDeleteResponse(BaseModel):
+    success: bool
+    contact_id: str
 
 
 @app.post("/api/lena/mail/move", response_model=LenaMoveMailResponse)
@@ -3695,6 +3714,10 @@ def lena_contact_create(
         payload["companyName"] = req.companyName
     if req.fileAs is not None:
         payload["fileAs"] = req.fileAs
+    if req.birthday is not None:
+        payload["birthday"] = f"{req.birthday}T00:00:00Z"
+    if req.categories:
+        payload["categories"] = req.categories
 
     tool = _get_outlook_tool()
     if not tool.is_authenticated():
@@ -3733,7 +3756,7 @@ def lena_contact_update(
     _key: str = Security(verify_api_key),
 ):
     """
-    Aktualisiert Telefonnummern eines Outlook-Kontakts via Microsoft Graph (HBE-940).
+    Aktualisiert Felder eines Outlook-Kontakts via Microsoft Graph (HBE-940, HBE-1067).
 
     Path-Parameter:
       - contact_id  Outlook-Kontakt-ID (aus /api/lena/contacts/search)
@@ -3741,6 +3764,8 @@ def lena_contact_update(
     Body (mind. ein Feld erforderlich):
       - mobilePhone    Mobilnummer
       - businessPhone  Geschäftliche Telefonnummer
+      - birthday       Geburtstag (YYYY-MM-DD)
+      - categories     Liste von Kategorien (z.B. ["Kunden", "Führungskreis"])
 
     Unter der Haube: PATCH https://graph.microsoft.com/v1.0/me/contacts/{id}
     HTTP 503 wenn Token abgelaufen, HTTP 404 wenn Kontakt nicht gefunden.
@@ -3752,11 +3777,18 @@ def lena_contact_update(
         payload["mobilePhone"] = req.mobilePhone
     if req.businessPhone is not None:
         payload["businessPhones"] = [req.businessPhone]
+    if req.birthday is not None:
+        import re
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", req.birthday):
+            raise HTTPException(status_code=400, detail="birthday muss im Format YYYY-MM-DD sein.")
+        payload["birthday"] = f"{req.birthday}T00:00:00Z"
+    if req.categories is not None:
+        payload["categories"] = req.categories
 
     if not payload:
         raise HTTPException(
             status_code=400,
-            detail="Mindestens ein Feld (mobilePhone oder businessPhone) muss angegeben werden.",
+            detail="Mindestens ein Feld (mobilePhone, businessPhone, birthday oder categories) muss angegeben werden.",
         )
 
     tool = _get_outlook_tool()
@@ -3784,6 +3816,47 @@ def lena_contact_update(
         )
 
     return LenaContactUpdateResponse(success=True, contact_id=contact_id)
+
+
+@app.delete("/api/lena/contacts/{contact_id}", response_model=LenaContactDeleteResponse)
+def lena_contact_delete(
+    contact_id: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Löscht einen Outlook-Kontakt via Microsoft Graph (HBE-1067).
+
+    Path-Parameter:
+      - contact_id  Outlook-Kontakt-ID (aus /api/lena/contacts/search)
+
+    Unter der Haube: DELETE https://graph.microsoft.com/v1.0/me/contacts/{id}
+    HTTP 503 wenn Token abgelaufen, HTTP 404 wenn Kontakt nicht gefunden.
+    """
+    import requests as _rq
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+    }
+
+    resp = _rq.delete(
+        f"https://graph.microsoft.com/v1.0/me/contacts/{contact_id}",
+        headers=headers,
+        timeout=30,
+    )
+
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail=f"Kontakt '{contact_id}' nicht gefunden.")
+    if resp.status_code not in (200, 201, 204):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler beim Löschen: HTTP {resp.status_code} — {resp.text[:300]}",
+        )
+
+    return LenaContactDeleteResponse(success=True, contact_id=contact_id)
 
 
 # ---------------------------------------------------------------------------
