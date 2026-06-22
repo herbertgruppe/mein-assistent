@@ -13,6 +13,7 @@ Aufgaben des Endpunkts:
 Telegram-Bridge (HBE-402):
   POST /api/telegram/lena/webhook  — Empfängt Telegram-Updates, erstellt Paperclip-Issues für Lena
   POST /api/telegram/lena/send    — Sendet Telegram-Nachricht an einen Chat (intern, X-API-Key)
+  POST /api/lena/telegram/send    — Sendet + trackt in outbound_messages für Reply-Threading (HBE-1091)
   Background-Job                  — Pollt Paperclip-Comments auf TELEGRAM_REPLY: Prefix, sendet via Telegram
 
 Lena Mail-Management (HBE-607):
@@ -239,6 +240,7 @@ def _tg_send_message(
     chat_id: str,
     text: str,
     reply_markup: Optional[dict] = None,
+    parse_mode: Optional[str] = None,
 ) -> Optional[int]:
     """Send a message via Telegram Bot API. Returns message_id on success, None on failure."""
     if not _TG_BOT_TOKEN:
@@ -246,6 +248,8 @@ def _tg_send_message(
     payload: dict = {"chat_id": chat_id, "text": text}
     if reply_markup:
         payload["reply_markup"] = reply_markup
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     try:
         resp = _http.post(
             f"https://api.telegram.org/bot{_TG_BOT_TOKEN}/sendMessage",
@@ -869,6 +873,19 @@ class TelegramUpdate(BaseModel):
 class TelegramSendRequest(BaseModel):
     chat_id: str = Field(..., description="Telegram Chat-ID (Empfänger)")
     text: str = Field(..., description="Nachrichtentext")
+
+
+class LenaTelegramSendRequest(BaseModel):
+    chat_id: str = Field(..., description="Telegram Chat-ID (Empfänger)")
+    text: str = Field(..., description="Nachrichtentext")
+    parse_mode: str = Field("MarkdownV2", description="Telegram parse_mode (MarkdownV2 empfohlen)")
+    issue_id: Optional[str] = Field(None, description="Paperclip Issue-ID für outbound_messages Tracking")
+    comment_id: Optional[str] = Field(None, description="Paperclip Comment-ID für outbound_messages Tracking")
+
+
+class LenaTelegramSendResponse(BaseModel):
+    success: bool
+    telegram_msg_id: Optional[int] = None
 
 
 class SpeakerQuestionRequest(BaseModel):
@@ -4051,6 +4068,29 @@ def telegram_lena_send(
     if not _tg_send_message(req.chat_id, req.text):
         raise HTTPException(status_code=502, detail="Telegram sendMessage fehlgeschlagen.")
     return SimpleResult(success=True, message=f"Nachricht an Chat {req.chat_id} gesendet.")
+
+
+@app.post("/api/lena/telegram/send", response_model=LenaTelegramSendResponse)
+def lena_telegram_send(
+    req: LenaTelegramSendRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Sendet eine Telegram-Nachricht und trackt sie optional in outbound_messages (Reply-Threading).
+    Erfordert X-API-Key. issue_id + comment_id aktivieren das outbound_messages-Tracking.
+    """
+    if not _TG_BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN nicht konfiguriert.")
+    sent_msg_id = _tg_send_message(req.chat_id, req.text, parse_mode=req.parse_mode)
+    if sent_msg_id and req.issue_id:
+        with _telegram_db() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO outbound_messages "
+                "(telegram_msg_id, chat_id, issue_id, comment_id, comment_excerpt) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (sent_msg_id, req.chat_id, req.issue_id, req.comment_id or "", req.text[:200]),
+            )
+    return LenaTelegramSendResponse(success=bool(sent_msg_id), telegram_msg_id=sent_msg_id)
 
 
 @app.post("/api/telegram/speaker-question", response_model=SimpleResult)
