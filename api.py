@@ -878,7 +878,7 @@ class TelegramSendRequest(BaseModel):
 class LenaTelegramSendRequest(BaseModel):
     chat_id: str = Field(..., description="Telegram Chat-ID (Empfänger)")
     text: str = Field(..., description="Nachrichtentext")
-    parse_mode: str = Field("Markdown", description="Telegram parse_mode")
+    parse_mode: str = Field("MarkdownV2", description="Telegram parse_mode (MarkdownV2 empfohlen)")
     issue_id: Optional[str] = Field(None, description="Paperclip Issue-ID für outbound_messages Tracking")
     comment_id: Optional[str] = Field(None, description="Paperclip Comment-ID für outbound_messages Tracking")
 
