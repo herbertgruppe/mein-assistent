@@ -3028,11 +3028,13 @@ def lena_mail_move(
     _key: str = Security(verify_api_key),
 ):
     """
-    Verschiebt eine Mail in einen Outlook-Ordner (HBE-607).
+    Verschiebt eine Mail in einen Outlook-Ordner (HBE-607, fix HBE-1106).
 
     Unterstützt well-known Ordner-Aliase (Archive/Archiv, Deleted Items/Papierkorb,
     Junk Email/Spam, Inbox/Posteingang) sowie beliebige Custom-Folder per displayName.
-    Implementierung: PATCH /me/messages/{id} mit parentFolderId.
+    Implementierung: PATCH /me/messages/{id} mit parentFolderId — message_id bleibt
+    unverändert (POST /move erzeugt ein neues Objekt mit neuer ID, HBE-1106).
+    Nach PATCH wird per GET verifiziert, dass parentFolderId wirklich geändert wurde.
     """
     import requests as _rq
 
@@ -3047,26 +3049,52 @@ def lena_mail_move(
 
     folder_id = _resolve_folder_id(req.target_folder, headers)
 
-    resp = _rq.post(
-        f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}/move",
+    resp = _rq.patch(
+        f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
         headers=headers,
-        json={"destinationId": folder_id},
+        json={"parentFolderId": folder_id},
         timeout=30,
     )
+    if resp.status_code == 401 and tool._refresh_access_token():
+        headers["Authorization"] = f"Bearer {tool.access_token}"
+        resp = _rq.patch(
+            f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
+            headers=headers,
+            json={"parentFolderId": folder_id},
+            timeout=30,
+        )
     if resp.status_code not in (200, 201):
         raise HTTPException(
             status_code=502,
             detail=f"Graph API Fehler beim Verschieben: HTTP {resp.status_code} — {resp.text[:300]}",
         )
 
+    # Post-move verification: confirm parentFolderId actually changed (catches silent failures).
     try:
-        new_id = resp.json().get("id") or req.message_id
+        verify_resp = _rq.get(
+            f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
+            headers=headers,
+            params={"$select": "id,parentFolderId"},
+            timeout=30,
+        )
+        if verify_resp.status_code == 200:
+            actual_folder = verify_resp.json().get("parentFolderId", "")
+            if actual_folder and actual_folder != folder_id:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"Move nicht bestätigt — parentFolderId nach PATCH ist {actual_folder!r}, "
+                        f"erwartet {folder_id!r}. Mail wurde nicht verschoben."
+                    ),
+                )
+    except HTTPException:
+        raise
     except Exception:
-        new_id = req.message_id
+        pass  # Verification GET failure is non-fatal; PATCH returned 200/201.
 
     return LenaMoveMailResponse(
         success=True,
-        message_id=new_id,
+        message_id=req.message_id,
         folder=req.target_folder,
     )
 
