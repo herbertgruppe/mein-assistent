@@ -1,10 +1,11 @@
 name: PR Review via Paperclip
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, closed]
 
 jobs:
   trigger-code-reviewer:
+    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -97,3 +98,74 @@ jobs:
             ISSUE_ID=$(echo "$BODY_RESP" | jq -r '.identifier')
             echo "::notice::Paperclip-Issue $ISSUE_ID erzeugt (Fingerprint: $FINGERPRINT) -> Code Reviewer wird via wakeOnDemand getriggert"
           fi
+
+  auto-close-on-merge:
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Close Paperclip review issue on merge
+        env:
+          PAPERCLIP_API_URL: ${{ vars.PAPERCLIP_API_URL }}
+          PAPERCLIP_API_KEY: ${{ secrets.PAPERCLIP_API_KEY }}
+          PAPERCLIP_COMPANY_ID: 9df4976b-9ac8-4e8f-a156-c06c7fa40cdc
+          CODE_REVIEWER_AGENT_ID: f2cdbdbc-f456-4ac7-bba6-178ef7422748
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Fetch all open/blocked review issues for the Code Reviewer agent
+          SEARCH_RESP=$(curl -sS -w "\n%{http_code}" \
+            "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/issues?q=PR+Review&assigneeAgentId=$CODE_REVIEWER_AGENT_ID&status=todo,in_progress,in_review,blocked" \
+            -H "Authorization: Bearer $PAPERCLIP_API_KEY")
+          SEARCH_HTTP=$(echo "$SEARCH_RESP" | tail -1)
+          SEARCH_BODY=$(echo "$SEARCH_RESP" | head -n -1)
+
+          if [ "$SEARCH_HTTP" != "200" ]; then
+            echo "::warning::Paperclip-Suche fehlgeschlagen (HTTP $SEARCH_HTTP) — Auto-Close übersprungen"
+            exit 0
+          fi
+
+          # Filter by PR number in title suffix "(#N)" and repo name in description
+          ISSUE_IDS=$(echo "$SEARCH_BODY" | jq -r \
+            --arg pr_num "$PR_NUMBER" \
+            --arg repo "$PR_REPO" \
+            '(.issues // .) | map(
+              select(
+                (.title | test("\\(#" + $pr_num + "\\)$")) and
+                (.description | . != null and contains($repo))
+              )
+            ) | .[].id' 2>/dev/null || echo "")
+
+          if [ -z "$ISSUE_IDS" ]; then
+            echo "::notice::Keine offenen Review-Issues für PR #${PR_NUMBER} in ${PR_REPO} — nichts zu tun"
+            exit 0
+          fi
+
+          # Close each matching issue
+          CLOSED_COUNT=0
+          while IFS= read -r ISSUE_ID; do
+            [ -z "$ISSUE_ID" ] && continue
+            PATCH_PAYLOAD=$(jq -n \
+              --arg comment "PR #${PR_NUMBER} (${PR_REPO}) wurde gemergt — Auto-Close" \
+              '{status: "done", blockedByIssueIds: [], comment: $comment}')
+            PATCH_RESP=$(curl -sS -w "\n%{http_code}" -X PATCH \
+              "$PAPERCLIP_API_URL/api/issues/$ISSUE_ID" \
+              -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "$PATCH_PAYLOAD")
+            PATCH_HTTP=$(echo "$PATCH_RESP" | tail -1)
+            PATCH_BODY=$(echo "$PATCH_RESP" | head -n -1)
+            if [ "$PATCH_HTTP" = "200" ]; then
+              IDENTIFIER=$(echo "$PATCH_BODY" | jq -r '.identifier // "unknown"')
+              echo "::notice::Review-Issue $IDENTIFIER ($ISSUE_ID) → done. PR #${PR_NUMBER} in ${PR_REPO} gemergt."
+              CLOSED_COUNT=$((CLOSED_COUNT + 1))
+            else
+              echo "::error::Issue $ISSUE_ID schließen fehlgeschlagen (HTTP $PATCH_HTTP)"
+              echo "$PATCH_BODY"
+              exit 1
+            fi
+          done <<< "$ISSUE_IDS"
+
+          echo "::notice::Auto-Close-on-Merge abgeschlossen — ${CLOSED_COUNT} Issue(s) geschlossen (PR #${PR_NUMBER})"
