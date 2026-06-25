@@ -1,12 +1,13 @@
 name: PR Review via Paperclip
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, closed]
 
 jobs:
   trigger-code-reviewer:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    if: github.event.action != 'closed'
     steps:
       - name: Create Paperclip review issue
         env:
@@ -97,3 +98,69 @@ jobs:
             ISSUE_ID=$(echo "$BODY_RESP" | jq -r '.identifier')
             echo "::notice::Paperclip-Issue $ISSUE_ID erzeugt (Fingerprint: $FINGERPRINT) -> Code Reviewer wird via wakeOnDemand getriggert"
           fi
+
+  auto-close-on-merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event.pull_request.merged == true
+    steps:
+      - name: Close Paperclip review issue on merge
+        env:
+          PAPERCLIP_API_URL: ${{ vars.PAPERCLIP_API_URL }}
+          PAPERCLIP_API_KEY: ${{ secrets.PAPERCLIP_API_KEY }}
+          PAPERCLIP_COMPANY_ID: 9df4976b-9ac8-4e8f-a156-c06c7fa40cdc
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          REPO_NAME=$(echo "$PR_REPO" | cut -d'/' -f2)
+          FINGERPRINT="${REPO_NAME}-pr-${PR_NUMBER}"
+
+          # Find open/blocked review issues for this PR
+          SEARCH_RESP=$(curl -sS -w "\n%{http_code}" \
+            "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/issues?originFingerprint=${FINGERPRINT}" \
+            -H "Authorization: Bearer $PAPERCLIP_API_KEY")
+          SEARCH_HTTP=$(echo "$SEARCH_RESP" | tail -1)
+          SEARCH_BODY=$(echo "$SEARCH_RESP" | head -n -1)
+
+          if [ "$SEARCH_HTTP" != "200" ]; then
+            echo "::warning::Paperclip-Suche fehlgeschlagen (HTTP $SEARCH_HTTP) — kein Auto-Close"
+            exit 0
+          fi
+
+          # Collect all open/blocked issue IDs
+          ISSUE_IDS=$(echo "$SEARCH_BODY" | jq -r '
+            (.issues // .) |
+            map(select(.status != "done" and .status != "cancelled")) |
+            .[].id
+          ' 2>/dev/null || echo "")
+
+          if [ -z "$ISSUE_IDS" ]; then
+            echo "::notice::Kein offenes Review-Issue für Fingerprint $FINGERPRINT — nichts zu tun"
+            exit 0
+          fi
+
+          # Close each found issue
+          while IFS= read -r ISSUE_ID; do
+            [ -z "$ISSUE_ID" ] && continue
+            CLOSE_PAYLOAD=$(jq -n \
+              --arg n "$PR_NUMBER" \
+              --arg url "$PR_URL" \
+              '{"status": "done", "blockedByIssueIds": [], "comment": "PR #\($n) wurde gemergt — Auto-Close (\($url))"}')
+            CLOSE_RESP=$(curl -sS -w "\n%{http_code}" -X PATCH \
+              "$PAPERCLIP_API_URL/api/issues/$ISSUE_ID" \
+              -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "$CLOSE_PAYLOAD")
+            C_HTTP=$(echo "$CLOSE_RESP" | tail -1)
+            C_BODY=$(echo "$CLOSE_RESP" | head -n -1)
+            echo "HTTP: $C_HTTP"
+            echo "Response: $C_BODY"
+            if [ "$C_HTTP" != "200" ] && [ "$C_HTTP" != "204" ]; then
+              echo "::error::Paperclip-Close fehlgeschlagen für Issue $ISSUE_ID (HTTP $C_HTTP)"
+              exit 1
+            fi
+            echo "::notice::Issue $ISSUE_ID auf done gesetzt (PR #$PR_NUMBER gemergt)"
+          done <<< "$ISSUE_IDS"
