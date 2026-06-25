@@ -115,9 +115,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Fetch all open/blocked review issues for the Code Reviewer agent
+          # Idempotency fingerprint matches the one set when the issue was created
+          REPO_NAME=$(echo "$PR_REPO" | cut -d'/' -f2)
+          FINGERPRINT="${REPO_NAME}-pr-${PR_NUMBER}"
+
+          # Fetch open/blocked Code Reviewer issues and match by originFingerprint client-side
           SEARCH_RESP=$(curl -sS -w "\n%{http_code}" \
-            "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/issues?q=PR+Review&assigneeAgentId=$CODE_REVIEWER_AGENT_ID&status=todo,in_progress,in_review,blocked" \
+            "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/issues?assigneeAgentId=$CODE_REVIEWER_AGENT_ID&status=todo,in_progress,in_review,blocked" \
             -H "Authorization: Bearer $PAPERCLIP_API_KEY")
           SEARCH_HTTP=$(echo "$SEARCH_RESP" | tail -1)
           SEARCH_BODY=$(echo "$SEARCH_RESP" | head -n -1)
@@ -127,16 +131,11 @@ jobs:
             exit 0
           fi
 
-          # Filter by PR number in title suffix "(#N)" and repo name in description
+          # Filter by originFingerprint (set at issue creation, stable across Code Reviewer renames)
           ISSUE_IDS=$(echo "$SEARCH_BODY" | jq -r \
-            --arg pr_num "$PR_NUMBER" \
-            --arg repo "$PR_REPO" \
-            '(.issues // .) | map(
-              select(
-                (.title | test("\\(#" + $pr_num + "\\)$")) and
-                (.description | . != null and contains($repo))
-              )
-            ) | .[].id' 2>/dev/null || echo "")
+            --arg fp "$FINGERPRINT" \
+            '(.issues // .) | map(select(.originFingerprint == $fp)) | .[].id' \
+            2>/dev/null || echo "")
 
           if [ -z "$ISSUE_IDS" ]; then
             echo "::notice::Keine offenen Review-Issues für PR #${PR_NUMBER} in ${PR_REPO} — nichts zu tun"
