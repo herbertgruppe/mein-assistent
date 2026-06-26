@@ -2,12 +2,20 @@ name: PR Review via Paperclip
 on:
   pull_request:
     types: [opened, synchronize, reopened, closed]
+  pull_request_review:
+    types: [submitted]
 
 jobs:
   trigger-code-reviewer:
-    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # pull_request events: skip 'closed' (handled by auto-close-on-merge below)
+    # pull_request_review events: only fire when svenherbert submits APPROVED (F-Override trigger)
+    if: >-
+      (github.event_name == 'pull_request' && github.event.action != 'closed') ||
+      (github.event_name == 'pull_request_review' &&
+       github.event.review.state == 'approved' &&
+       github.event.review.user.login == 'svenherbert')
     steps:
       - name: Create Paperclip review issue
         env:
@@ -23,8 +31,18 @@ jobs:
           PR_BASE: ${{ github.event.pull_request.base.ref }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_ACTION: ${{ github.event.action }}
+          GH_EVENT_NAME: ${{ github.event_name }}
+          REVIEW_REVIEWER: ${{ github.event.review.user.login }}
+          REVIEW_STATE: ${{ github.event.review.state }}
         run: |
           set -euo pipefail
+
+          # Build trigger description depending on event type
+          if [ "$GH_EVENT_NAME" = "pull_request_review" ]; then
+            TRIGGER_INFO="pull_request_review.submitted (reviewer: $REVIEW_REVIEWER, state: $REVIEW_STATE)"
+          else
+            TRIGGER_INFO="pull_request.$PR_ACTION"
+          fi
 
           # Idempotency key: {repo-name}-pr-{number}
           REPO_NAME=$(echo "$PR_REPO" | cut -d'/' -f2)
@@ -48,9 +66,9 @@ jobs:
             # Active review issue exists — post a comment to re-trigger the reviewer
             COMMENT=$(jq -n \
               --arg sha "$PR_HEAD_SHA" \
-              --arg action "$PR_ACTION" \
+              --arg trigger "$TRIGGER_INFO" \
               --arg url "$PR_URL" \
-              '"Neuer Commit auf PR (`pull_request.\($action)`):\n\n- Head-SHA: `\($sha)`\n- PR: \($url)\n\nCode Reviewer Agent: bitte PR-Diff neu klassifizieren."')
+              '"Neuer Commit auf PR (`\($trigger)`):\n\n- Head-SHA: `\($sha)`\n- PR: \($url)\n\nCode Reviewer Agent: bitte PR-Diff neu klassifizieren."')
             COMMENT_PAYLOAD=$(jq -n --arg body "$COMMENT" '{body: $body}')
             COMMENT_RESP=$(curl -sS -w "\n%{http_code}" -X POST \
               "$PAPERCLIP_API_URL/api/issues/$EXISTING_ID/comments" \
@@ -74,8 +92,8 @@ jobs:
               --arg author "$PR_AUTHOR" \
               --arg base "$PR_BASE" \
               --arg sha "$PR_HEAD_SHA" \
-              --arg action "$PR_ACTION" \
-              '"## PR Review angefordert\n\n- Repo: \($repo)\n- PR: \($url)\n- Author: \($author)\n- Base: \($base)\n- Head-SHA: \($sha)\n- Trigger-Event: pull_request.\($action)\n\nCode Reviewer Agent soll: 1) risk-rules.yml im Repo laden, 2) PR-Diff klassifizieren (LOW/MEDIUM/HIGH), 3) GitHub-Review (APPROVE/REQUEST_CHANGES/COMMENT) submitten, 4) bei LOW nach 10 Min Cool-Off auto-mergen, 5) bei MEDIUM Folge-Issue für Lead Engineer anlegen, 6) bei HIGH Sven via Asana eskalieren."')
+              --arg trigger "$TRIGGER_INFO" \
+              '"## PR Review angefordert\n\n- Repo: \($repo)\n- PR: \($url)\n- Author: \($author)\n- Base: \($base)\n- Head-SHA: \($sha)\n- Trigger-Event: \($trigger)\n\nCode Reviewer Agent soll: 1) risk-rules.yml im Repo laden, 2) PR-Diff klassifizieren (LOW/MEDIUM/HIGH), 3) GitHub-Review (APPROVE/REQUEST_CHANGES/COMMENT) submitten, 4) bei LOW nach 10 Min Cool-Off auto-mergen, 5) bei MEDIUM Folge-Issue für Lead Engineer anlegen, 6) bei HIGH Sven via Asana eskalieren."')
             PAYLOAD=$(jq -n \
               --arg title "PR Review: $PR_TITLE (#$PR_NUMBER)" \
               --arg desc "$BODY" \
