@@ -738,6 +738,12 @@ def _strip_obsidian_syntax(md: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Plaud-Poller: state.db path (shared with plaud_poller.py)
+# ---------------------------------------------------------------------------
+_PLAUD_DB_PATH = os.getenv("PLAUD_DB_PATH", "/var/lib/plaud/state.db")
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 @app.get("/api/health")
@@ -749,6 +755,78 @@ def health():
         "version": "1.2.0",
         "api_key_configured": bool(_API_SECRET_KEY),
     }
+
+
+# ---------------------------------------------------------------------------
+# Plaud — Cancel-Schutz (HBE-1203)
+# ---------------------------------------------------------------------------
+class PlaudCancelRequest(BaseModel):
+    recording_id: str = Field(..., description="Plaud recording_id (32-Hex-Zeichen)")
+    issue_identifier: Optional[str] = Field(
+        None, description="Paperclip-Issue-Identifier (z.B. HBE-1188) — optional"
+    )
+
+
+@app.post("/api/plaud/cancel")
+def plaud_cancel(
+    req: PlaudCancelRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Markiert eine Plaud-Aufnahme in state.db als 'cancelled'.
+    Nach diesem Aufruf überspringt der plaud_poller die Aufnahme dauerhaft,
+    auch wenn sie noch im Plaud-Konto vorhanden ist.
+    """
+    db_path = Path(_PLAUD_DB_PATH)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.now(timezone.utc).isoformat()
+    issue_ref = req.issue_identifier or "cancelled_by_api"
+
+    try:
+        with sqlite3.connect(str(db_path), timeout=10) as conn:
+            # Ensure table + column exist (idempotent — mirrors plaud_poller._init_db)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS plaud_processed_recordings (
+                    recording_id     TEXT PRIMARY KEY,
+                    start_at         TEXT,
+                    processed_at     TEXT NOT NULL,
+                    issue_identifier TEXT,
+                    account_home     TEXT,
+                    status           TEXT
+                )
+            """)
+            try:
+                conn.execute(
+                    "ALTER TABLE plaud_processed_recordings ADD COLUMN status TEXT"
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            # INSERT new record OR update existing one — sets status='cancelled' in both cases
+            conn.execute(
+                """
+                INSERT INTO plaud_processed_recordings
+                    (recording_id, start_at, processed_at, issue_identifier, account_home, status)
+                VALUES (?, '', ?, ?, '', 'cancelled')
+                ON CONFLICT(recording_id) DO UPDATE SET
+                    status           = 'cancelled',
+                    issue_identifier = excluded.issue_identifier,
+                    processed_at     = excluded.processed_at
+                """,
+                (req.recording_id, now, issue_ref),
+            )
+            conn.commit()
+    except sqlite3.Error as exc:
+        logger.error("[plaud_cancel] DB-Fehler: %s", exc)
+        raise HTTPException(status_code=500, detail=f"DB-Fehler: {exc}")
+
+    logger.info(
+        "[plaud_cancel] recording_id=%s markiert als cancelled (issue=%s)",
+        req.recording_id,
+        issue_ref,
+    )
+    return {"status": "ok", "recording_id": req.recording_id, "cancelled_as": issue_ref}
 
 
 # ---------------------------------------------------------------------------
@@ -4088,14 +4166,40 @@ def telegram_lena_send(
     _key: str = Security(verify_api_key),
 ):
     """
-    Interne Schnittstelle: sendet eine Telegram-Nachricht an einen bestimmten Chat.
-    Erfordert X-API-Key. Wird von Lena (via Paperclip-Skill) oder manuell aufgerufen.
+    Alias für /api/lena/telegram/send — delegiert intern an denselben Handler inkl.
+    outbound_messages-Tracking. Erhalten für Rückwärtskompatibilität mit alten Clients.
+    """
+    # Delegate to the canonical endpoint so outbound_messages tracking always runs.
+    result = lena_telegram_send(
+        LenaTelegramSendRequest(chat_id=req.chat_id, text=req.text),
+        _key="",  # key already verified by this handler's Security dependency
+    )
+    if not result.success:
+        raise HTTPException(status_code=502, detail="Telegram sendMessage fehlgeschlagen.")
+    return SimpleResult(success=True, message=f"Nachricht an Chat {req.chat_id} gesendet.")
+
+
+@app.post("/api/lena/telegram/send", response_model=LenaTelegramSendResponse)
+def lena_telegram_send(
+    req: LenaTelegramSendRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Sendet eine Telegram-Nachricht und trackt sie optional in outbound_messages (Reply-Threading).
+    Erfordert X-API-Key. issue_id + comment_id aktivieren das outbound_messages-Tracking.
     """
     if not _TG_BOT_TOKEN:
         raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN nicht konfiguriert.")
-    if not _tg_send_message(req.chat_id, req.text):
-        raise HTTPException(status_code=502, detail="Telegram sendMessage fehlgeschlagen.")
-    return SimpleResult(success=True, message=f"Nachricht an Chat {req.chat_id} gesendet.")
+    sent_msg_id = _tg_send_message(req.chat_id, req.text, parse_mode=req.parse_mode)
+    if sent_msg_id and req.issue_id:
+        with _telegram_db() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO outbound_messages "
+                "(telegram_msg_id, chat_id, issue_id, comment_id, comment_excerpt) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (sent_msg_id, req.chat_id, req.issue_id, req.comment_id or "", req.text[:200]),
+            )
+    return LenaTelegramSendResponse(success=bool(sent_msg_id), telegram_msg_id=sent_msg_id)
 
 
 @app.post("/api/lena/telegram/send", response_model=LenaTelegramSendResponse)
