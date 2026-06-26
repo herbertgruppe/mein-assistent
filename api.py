@@ -4088,12 +4088,15 @@ def telegram_lena_send(
     _key: str = Security(verify_api_key),
 ):
     """
-    Interne Schnittstelle: sendet eine Telegram-Nachricht an einen bestimmten Chat.
-    Erfordert X-API-Key. Wird von Lena (via Paperclip-Skill) oder manuell aufgerufen.
+    Alias für /api/lena/telegram/send — delegiert intern an denselben Handler inkl.
+    outbound_messages-Tracking. Erhalten für Rückwärtskompatibilität mit alten Clients.
     """
-    if not _TG_BOT_TOKEN:
-        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN nicht konfiguriert.")
-    if not _tg_send_message(req.chat_id, req.text):
+    # Delegate to the canonical endpoint so outbound_messages tracking always runs.
+    result = lena_telegram_send(
+        LenaTelegramSendRequest(chat_id=req.chat_id, text=req.text),
+        _key="",  # key already verified by this handler's Security dependency
+    )
+    if not result.success:
         raise HTTPException(status_code=502, detail="Telegram sendMessage fehlgeschlagen.")
     return SimpleResult(success=True, message=f"Nachricht an Chat {req.chat_id} gesendet.")
 
