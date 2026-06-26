@@ -4202,6 +4202,29 @@ def lena_telegram_send(
     return LenaTelegramSendResponse(success=bool(sent_msg_id), telegram_msg_id=sent_msg_id)
 
 
+@app.post("/api/lena/telegram/send", response_model=LenaTelegramSendResponse)
+def lena_telegram_send(
+    req: LenaTelegramSendRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Sendet eine Telegram-Nachricht und trackt sie optional in outbound_messages (Reply-Threading).
+    Erfordert X-API-Key. issue_id + comment_id aktivieren das outbound_messages-Tracking.
+    """
+    if not _TG_BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN nicht konfiguriert.")
+    sent_msg_id = _tg_send_message(req.chat_id, req.text, parse_mode=req.parse_mode)
+    if sent_msg_id and req.issue_id:
+        with _telegram_db() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO outbound_messages "
+                "(telegram_msg_id, chat_id, issue_id, comment_id, comment_excerpt) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (sent_msg_id, req.chat_id, req.issue_id, req.comment_id or "", req.text[:200]),
+            )
+    return LenaTelegramSendResponse(success=bool(sent_msg_id), telegram_msg_id=sent_msg_id)
+
+
 @app.post("/api/telegram/speaker-question", response_model=SimpleResult)
 def telegram_speaker_question(
     req: SpeakerQuestionRequest,
