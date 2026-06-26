@@ -187,7 +187,7 @@ _PC_LENA_AGENT_ID    = os.getenv("PAPERCLIP_LENA_AGENT_ID", "").strip()
 _TG_MARA_BOT_TOKEN      = os.getenv("TELEGRAM_MARA_BOT_TOKEN", "").strip()
 _TG_MARA_WEBHOOK_SECRET = os.getenv("TELEGRAM_MARA_WEBHOOK_SECRET", "").strip()
 _TG_MARA_ADMIN_CHAT_ID  = os.getenv("TELEGRAM_MARA_ADMIN_CHAT_ID", os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")).strip()
-_PC_MARA_AGENT_ID       = os.getenv("PAPERCLIP_MARA_AGENT_ID", "ed26f194-f0a9-4f70-a52d-6e39be9013e3").strip()
+_PC_MARA_AGENT_ID       = os.getenv("PAPERCLIP_MARA_AGENT_ID", "").strip()
 # MARA_SPEAKER_FALLBACK_DEFAULT: ask | continue | pause
 _MARA_SPEAKER_FALLBACK_DEFAULT = os.getenv("MARA_SPEAKER_FALLBACK_DEFAULT", "ask").strip()
 
@@ -200,6 +200,11 @@ if os.getenv("TELEGRAM_BOT_TOKEN") and not os.getenv("TELEGRAM_WEBHOOK_SECRET", 
 if os.getenv("TELEGRAM_MARA_BOT_TOKEN") and not os.getenv("TELEGRAM_MARA_WEBHOOK_SECRET", "").strip():
     raise RuntimeError(
         "TELEGRAM_MARA_WEBHOOK_SECRET muss gesetzt sein wenn TELEGRAM_MARA_BOT_TOKEN konfiguriert ist."
+    )
+if os.getenv("TELEGRAM_MARA_BOT_TOKEN") and not os.getenv("PAPERCLIP_MARA_AGENT_ID", "").strip():
+    raise RuntimeError(
+        "PAPERCLIP_MARA_AGENT_ID muss gesetzt sein wenn TELEGRAM_MARA_BOT_TOKEN konfiguriert ist. "
+        "Ohne Agent-ID können eingehende Telegram-Replies nicht dem richtigen Paperclip-Agent zugeordnet werden."
     )
 
 _TELEGRAM_DB_PATH      = Path(__file__).resolve().parent / "data" / "telegram.db"
