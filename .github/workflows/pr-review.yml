@@ -108,7 +108,7 @@ jobs:
         env:
           PAPERCLIP_API_URL: ${{ vars.PAPERCLIP_API_URL }}
           PAPERCLIP_API_KEY: ${{ secrets.PAPERCLIP_API_KEY }}
-          PAPERCLIP_COMPANY_ID: 9df4976b-9ac8-4e8f-a156-c06c7fa40cdc
+          PAPERCLIP_COMPANY_ID: ${{ vars.PAPERCLIP_COMPANY_ID || '9df4976b-9ac8-4e8f-a156-c06c7fa40cdc' }}
           CODE_REVIEWER_AGENT_ID: f2cdbdbc-f456-4ac7-bba6-178ef7422748
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_REPO: ${{ github.repository }}
@@ -119,6 +119,7 @@ jobs:
           REPO_NAME=$(echo "$PR_REPO" | cut -d'/' -f2)
           FINGERPRINT="${REPO_NAME}-pr-${PR_NUMBER}"
 
+          # originFingerprint is not a supported server-side API filter; client-side filtering is intentional
           # Fetch open/blocked Code Reviewer issues and match by originFingerprint client-side
           SEARCH_RESP=$(curl -sS -w "\n%{http_code}" \
             "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/issues?assigneeAgentId=$CODE_REVIEWER_AGENT_ID&status=todo,in_progress,in_review,blocked" \
