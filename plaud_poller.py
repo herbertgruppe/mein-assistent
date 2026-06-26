@@ -117,9 +117,17 @@ def _init_db(db_path: str) -> sqlite3.Connection:
             start_at         TEXT,
             processed_at     TEXT NOT NULL,
             issue_identifier TEXT,
-            account_home     TEXT
+            account_home     TEXT,
+            status           TEXT
         )
     """)
+    # Safe migration: add status column to existing DBs (no-op if already present)
+    try:
+        conn.execute(
+            "ALTER TABLE plaud_processed_recordings ADD COLUMN status TEXT"
+        )
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     return conn
 
@@ -129,6 +137,14 @@ def _is_processed(conn: sqlite3.Connection, recording_id: str) -> bool:
         "SELECT 1 FROM plaud_processed_recordings WHERE recording_id = ?",
         (recording_id,),
     ).fetchone() is not None
+
+
+def _get_status(conn: sqlite3.Connection, recording_id: str) -> Optional[str]:
+    row = conn.execute(
+        "SELECT status FROM plaud_processed_recordings WHERE recording_id = ?",
+        (recording_id,),
+    ).fetchone()
+    return row[0] if row else None
 
 
 def _mark_processed(
@@ -372,7 +388,11 @@ def _poll_account(
 
     for recording_id in ids:
         if _is_processed(db, recording_id):
-            logger.debug("Skip already-processed %s", recording_id)
+            status = _get_status(db, recording_id)
+            if status == "cancelled":
+                logger.info("Skip cancelled recording %s (marked cancelled_by_user)", recording_id)
+            else:
+                logger.debug("Skip already-processed %s", recording_id)
             continue
 
         new_ids.append(recording_id)

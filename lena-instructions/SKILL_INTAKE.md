@@ -47,7 +47,40 @@ dass Sven eine Handlungs-Option erhalten hat.
 
 ---
 
-## 3. Fehlerbehandlung
+## 3. Plaud-Aufnahme abbrechen (Cancel-Schutz)
+
+Wenn ein Plaud-Issue (Origin: `plaud:` oder `plaud-poller`) auf `cancelled` gesetzt wird
+(z. B. weil die Aufnahme zu kurz oder unbeabsichtigt war), **muss Mara sofort danach**
+den folgenden API-Call ausführen, damit der plaud_poller die Aufnahme dauerhaft überspringt:
+
+```
+POST /api/plaud/cancel
+X-API-Key: <API_SECRET_KEY>
+Content-Type: application/json
+
+{
+  "recording_id": "<32-Hex-ID aus der Issue-Beschreibung>",
+  "issue_identifier": "<HBE-XXXX>"
+}
+```
+
+**Wichtig:**
+- Die `recording_id` steht in der Beschreibung des Plaud-Issues unter **Recording-ID**.
+- Dieser Call ist idempotent — mehrfache Ausführung ist unschädlich.
+- Ohne diesen Call kann der plaud_poller die Aufnahme beim nächsten Lauf erneut
+  als „neu" erkennen und ein weiteres Issue anlegen → Re-Pull-Loop.
+- Der Call schlägt fehl wenn `API_SECRET_KEY` nicht gesetzt ist → dann Fehler in
+  Issue-Kommentar dokumentieren und auf `blocked` setzen.
+
+**Ablauf bei Cancel:**
+1. Paperclip-Issue auf `cancelled` setzen (`PATCH /api/issues/{id}`)
+2. Sofort danach: `POST /api/plaud/cancel` mit `recording_id` und `issue_identifier`
+3. Kurzen Kommentar im Issue hinterlassen: „Aufnahme als cancelled markiert — plaud_poller
+   wird diese Aufnahme bei künftigen Läufen überspringen."
+
+---
+
+## 5. Fehlerbehandlung
 
 | Situation | Verhalten |
 |---|---|
@@ -56,10 +89,11 @@ dass Sven eine Handlungs-Option erhalten hat.
 | Unbekannte Speaker | Gemaess `SKILL_SPEAKER.md` (Telegram-Buttons oder Auto-Fallback) |
 | Plaud-CLI nicht verfuegbar | Warnung in Issue-Kommentar, Re-Pull uebersprungen |
 | LLM-Fehler bei Protokoll | Fehlermeldung in Issue-Kommentar, Status `blocked` |
+| `POST /api/plaud/cancel` fehlgeschlagen | Fehler in Issue-Kommentar, Issue trotzdem auf `cancelled` lassen; Sven informieren dass Re-Pull-Schutz nicht aktiv ist |
 
 ---
 
-## 4. Umgebungs-Konfiguration
+## 6. Umgebungs-Konfiguration
 
 Relevante Env-Variablen fuer den Intake-Workflow:
 
