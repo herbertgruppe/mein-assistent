@@ -35,6 +35,9 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+import threading
+import time as _time
+from collections import defaultdict, deque
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -204,6 +207,44 @@ if os.getenv("TELEGRAM_MARA_BOT_TOKEN") and not os.getenv("TELEGRAM_MARA_WEBHOOK
 
 _TELEGRAM_DB_PATH      = Path(__file__).resolve().parent / "data" / "telegram.db"
 _TELEGRAM_MARA_DB_PATH = Path(__file__).resolve().parent / "data" / "telegram_mara.db"
+
+# ── Per-endpoint Telegram rate limiter (HBE-1212) ─────────────────────────────
+# Limits both /api/lena/telegram/send and /api/mara/telegram/send independently.
+# On breach: returns HTTP 429 + alerts Sven once per flood event.
+_TG_RATE_LIMIT = int(os.getenv("TELEGRAM_SEND_RATE_LIMIT", "10"))  # max calls per window
+_TG_RATE_WINDOW = 60  # seconds
+_TG_RATE_LOCK: threading.Lock = threading.Lock()
+_TG_RATE_BUCKETS: dict = defaultdict(deque)
+_TG_RATE_LAST_ALERT: dict = {}  # endpoint -> monotonic timestamp of last alert
+
+
+def _tg_rate_check(endpoint: str) -> bool:
+    """
+    Returns True if this call is within rate limit, False if limit exceeded.
+    Automatically fires a Sven alert on the first breach per flood event (cooldown 60 s).
+    """
+    now = _time.monotonic()
+    with _TG_RATE_LOCK:
+        bucket = _TG_RATE_BUCKETS[endpoint]
+        while bucket and now - bucket[0] > _TG_RATE_WINDOW:
+            bucket.popleft()
+        if len(bucket) >= _TG_RATE_LIMIT:
+            last_alert = _TG_RATE_LAST_ALERT.get(endpoint, 0.0)
+            if now - last_alert > _TG_RATE_WINDOW:
+                _TG_RATE_LAST_ALERT[endpoint] = now
+                if _TG_ADMIN_CHAT_ID:
+                    try:
+                        _tg_send_message(
+                            _TG_ADMIN_CHAT_ID,
+                            f"⚠️ Telegram-Flood erkannt auf /{endpoint}/telegram/send"
+                            f" (>{_TG_RATE_LIMIT} Calls/Min). Agent pausiert oder Loop?"
+                            " Sven-Aktion erforderlich.",
+                        )
+                    except Exception:
+                        pass
+            return False
+        bucket.append(now)
+        return True
 
 
 @contextmanager
@@ -4360,19 +4401,26 @@ def lena_telegram_send(
     _key: str = Security(verify_api_key),
 ):
     """
-    Sendet eine Telegram-Nachricht und trackt sie optional in outbound_messages (Reply-Threading).
-    Erfordert X-API-Key. issue_id + comment_id aktivieren das outbound_messages-Tracking.
+    Sendet eine Telegram-Nachricht und trackt sie in outbound_messages (Reply-Threading).
+    Erfordert X-API-Key. Rate-Limit: 10 Calls/Min (HBE-1212 Flood-Schutz).
     """
     if not _TG_BOT_TOKEN:
         raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN nicht konfiguriert.")
+    if not _tg_rate_check("lena"):
+        raise HTTPException(
+            status_code=429,
+            detail="Rate-Limit überschritten: max. 10 Telegram-Sends pro Minute (Lena).",
+            headers={"Retry-After": "60"},
+        )
     sent_msg_id = _tg_send_message(req.chat_id, req.text, parse_mode=req.parse_mode)
-    if sent_msg_id and req.issue_id:
+    # Always track in outbound_messages (HBE-1212: auch ohne issue_id für retroaktive Flood-Analyse)
+    if sent_msg_id:
         with _telegram_db() as db:
             db.execute(
                 "INSERT OR REPLACE INTO outbound_messages "
                 "(telegram_msg_id, chat_id, issue_id, comment_id, comment_excerpt) "
                 "VALUES (?, ?, ?, ?, ?)",
-                (sent_msg_id, req.chat_id, req.issue_id, req.comment_id or "", req.text[:200]),
+                (sent_msg_id, req.chat_id, req.issue_id or "", req.comment_id or "", req.text[:200]),
             )
     return LenaTelegramSendResponse(success=bool(sent_msg_id), telegram_msg_id=sent_msg_id)
 
@@ -4519,18 +4567,25 @@ def mara_telegram_send(
 ):
     """
     Sendet eine Telegram-Nachricht via Maras eigenem Bot und trackt sie in outbound_messages (HBE-1205).
-    Erfordert X-API-Key. issue_id + comment_id aktivieren das Reply-Threading.
+    Erfordert X-API-Key. Rate-Limit: 10 Calls/Min (HBE-1212 Flood-Schutz).
     """
     if not _TG_MARA_BOT_TOKEN:
         raise HTTPException(status_code=503, detail="TELEGRAM_MARA_BOT_TOKEN nicht konfiguriert.")
+    if not _tg_rate_check("mara"):
+        raise HTTPException(
+            status_code=429,
+            detail="Rate-Limit überschritten: max. 10 Telegram-Sends pro Minute (Mara).",
+            headers={"Retry-After": "60"},
+        )
     sent_msg_id = _tg_mara_send_message(req.chat_id, req.text, parse_mode=req.parse_mode)
-    if sent_msg_id and req.issue_id:
+    # Always track in outbound_messages (HBE-1212: auch ohne issue_id für retroaktive Flood-Analyse)
+    if sent_msg_id:
         with _telegram_mara_db() as db:
             db.execute(
                 "INSERT OR REPLACE INTO outbound_messages "
                 "(telegram_msg_id, chat_id, issue_id, comment_id, comment_excerpt) "
                 "VALUES (?, ?, ?, ?, ?)",
-                (sent_msg_id, req.chat_id, req.issue_id, req.comment_id or "", req.text[:200]),
+                (sent_msg_id, req.chat_id, req.issue_id or "", req.comment_id or "", req.text[:200]),
             )
     return LenaTelegramSendResponse(success=bool(sent_msg_id), telegram_msg_id=sent_msg_id)
 

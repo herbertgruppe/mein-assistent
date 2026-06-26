@@ -66,6 +66,14 @@ PLAUD_ACCOUNTS_ENV = os.getenv("PLAUD_ACCOUNTS", f"/var/lib/plaud:{PC_PROTOKOLL_
 MAX_BACKOFF_SEC = 300
 ALERT_THRESHOLD = 3  # consecutive errors before Telegram alert
 
+# Demo/Tutorial-Aufnahmen überspringen (HBE-1212).
+# Pipe-separierte, case-insensitive Substring-Liste. Standard: Plaud-Tutorial-Video.
+_SKIP_TITLE_PATTERNS: List[str] = [
+    p.strip().lower()
+    for p in os.getenv("PLAUD_SKIP_TITLE_PATTERNS", "How to use Plaud|Plaud Tutorial|Let's walk through how to use Plaud").split("|")
+    if p.strip()
+]
+
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 class _JsonFormatter(logging.Formatter):
@@ -414,6 +422,17 @@ def _poll_account(
             )
             skipped.append(recording_id)
             _mark_processed(db, recording_id, meta.get("start_at", ""), "skipped:too_short", home_dir)
+            continue
+
+        # Skip Plaud demo/tutorial recordings (HBE-1212)
+        recording_name = (meta.get("name") or meta.get("title") or "").lower()
+        if _SKIP_TITLE_PATTERNS and any(pattern in recording_name for pattern in _SKIP_TITLE_PATTERNS):
+            logger.info(
+                "Skip demo/tutorial recording %s (title=%r matches PLAUD_SKIP_TITLE_PATTERNS)",
+                recording_id, meta.get("name") or meta.get("title"),
+            )
+            skipped.append(recording_id)
+            _mark_processed(db, recording_id, meta.get("start_at", ""), "skipped:demo_recording", home_dir)
             continue
 
         # Get summary (best-effort — don't fail if unavailable)
