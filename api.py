@@ -183,6 +183,11 @@ _PC_API_URL          = os.getenv("PAPERCLIP_API_URL_MA", "https://paperclip.herb
 _PC_API_KEY          = os.getenv("PAPERCLIP_API_KEY_MA", "").strip()
 _PC_COMPANY_ID       = os.getenv("PAPERCLIP_COMPANY_ID_MA", "").strip()
 _PC_LENA_AGENT_ID    = os.getenv("PAPERCLIP_LENA_AGENT_ID", "").strip()
+# Mara-eigener Telegram-Bot (HBE-1205)
+_TG_MARA_BOT_TOKEN      = os.getenv("TELEGRAM_MARA_BOT_TOKEN", "").strip()
+_TG_MARA_WEBHOOK_SECRET = os.getenv("TELEGRAM_MARA_WEBHOOK_SECRET", "").strip()
+_TG_MARA_ADMIN_CHAT_ID  = os.getenv("TELEGRAM_MARA_ADMIN_CHAT_ID", os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")).strip()
+_PC_MARA_AGENT_ID       = os.getenv("PAPERCLIP_MARA_AGENT_ID", "").strip()
 # MARA_SPEAKER_FALLBACK_DEFAULT: ask | continue | pause
 _MARA_SPEAKER_FALLBACK_DEFAULT = os.getenv("MARA_SPEAKER_FALLBACK_DEFAULT", "ask").strip()
 
@@ -192,8 +197,18 @@ if os.getenv("TELEGRAM_BOT_TOKEN") and not os.getenv("TELEGRAM_WEBHOOK_SECRET", 
         "Ohne das Secret ist der Webhook für beliebige Caller offen. "
         "Generierung: python3 -c \"import secrets; print(secrets.token_urlsafe(32))\""
     )
+if os.getenv("TELEGRAM_MARA_BOT_TOKEN") and not os.getenv("TELEGRAM_MARA_WEBHOOK_SECRET", "").strip():
+    raise RuntimeError(
+        "TELEGRAM_MARA_WEBHOOK_SECRET muss gesetzt sein wenn TELEGRAM_MARA_BOT_TOKEN konfiguriert ist."
+    )
+if os.getenv("TELEGRAM_MARA_BOT_TOKEN") and not os.getenv("PAPERCLIP_MARA_AGENT_ID", "").strip():
+    raise RuntimeError(
+        "PAPERCLIP_MARA_AGENT_ID muss gesetzt sein wenn TELEGRAM_MARA_BOT_TOKEN konfiguriert ist. "
+        "Ohne Agent-ID können eingehende Telegram-Replies nicht dem richtigen Paperclip-Agent zugeordnet werden."
+    )
 
-_TELEGRAM_DB_PATH = Path(__file__).resolve().parent / "data" / "telegram.db"
+_TELEGRAM_DB_PATH      = Path(__file__).resolve().parent / "data" / "telegram.db"
+_TELEGRAM_MARA_DB_PATH = Path(__file__).resolve().parent / "data" / "telegram_mara.db"
 
 
 @contextmanager
@@ -215,6 +230,41 @@ def _telegram_db():
         message_id INTEGER PRIMARY KEY,
         issue_id   TEXT NOT NULL,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS outbound_messages (
+        telegram_msg_id INTEGER NOT NULL,
+        chat_id         TEXT NOT NULL,
+        issue_id        TEXT NOT NULL,
+        comment_id      TEXT NOT NULL,
+        comment_excerpt TEXT,
+        sent_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (telegram_msg_id, chat_id)
+    )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_outbound_issue ON outbound_messages(issue_id)"
+    )
+    conn.commit()
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@contextmanager
+def _telegram_mara_db():
+    """SQLite context manager for Mara's Telegram bot state (HBE-1205)."""
+    _TELEGRAM_MARA_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(_TELEGRAM_MARA_DB_PATH))
+    conn.row_factory = sqlite3.Row
+    conn.execute("""CREATE TABLE IF NOT EXISTS pending_issues (
+        issue_id   TEXT PRIMARY KEY,
+        chat_id    TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS processed_comments (
+        comment_id TEXT PRIMARY KEY,
+        processed_at TEXT DEFAULT CURRENT_TIMESTAMP
     )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS outbound_messages (
         telegram_msg_id INTEGER NOT NULL,
@@ -280,6 +330,37 @@ def _tg_answer_callback_query(callback_query_id: str, text: str = "") -> None:
         )
     except Exception:
         pass
+
+
+def _tg_mara_send_message(
+    chat_id: str,
+    text: str,
+    reply_markup: Optional[dict] = None,
+    parse_mode: Optional[str] = None,
+) -> Optional[int]:
+    """Send a message via Mara's Telegram Bot API (HBE-1205). Returns message_id or None."""
+    if not _TG_MARA_BOT_TOKEN:
+        return None
+    payload: dict = {"chat_id": chat_id, "text": text}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    try:
+        resp = _http.post(
+            f"https://api.telegram.org/bot{_TG_MARA_BOT_TOKEN}/sendMessage",
+            json=payload,
+            timeout=10,
+        )
+        if resp.ok:
+            return resp.json().get("result", {}).get("message_id")
+        return None
+    except _http.exceptions.RequestException as exc:
+        logger.warning("[telegram/mara] sendMessage failed: %s", type(exc).__name__)
+        return None
+    except Exception:
+        logger.warning("[telegram/mara] sendMessage failed: unexpected error", exc_info=False)
+        return None
 
 
 def _pc_get_issue_status(issue_id: str) -> Optional[str]:
@@ -473,6 +554,102 @@ def _poll_telegram_replies() -> None:
                     )
 
 
+def _pc_create_mara_issue(chat_id: str, message_id: int, username: str, text: str) -> Optional[str]:
+    """Create a high-priority Paperclip issue assigned to Mara (HBE-1205). Returns issue ID or None."""
+    if not (_PC_API_URL and _PC_API_KEY):
+        logger.warning("[telegram/mara] PAPERCLIP_API_KEY_MA not set — skipping issue creation")
+        return None
+    short = text[:50] + ("…" if len(text) > 50 else "")
+    description = (
+        f"Telegram-Nachricht von @{username}\n\n"
+        f"**Nachricht:**\n{text}\n\n"
+        "---\n"
+        f"TELEGRAM_CHAT_ID: {chat_id}\n"
+        f"TELEGRAM_MESSAGE_ID: {message_id}\n"
+    )
+    try:
+        resp = _http.post(
+            f"{_PC_API_URL}/api/companies/{_PC_COMPANY_ID}/issues",
+            json={
+                "title": f"Telegram an Mara von {username}: {short}",
+                "description": description,
+                "assigneeAgentId": _PC_MARA_AGENT_ID,
+                "priority": "high",
+            },
+            headers={"Authorization": f"Bearer {_PC_API_KEY}"},
+            timeout=15,
+        )
+    except _http.exceptions.RequestException as exc:
+        logger.warning("[telegram/mara] Paperclip request error: %s", type(exc).__name__)
+        return None
+    except Exception:
+        logger.warning("[telegram/mara] Paperclip request error: unexpected error", exc_info=False)
+        return None
+    if resp.status_code in (200, 201):
+        return resp.json().get("id")
+    logger.warning("[telegram/mara] issue creation failed: %s %s", resp.status_code, resp.text[:300])
+    return None
+
+
+def _poll_mara_telegram_replies() -> None:
+    """
+    APScheduler background job (every 60 s).
+    Scans Paperclip comments on Mara's tracked issues for TELEGRAM_REPLY: prefix
+    and forwards via Mara's bot (HBE-1205).
+    """
+    if not (_TG_MARA_BOT_TOKEN and _PC_API_URL and _PC_API_KEY):
+        return
+    with _telegram_mara_db() as db:
+        rows = db.execute("SELECT issue_id, chat_id FROM pending_issues").fetchall()
+        rows = [(r["issue_id"], r["chat_id"]) for r in rows]
+
+    for issue_id, chat_id in rows:
+        try:
+            resp = _http.get(
+                f"{_PC_API_URL}/api/issues/{issue_id}/comments",
+                headers={"Authorization": f"Bearer {_PC_API_KEY}"},
+                timeout=15,
+            )
+        except Exception as exc:
+            logger.error("[telegram/mara] comment fetch error for %s: %s", issue_id, exc)
+            continue
+
+        if resp.status_code == 404:
+            with _telegram_mara_db() as db:
+                db.execute("DELETE FROM pending_issues WHERE issue_id = ?", (issue_id,))
+            continue
+        if not resp.ok:
+            continue
+
+        data = resp.json()
+        comments = data if isinstance(data, list) else data.get("items", data.get("comments", []))
+
+        for comment in comments:
+            cid = str(comment.get("id", ""))
+            body = (comment.get("body") or comment.get("content") or "").strip()
+            if not body.startswith("TELEGRAM_REPLY:"):
+                continue
+            with _telegram_mara_db() as db:
+                if db.execute(
+                    "SELECT 1 FROM processed_comments WHERE comment_id = ?", (cid,)
+                ).fetchone():
+                    continue
+            reply_text = body[len("TELEGRAM_REPLY:"):].strip()
+            sent_msg_id = _tg_mara_send_message(chat_id, reply_text)
+            if sent_msg_id:
+                excerpt = reply_text[:200]
+                with _telegram_mara_db() as db:
+                    db.execute(
+                        "INSERT OR IGNORE INTO processed_comments (comment_id) VALUES (?)", (cid,)
+                    )
+                    db.execute(
+                        "INSERT OR REPLACE INTO outbound_messages "
+                        "(telegram_msg_id, chat_id, issue_id, comment_id, comment_excerpt) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (sent_msg_id, chat_id, issue_id, cid, excerpt),
+                    )
+
+
 # ── APScheduler lifespan hooks ────────────────────────────────────────────────
 _tg_scheduler = None
 
@@ -484,6 +661,9 @@ def _start_tg_scheduler() -> None:
         from apscheduler.schedulers.background import BackgroundScheduler
         _tg_scheduler = BackgroundScheduler(daemon=True)
         _tg_scheduler.add_job(_poll_telegram_replies, "interval", seconds=60, id="tg_poll")
+        if _TG_MARA_BOT_TOKEN:
+            _tg_scheduler.add_job(_poll_mara_telegram_replies, "interval", seconds=60, id="tg_mara_poll")
+            logger.info("[telegram/mara] reply-poll scheduler started (60 s interval)")
         _tg_scheduler.start()
         logger.info("[telegram] reply-poll scheduler started (60 s interval)")
 
@@ -4216,6 +4396,141 @@ def lena_telegram_send(
     sent_msg_id = _tg_send_message(req.chat_id, req.text, parse_mode=req.parse_mode)
     if sent_msg_id and req.issue_id:
         with _telegram_db() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO outbound_messages "
+                "(telegram_msg_id, chat_id, issue_id, comment_id, comment_excerpt) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (sent_msg_id, req.chat_id, req.issue_id, req.comment_id or "", req.text[:200]),
+            )
+    return LenaTelegramSendResponse(success=bool(sent_msg_id), telegram_msg_id=sent_msg_id)
+
+
+@app.post("/api/telegram/mara/webhook")
+async def telegram_mara_webhook(req: Request):
+    """
+    Telegram-Webhook für @mara_hberatung_bot (HBE-1205).
+
+    Auth: X-Telegram-Bot-Api-Secret-Token Header.
+    Erstellt ein Paperclip-Issue (Assignee: Mara) pro Text-Nachricht von Sven.
+    Reply-Threading via outbound_messages in telegram_mara.db.
+    """
+    incoming_secret = req.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not _TG_MARA_WEBHOOK_SECRET:
+        logger.warning("[telegram/mara] webhook received but TELEGRAM_MARA_WEBHOOK_SECRET not set — rejecting.")
+        return {"ok": True}
+    if not hmac.compare_digest(incoming_secret, _TG_MARA_WEBHOOK_SECRET):
+        logger.warning(
+            "[telegram/mara] webhook auth failure: secret mismatch (client=%s)",
+            req.client.host if req.client else "unknown",
+        )
+        return {"ok": True}
+
+    try:
+        body = await req.json()
+        update = TelegramUpdate(**body)
+    except Exception:
+        return {"ok": True}
+
+    if update.callback_query:
+        # Mara-Bot hat keine Inline-Keyboards vorerst — ignorieren
+        return {"ok": True}
+
+    msg = update.message
+    if not msg or not msg.text:
+        return {"ok": True}
+
+    user = msg.from_ or _TgUser(id=0)
+    username = user.username or user.first_name or "Unbekannt"
+    chat_id = str(msg.chat.id)
+
+    # Clean up stale pending_issues
+    active_issue_id = None
+    active_issue_status = None
+    with _telegram_mara_db() as db:
+        rows = db.execute(
+            "SELECT issue_id FROM pending_issues WHERE chat_id = ?", (chat_id,)
+        ).fetchall()
+        for row in rows:
+            status, assignee = _pc_get_issue_info(row["issue_id"])
+            is_stale = status is None or status in {"done", "cancelled", "blocked"}
+            is_foreign = bool(_PC_MARA_AGENT_ID) and assignee != _PC_MARA_AGENT_ID
+            if is_stale or is_foreign:
+                db.execute("DELETE FROM pending_issues WHERE issue_id = ?", (row["issue_id"],))
+            else:
+                active_issue_id = row["issue_id"]
+                active_issue_status = status
+
+    # Build quote_block from Mara's outbound_messages if Sven replied to a Mara message
+    quote_block = ""
+    if msg.reply_to_message:
+        replied_id = msg.reply_to_message.message_id
+        with _telegram_mara_db() as db:
+            row = db.execute(
+                "SELECT comment_id, comment_excerpt FROM outbound_messages "
+                "WHERE telegram_msg_id = ? AND chat_id = ?",
+                (replied_id, chat_id),
+            ).fetchone()
+        if row:
+            excerpt = (row["comment_excerpt"] or "")[:200]
+            comment_short = row["comment_id"][:8] if row["comment_id"] else "?"
+            ts = msg.reply_to_message.date
+            if ts:
+                time_label = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M UTC")
+            else:
+                time_label = datetime.now().strftime("%H:%M")
+            quote_block = f'> **Re Mara [Comment {comment_short}, {time_label}]:** „{excerpt}"\n\n'
+        elif msg.reply_to_message.text:
+            raw = msg.reply_to_message.text[:200]
+            quote_block = f'> **Re:** „{raw}"\n\n'
+
+    comment_text = quote_block + (msg.text or "")
+
+    if active_issue_id:
+        if active_issue_status == "in_review":
+            _pc_patch_issue_status(active_issue_id, "in_progress")
+            logger.info(
+                "[telegram/mara] reset issue %s from in_review to in_progress on user message",
+                active_issue_id,
+            )
+        _pc_add_comment_to_issue(active_issue_id, username, comment_text)
+    else:
+        issue_id = _pc_create_mara_issue(
+            chat_id=chat_id,
+            message_id=msg.message_id,
+            username=username,
+            text=msg.text,
+        )
+        if issue_id:
+            _, created_assignee = _pc_get_issue_info(issue_id)
+            if bool(_PC_MARA_AGENT_ID) and created_assignee != _PC_MARA_AGENT_ID:
+                logger.warning(
+                    "[telegram/mara] new issue %s not assigned to Mara (assignee=%s) — not tracking",
+                    issue_id, created_assignee,
+                )
+            else:
+                with _telegram_mara_db() as db:
+                    db.execute(
+                        "INSERT OR REPLACE INTO pending_issues (issue_id, chat_id) VALUES (?, ?)",
+                        (issue_id, chat_id),
+                    )
+
+    return {"ok": True}
+
+
+@app.post("/api/mara/telegram/send", response_model=LenaTelegramSendResponse)
+def mara_telegram_send(
+    req: LenaTelegramSendRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Sendet eine Telegram-Nachricht via Maras eigenem Bot und trackt sie in outbound_messages (HBE-1205).
+    Erfordert X-API-Key. issue_id + comment_id aktivieren das Reply-Threading.
+    """
+    if not _TG_MARA_BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="TELEGRAM_MARA_BOT_TOKEN nicht konfiguriert.")
+    sent_msg_id = _tg_mara_send_message(req.chat_id, req.text, parse_mode=req.parse_mode)
+    if sent_msg_id and req.issue_id:
+        with _telegram_mara_db() as db:
             db.execute(
                 "INSERT OR REPLACE INTO outbound_messages "
                 "(telegram_msg_id, chat_id, issue_id, comment_id, comment_excerpt) "
