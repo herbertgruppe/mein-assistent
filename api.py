@@ -4257,7 +4257,9 @@ async def telegram_lena_webhook(req: Request):
     chat_id = str(msg.chat.id)
 
     # Check for an existing active issue for this chat — clean all stale/foreign entries.
-    # An entry is stale if the issue is done, cancelled, blocked, or not found.
+    # An entry is stale if the issue is done, cancelled, or not found.
+    # blocked is NOT stale — Sven's reply on a blocked issue must add a comment and reset
+    # the issue to in_progress (HBE-1314), not create a new issue.
     # An entry is foreign if its assignee is not Lena (guards against stale DB rows from
     # older code paths landing Sven's messages on Mara-owned issues, causing silent 403s).
     active_issue_id = None
@@ -4268,7 +4270,7 @@ async def telegram_lena_webhook(req: Request):
         ).fetchall()
         for row in rows:
             status, assignee = _pc_get_issue_info(row["issue_id"])
-            is_stale = status is None or status in {"done", "cancelled", "blocked"}
+            is_stale = status is None or status in {"done", "cancelled"}
             is_foreign = bool(_PC_LENA_AGENT_ID) and assignee != _PC_LENA_AGENT_ID
             if is_stale or is_foreign:
                 db.execute("DELETE FROM pending_issues WHERE issue_id = ?", (row["issue_id"],))
@@ -4307,14 +4309,15 @@ async def telegram_lena_webhook(req: Request):
     comment_text = quote_block + (msg.text or "")
 
     if active_issue_id:
-        # Reset in_review → in_progress so the agent run is triggered on user messages.
+        # Reset in_review/blocked → in_progress so the agent run is triggered on user messages.
         # in_review blocks agent wake-up on new comments; a Telegram reply from the user
         # must always restart the agent to avoid a silent deadlock (HBE-794).
-        if active_issue_status == "in_review":
+        # blocked is treated the same way: Sven's reply signals an unblock (HBE-1314).
+        if active_issue_status in {"in_review", "blocked"}:
             _pc_patch_issue_status(active_issue_id, "in_progress")
             logger.info(
-                "[telegram] reset issue %s from in_review to in_progress on user message",
-                active_issue_id,
+                "[telegram] reset issue %s from %s to in_progress on user reply",
+                active_issue_id, active_issue_status,
             )
         _pc_add_comment_to_issue(active_issue_id, username, comment_text)
     else:
@@ -4473,7 +4476,9 @@ async def telegram_mara_webhook(req: Request):
     username = user.username or user.first_name or "Unbekannt"
     chat_id = str(msg.chat.id)
 
-    # Clean up stale pending_issues
+    # Clean up stale pending_issues.
+    # blocked is NOT stale — Sven's reply on a blocked Mara issue must add a comment and
+    # reset it to in_progress, not create a new issue (mirrors HBE-1314 fix for Lena).
     active_issue_id = None
     active_issue_status = None
     with _telegram_mara_db() as db:
@@ -4482,7 +4487,7 @@ async def telegram_mara_webhook(req: Request):
         ).fetchall()
         for row in rows:
             status, assignee = _pc_get_issue_info(row["issue_id"])
-            is_stale = status is None or status in {"done", "cancelled", "blocked"}
+            is_stale = status is None or status in {"done", "cancelled"}
             is_foreign = bool(_PC_MARA_AGENT_ID) and assignee != _PC_MARA_AGENT_ID
             if is_stale or is_foreign:
                 db.execute("DELETE FROM pending_issues WHERE issue_id = ?", (row["issue_id"],))
@@ -4516,11 +4521,11 @@ async def telegram_mara_webhook(req: Request):
     comment_text = quote_block + (msg.text or "")
 
     if active_issue_id:
-        if active_issue_status == "in_review":
+        if active_issue_status in {"in_review", "blocked"}:
             _pc_patch_issue_status(active_issue_id, "in_progress")
             logger.info(
-                "[telegram/mara] reset issue %s from in_review to in_progress on user message",
-                active_issue_id,
+                "[telegram/mara] reset issue %s from %s to in_progress on user reply",
+                active_issue_id, active_issue_status,
             )
         _pc_add_comment_to_issue(active_issue_id, username, comment_text)
     else:
