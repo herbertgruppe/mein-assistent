@@ -2,14 +2,22 @@ name: PR Review via Paperclip
 on:
   pull_request:
     types: [opened, synchronize, reopened, closed]
+  pull_request_review:
+    types: [submitted]
 
 jobs:
   trigger-code-reviewer:
-    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # For pull_request events: skip closed (handled by auto-close-on-merge)
+    # For pull_request_review events: only trigger when svenherbert submits APPROVED
+    if: >-
+      (github.event_name == 'pull_request' && github.event.action != 'closed') ||
+      (github.event_name == 'pull_request_review' &&
+       github.event.review.state == 'approved' &&
+       github.event.review.user.login == 'svenherbert')
     steps:
-      - name: Create Paperclip review issue
+      - name: Create or update Paperclip review issue
         env:
           PAPERCLIP_API_URL: ${{ vars.PAPERCLIP_API_URL }}
           PAPERCLIP_API_KEY: ${{ secrets.PAPERCLIP_API_KEY }}
@@ -23,8 +31,18 @@ jobs:
           PR_BASE: ${{ github.event.pull_request.base.ref }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_ACTION: ${{ github.event.action }}
+          GH_EVENT_NAME: ${{ github.event_name }}
+          REVIEW_REVIEWER: ${{ github.event.review.user.login }}
+          REVIEW_STATE: ${{ github.event.review.state }}
         run: |
           set -euo pipefail
+
+          # Build trigger description depending on event type
+          if [ "$GH_EVENT_NAME" = "pull_request_review" ]; then
+            TRIGGER_INFO="pull_request_review.submitted (reviewer: $REVIEW_REVIEWER, state: $REVIEW_STATE)"
+          else
+            TRIGGER_INFO="pull_request.$PR_ACTION"
+          fi
 
           # Idempotency key: {repo-name}-pr-{number}
           REPO_NAME=$(echo "$PR_REPO" | cut -d'/' -f2)
@@ -39,18 +57,20 @@ jobs:
 
           EXISTING_ID=""
           if [ "$SEARCH_HTTP" = "200" ]; then
-            EXISTING_ID=$(echo "$SEARCH_BODY" | jq -r --arg fp "$FINGERPRINT" \
-              '(.issues // .) | map(select(.status != "done" and .status != "cancelled" and .originFingerprint == $fp)) | first | .id // empty' \
-              2>/dev/null || echo "")
+            EXISTING_ID=$(echo "$SEARCH_BODY" | jq -r '
+              (.issues // .) |
+              map(select(.status != "done" and .status != "cancelled")) |
+              first | .id // empty
+            ' 2>/dev/null || echo "")
           fi
 
           if [ -n "$EXISTING_ID" ]; then
             # Active review issue exists — post a comment to re-trigger the reviewer
             COMMENT=$(jq -n \
               --arg sha "$PR_HEAD_SHA" \
-              --arg action "$PR_ACTION" \
+              --arg trigger "$TRIGGER_INFO" \
               --arg url "$PR_URL" \
-              '"Neuer Commit auf PR (`pull_request.\($action)`):\n\n- Head-SHA: `\($sha)`\n- PR: \($url)\n\nCode Reviewer Agent: bitte PR-Diff neu klassifizieren."')
+              '"Neues Event auf PR (`\($trigger)`):\n\n- Head-SHA: `\($sha)`\n- PR: \($url)\n\nCode Reviewer Agent: bitte PR-Status neu evaluieren."')
             COMMENT_PAYLOAD=$(jq -n --arg body "$COMMENT" '{body: $body}')
             COMMENT_RESP=$(curl -sS -w "\n%{http_code}" -X POST \
               "$PAPERCLIP_API_URL/api/issues/$EXISTING_ID/comments" \
@@ -65,7 +85,7 @@ jobs:
               echo "::error::Paperclip-Kommentar fehlgeschlagen (HTTP $C_HTTP)"
               exit 1
             fi
-            echo "::notice::Kommentar auf bestehendes Issue $EXISTING_ID gepostet (Fingerprint: $FINGERPRINT, SHA: $PR_HEAD_SHA)"
+            echo "::notice::Kommentar auf bestehendes Issue $EXISTING_ID gepostet (Fingerprint: $FINGERPRINT)"
           else
             # No active review issue — create a new one
             BODY=$(jq -n \
@@ -74,8 +94,8 @@ jobs:
               --arg author "$PR_AUTHOR" \
               --arg base "$PR_BASE" \
               --arg sha "$PR_HEAD_SHA" \
-              --arg action "$PR_ACTION" \
-              '"## PR Review angefordert\n\n- Repo: \($repo)\n- PR: \($url)\n- Author: \($author)\n- Base: \($base)\n- Head-SHA: \($sha)\n- Trigger-Event: pull_request.\($action)\n\nCode Reviewer Agent soll: 1) risk-rules.yml im Repo laden, 2) PR-Diff klassifizieren (LOW/MEDIUM/HIGH), 3) GitHub-Review (APPROVE/REQUEST_CHANGES/COMMENT) submitten, 4) bei LOW nach 10 Min Cool-Off auto-mergen, 5) bei MEDIUM Folge-Issue für Lead Engineer anlegen, 6) bei HIGH Sven via Asana eskalieren."')
+              --arg trigger "$TRIGGER_INFO" \
+              '"## PR Review angefordert\n\n- Repo: \($repo)\n- PR: \($url)\n- Author: \($author)\n- Base: \($base)\n- Head-SHA: \($sha)\n- Trigger-Event: \($trigger)\n\nCode Reviewer Agent soll: 1) risk-rules.yml im Repo laden, 2) PR-Diff klassifizieren (LOW/MEDIUM/HIGH), 3) GitHub-Review (APPROVE/REQUEST_CHANGES/COMMENT) submitten, 4) bei LOW nach 10 Min Cool-Off auto-mergen, 5) bei MEDIUM Folge-Issue für Lead Engineer anlegen, 6) bei HIGH Sven via Asana eskalieren."')
             PAYLOAD=$(jq -n \
               --arg title "PR Review: $PR_TITLE (#$PR_NUMBER)" \
               --arg desc "$BODY" \
@@ -99,8 +119,56 @@ jobs:
             echo "::notice::Paperclip-Issue $ISSUE_ID erzeugt (Fingerprint: $FINGERPRINT) -> Code Reviewer wird via wakeOnDemand getriggert"
           fi
 
+  dismiss-blocking-review:
+    if: github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && github.event.review.user.login == 'svenherbert'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Dismiss blocking bot reviews (Regel F)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          REVIEWS=$(curl -sS \
+            "https://api.github.com/repos/$PR_REPO/pulls/$PR_NUMBER/reviews?per_page=100" \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json")
+
+          BOT_CR_IDS=$(echo "$REVIEWS" | jq -r \
+            '.[] | select(.state == "CHANGES_REQUESTED" and (.user.login | endswith("[bot]"))) | .id')
+
+          if [ -z "$BOT_CR_IDS" ]; then
+            echo "::notice::Keine offenen CHANGES_REQUESTED-Reviews vom Bot — nichts zu tun"
+            exit 0
+          fi
+
+          while IFS= read -r REVIEW_ID; do
+            [ -z "$REVIEW_ID" ] && continue
+            D_RESP=$(curl -sS -w "\n%{http_code}" \
+              -X PUT \
+              "https://api.github.com/repos/$PR_REPO/pulls/$PR_NUMBER/reviews/$REVIEW_ID/dismissals" \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              -d '{"message":"Regel F auto-dismiss: svenherbert APPROVED — CHANGES_REQUESTED zurückgezogen."}')
+            D_HTTP=$(echo "$D_RESP" | tail -1)
+            if [ "$D_HTTP" = "200" ]; then
+              echo "::notice::Review $REVIEW_ID dismissed (Regel F)"
+            else
+              echo "::error::Dismiss fehlgeschlagen (HTTP $D_HTTP)"
+              exit 1
+            fi
+          done <<< "$BOT_CR_IDS"
+
   auto-close-on-merge:
-    if: github.event.action == 'closed' && github.event.pull_request.merged == true
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -119,7 +187,6 @@ jobs:
           REPO_NAME=$(echo "$PR_REPO" | cut -d'/' -f2)
           FINGERPRINT="${REPO_NAME}-pr-${PR_NUMBER}"
 
-          # originFingerprint is not a supported server-side API filter; client-side filtering is intentional
           # Fetch open/blocked Code Reviewer issues and match by originFingerprint client-side
           SEARCH_RESP=$(curl -sS -w "\n%{http_code}" \
             "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/issues?assigneeAgentId=$CODE_REVIEWER_AGENT_ID&status=todo,in_progress,in_review,blocked" \
@@ -132,7 +199,6 @@ jobs:
             exit 0
           fi
 
-          # Filter by originFingerprint (set at issue creation, stable across Code Reviewer renames)
           ISSUE_IDS=$(echo "$SEARCH_BODY" | jq -r \
             --arg fp "$FINGERPRINT" \
             '(.issues // .) | map(select(.originFingerprint == $fp)) | .[].id' \
@@ -143,7 +209,6 @@ jobs:
             exit 0
           fi
 
-          # Close each matching issue
           CLOSED_COUNT=0
           while IFS= read -r ISSUE_ID; do
             [ -z "$ISSUE_ID" ] && continue
