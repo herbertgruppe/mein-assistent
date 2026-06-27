@@ -93,11 +93,12 @@ jobs:
 
           EXISTING_ID=""
           if [ "$SEARCH_HTTP" = "200" ]; then
-            EXISTING_ID=$(echo "$SEARCH_BODY" | jq -r '
-              (.issues // .) |
-              map(select(.status != "done" and .status != "cancelled")) |
-              first | .id // empty
-            ' 2>/dev/null || echo "")
+            EXISTING_ID=$(echo "$SEARCH_BODY" | jq -r \
+              --arg fp "$FINGERPRINT" \
+              '(.issues // .) |
+              map(select(.status != "done" and .status != "cancelled" and .originFingerprint == $fp)) |
+              first | .id // empty' \
+              2>/dev/null || echo "")
           fi
 
           if [ -n "$EXISTING_ID" ]; then
@@ -181,7 +182,7 @@ jobs:
             -H "Accept: application/vnd.github+json")
 
           BOT_CR_IDS=$(echo "$REVIEWS" | jq -r \
-            '.[] | select(.state == "CHANGES_REQUESTED" and (.user.login | endswith("[bot]"))) | .id')
+            '.[] | select(.state == "CHANGES_REQUESTED" and .user.login == "herbert-consult-code-reviewer[bot]") | .id')
 
           if [ -z "$BOT_CR_IDS" ]; then
             echo "::notice::Keine offenen CHANGES_REQUESTED-Reviews vom Bot auf PR #$PR_NUMBER — nichts zu tun"
