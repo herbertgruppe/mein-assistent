@@ -506,7 +506,7 @@ def _pc_add_comment_to_issue(issue_id: str, username: str, text: str) -> bool:
 # ── Triage v2 – Telegram Trigger Detection (HBE-1321) ─────────────────────
 
 _ACTION_RUN_PATTERN = re.compile(
-    r"(?i)\b(?:lena[,\s]+)?(ablegen|weiterleiten|tun|antworten|warten|recherchieren)\b"
+    r"(?i)^\s*lena[,\s]+(ablegen|weiterleiten|tun|antworten|warten|recherchieren)\b"
 )
 
 _ACTION_RUN_CAT_MAP = {
@@ -3231,6 +3231,7 @@ class LenaArchiveByCategoryResponse(BaseModel):
 
 class LenaClearCategoriesRequest(BaseModel):
     category: Optional[str] = None  # None = alle Lena:-Kategorien loeschen
+    dry_run: bool = False  # Wenn True: nur Mails zählen, keine PATCH-Aufrufe
 
 
 class LenaClearCategoriesResponse(BaseModel):
@@ -3783,14 +3784,17 @@ def lena_mail_clear_categories(
                 continue
             new_cats = [c for c in cats if not c.startswith("Lena: ")]
 
-        patch_resp = _rq.patch(
-            f"https://graph.microsoft.com/v1.0/me/messages/{msg_id}",
-            headers=headers,
-            json={"categories": new_cats},
-            timeout=30,
-        )
-        if patch_resp.status_code in (200, 201):
+        if req.dry_run:
             cleared_ids.append(msg_id)
+        else:
+            patch_resp = _rq.patch(
+                f"https://graph.microsoft.com/v1.0/me/messages/{msg_id}",
+                headers=headers,
+                json={"categories": new_cats},
+                timeout=30,
+            )
+            if patch_resp.status_code in (200, 201):
+                cleared_ids.append(msg_id)
 
     return LenaClearCategoriesResponse(
         cleared_count=len(cleared_ids),
