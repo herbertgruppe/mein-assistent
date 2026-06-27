@@ -23,6 +23,7 @@ jobs:
           PAPERCLIP_API_KEY: ${{ secrets.PAPERCLIP_API_KEY }}
           PAPERCLIP_COMPANY_ID: 9df4976b-9ac8-4e8f-a156-c06c7fa40cdc
           CODE_REVIEWER_AGENT_ID: f2cdbdbc-f456-4ac7-bba6-178ef7422748
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_URL: ${{ github.event.pull_request.html_url }}
@@ -48,6 +49,41 @@ jobs:
           REPO_NAME=$(echo "$PR_REPO" | cut -d'/' -f2)
           FINGERPRINT="${REPO_NAME}-pr-${PR_NUMBER}"
 
+          # --- Review-State-Check: aktive Bot-CHANGES_REQUESTED ermitteln ---
+          # HBE-1286: Sven-Eskalation darf erst stattfinden wenn keine Bot-CR aktiv
+          BOT_CR_ACTIVE="false"
+          BOT_CR_DISMISS_BLOCK=""
+
+          REVIEWS_RESP=$(curl -sS -w "\n%{http_code}" \
+            "https://api.github.com/repos/$PR_REPO/pulls/$PR_NUMBER/reviews?per_page=100" \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28")
+          REVIEWS_HTTP=$(echo "$REVIEWS_RESP" | tail -1)
+          REVIEWS_JSON=$(echo "$REVIEWS_RESP" | head -n -1)
+
+          if [ "$REVIEWS_HTTP" = "200" ]; then
+            BOT_CR_COUNT=$(echo "$REVIEWS_JSON" | jq \
+              '[.[] | select(.state == "CHANGES_REQUESTED" and (.user.login | endswith("[bot]")))] | length')
+            if [ "$BOT_CR_COUNT" -gt 0 ]; then
+              BOT_CR_ACTIVE="true"
+              BOT_CR_DISMISS_BLOCK=$(echo "$REVIEWS_JSON" | jq -r \
+                '[.[] | select(.state == "CHANGES_REQUESTED" and (.user.login | endswith("[bot]"))) |
+                  "  - Review-ID \(.id) von \(.user.login) → [Review auf GitHub ansehen](\(.html_url))"] | join("\n")')
+            fi
+          else
+            echo "::warning::GitHub Reviews konnten nicht abgerufen werden (HTTP $REVIEWS_HTTP) — BOT_CR_ACTIVE bleibt false"
+          fi
+
+          # Build escalation guard block for Code Reviewer instructions
+          if [ "$BOT_CR_ACTIVE" = "true" ]; then
+            ESCALATION_STATE="⚠️ BOT_CR_ACTIVE=true — Bot hat noch aktive CHANGES_REQUESTED-Reviews:\n${BOT_CR_DISMISS_BLOCK}"
+            ESCALATION_INSTRUCTION="**Wichtig für HIGH-Risk-Eskalation (HBE-1286):**\n- Falls HIGH-Risk UND keine Paperclip-Entscheidung getroffen: Sven-Eskalations-Issue noch nicht anlegen. Warte bis Bot-Reviews dismisst sind (Regel F auto-dismiss bei Sven-APPROVE) oder eine Paperclip-Entscheidung vorliegt.\n- Falls HIGH-Risk UND Paperclip-Entscheidung bereits getroffen aber Bot-Review noch offen: Sven-Issue anlegen und Dismiss-Hinweis einbauen:\n\n  Vor dem Merge: Bot-Review auf GitHub dismissen\n  PR #${PR_NUMBER}: ${PR_URL}\n  Schritt 1: Im PR auf Dismiss review klicken (Bot-Review zurueckziehen)\n  Schritt 2: Danach Approve + Merge durchfuehren"
+          else
+            ESCALATION_STATE="✅ BOT_CR_ACTIVE=false — Keine aktiven Bot-CHANGES_REQUESTED. Sven-Issue kann direkt angelegt werden."
+            ESCALATION_INSTRUCTION="Bei HIGH-Risk: Sven-Eskalations-Issue normal anlegen (keine offenen Bot-Reviews)."
+          fi
+
           # Check for an existing open review issue for this PR
           SEARCH_RESP=$(curl -sS -w "\n%{http_code}" \
             "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/issues?originFingerprint=${FINGERPRINT}" \
@@ -71,7 +107,10 @@ jobs:
               --arg sha "$PR_HEAD_SHA" \
               --arg trigger "$TRIGGER_INFO" \
               --arg url "$PR_URL" \
-              '"Neues Event auf PR (`\($trigger)`):\n\n- Head-SHA: `\($sha)`\n- PR: \($url)\n\nCode Reviewer Agent: bitte PR-Status neu evaluieren."')
+              --arg cr_active "$BOT_CR_ACTIVE" \
+              --arg cr_state "$ESCALATION_STATE" \
+              --arg cr_instr "$ESCALATION_INSTRUCTION" \
+              '"Neues Event auf PR (`\($trigger)`):\n\n- Head-SHA: `\($sha)`\n- PR: \($url)\n\n## Review-State-Update\n\n\($cr_state)\n\n\($cr_instr)\n\nCode Reviewer Agent: bitte PR-Status neu evaluieren."')
             COMMENT_PAYLOAD=$(jq -n --arg body "$COMMENT" '{body: $body}')
             COMMENT_RESP=$(curl -sS -w "\n%{http_code}" -X POST \
               "$PAPERCLIP_API_URL/api/issues/$EXISTING_ID/comments" \
@@ -86,7 +125,7 @@ jobs:
               echo "::error::Paperclip-Kommentar fehlgeschlagen (HTTP $C_HTTP)"
               exit 1
             fi
-            echo "::notice::Kommentar auf bestehendes Issue $EXISTING_ID gepostet (Fingerprint: $FINGERPRINT)"
+            echo "::notice::Kommentar auf bestehendes Issue $EXISTING_ID gepostet (Fingerprint: $FINGERPRINT, SHA: $PR_HEAD_SHA, BOT_CR_ACTIVE: $BOT_CR_ACTIVE)"
           else
             # No active review issue — create a new one
             BODY=$(jq -n \
@@ -96,7 +135,9 @@ jobs:
               --arg base "$PR_BASE" \
               --arg sha "$PR_HEAD_SHA" \
               --arg trigger "$TRIGGER_INFO" \
-              '"## PR Review angefordert\n\n- Repo: \($repo)\n- PR: \($url)\n- Author: \($author)\n- Base: \($base)\n- Head-SHA: \($sha)\n- Trigger-Event: \($trigger)\n\nCode Reviewer Agent soll: 1) risk-rules.yml im Repo laden, 2) PR-Diff klassifizieren (LOW/MEDIUM/HIGH), 3) GitHub-Review (APPROVE/REQUEST_CHANGES/COMMENT) submitten, 4) bei LOW nach 10 Min Cool-Off auto-mergen, 5) bei MEDIUM Folge-Issue für Lead Engineer anlegen, 6) bei HIGH Sven via Asana eskalieren."')
+              --arg cr_state "$ESCALATION_STATE" \
+              --arg cr_instr "$ESCALATION_INSTRUCTION" \
+              '"## PR Review angefordert\n\n- Repo: \($repo)\n- PR: \($url)\n- Author: \($author)\n- Base: \($base)\n- Head-SHA: \($sha)\n- Trigger-Event: \($trigger)\n\n## Review-State bei Trigger\n\n\($cr_state)\n\n## Aufgaben des Code Reviewer Agents\n\n1) risk-rules.yml im Repo laden\n2) PR-Diff klassifizieren (LOW/MEDIUM/HIGH)\n3) GitHub-Review (APPROVE/REQUEST_CHANGES/COMMENT) submitten\n4) Bei LOW nach 10 Min Cool-Off auto-mergen\n5) Bei MEDIUM Folge-Issue für Lead Engineer anlegen\n6) Bei HIGH: \($cr_instr)"')
             PAYLOAD=$(jq -n \
               --arg title "PR Review: $PR_TITLE (#$PR_NUMBER)" \
               --arg desc "$BODY" \
@@ -117,10 +158,11 @@ jobs:
               exit 1
             fi
             ISSUE_ID=$(echo "$BODY_RESP" | jq -r '.identifier')
-            echo "::notice::Paperclip-Issue $ISSUE_ID erzeugt (Fingerprint: $FINGERPRINT) -> Code Reviewer wird via wakeOnDemand getriggert"
+            echo "::notice::Paperclip-Issue $ISSUE_ID erzeugt (Fingerprint: $FINGERPRINT, BOT_CR_ACTIVE: $BOT_CR_ACTIVE)"
           fi
 
   dismiss-blocking-review:
+    # Regel F: Bot dismisst eigene CHANGES_REQUESTED wenn svenherbert APPROVED
     if: github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && github.event.review.user.login == 'svenherbert'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -143,10 +185,12 @@ jobs:
             '.[] | select(.state == "CHANGES_REQUESTED" and .user.login == "herbert-consult-code-reviewer[bot]") | .id')
 
           if [ -z "$BOT_CR_IDS" ]; then
-            echo "::notice::Keine offenen CHANGES_REQUESTED-Reviews vom Bot — nichts zu tun"
+            echo "::notice::Keine offenen CHANGES_REQUESTED-Reviews vom Bot auf PR #$PR_NUMBER — nichts zu tun"
             exit 0
           fi
 
+          # Dismiss each blocking review
+          DISMISSED=0
           while IFS= read -r REVIEW_ID; do
             [ -z "$REVIEW_ID" ] && continue
             D_RESP=$(curl -sS -w "\n%{http_code}" \
@@ -154,16 +198,20 @@ jobs:
               "https://api.github.com/repos/$PR_REPO/pulls/$PR_NUMBER/reviews/$REVIEW_ID/dismissals" \
               -H "Authorization: token $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
               -H "Content-Type: application/json" \
-              -d '{"message":"Regel F auto-dismiss: svenherbert APPROVED — CHANGES_REQUESTED zurückgezogen."}')
+              -d '{"message":"Regel F auto-dismiss: svenherbert APPROVED — CHANGES_REQUESTED zurückgezogen (HBE-1216)."}')
             D_HTTP=$(echo "$D_RESP" | tail -1)
             if [ "$D_HTTP" = "200" ]; then
+              DISMISSED=$((DISMISSED + 1))
               echo "::notice::Review $REVIEW_ID dismissed (Regel F)"
             else
-              echo "::error::Dismiss fehlgeschlagen (HTTP $D_HTTP)"
+              echo "::error::Dismiss fehlgeschlagen (HTTP $D_HTTP): $(echo "$D_RESP" | head -n -1)"
               exit 1
             fi
           done <<< "$BOT_CR_IDS"
+
+          echo "::notice::Regel F: $DISMISSED CHANGES_REQUESTED-Review(s) dismissed nach Sven-APPROVE auf PR #$PR_NUMBER"
 
   auto-close-on-merge:
     if: >-
