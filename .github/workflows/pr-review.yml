@@ -120,95 +120,49 @@ jobs:
           fi
 
   dismiss-blocking-review:
+    if: github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && github.event.review.user.login == 'svenherbert'
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Regel F: Bot dismisst eigene CHANGES_REQUESTED wenn svenherbert APPROVED
-    # Wired to pull_request_review trigger (HBE-1216)
-    if: >-
-      github.event_name == 'pull_request_review' &&
-      github.event.review.state == 'approved' &&
-      github.event.review.user.login == 'svenherbert'
+    permissions:
+      pull-requests: write
     steps:
-      - name: Dismiss bot CHANGES_REQUESTED on Sven APPROVE (Regel F)
+      - name: Dismiss blocking bot reviews (Regel F)
         env:
-          APP_ID: "3970011"
-          INSTALLATION_ID: "138173513"
-          GITHUB_REVIEWER_APP_KEY: ${{ secrets.GITHUB_REVIEWER_APP_KEY }}
+          GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-
-          # Generate GitHub App JWT (RS256 via openssl — no pip deps)
-          b64url() { openssl enc -base64 -A | tr '+/' '-_' | tr -d '='; }
-
-          NOW=$(date +%s)
-          IAT=$((NOW - 60))
-          EXP=$((NOW + 540))
-
-          HEADER=$(printf '{"typ":"JWT","alg":"RS256"}' | b64url)
-          PAYLOAD=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$IAT" "$EXP" "$APP_ID" | b64url)
-          SIGNING_INPUT="${HEADER}.${PAYLOAD}"
-
-          TMP_KEY=$(mktemp)
-          trap "rm -f $TMP_KEY" EXIT
-          printf '%s' "$GITHUB_REVIEWER_APP_KEY" > "$TMP_KEY"
-          chmod 600 "$TMP_KEY"
-
-          SIG=$(printf '%s' "$SIGNING_INPUT" | openssl dgst -sha256 -sign "$TMP_KEY" -binary | b64url)
-          APP_JWT="${SIGNING_INPUT}.${SIG}"
-
-          # Exchange JWT for installation token
-          INSTALL_TOKEN=$(curl -sS \
-            -X POST "https://api.github.com/app/installations/$INSTALLATION_ID/access_tokens" \
-            -H "Authorization: Bearer $APP_JWT" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            | jq -r '.token')
-
-          if [ -z "$INSTALL_TOKEN" ] || [ "$INSTALL_TOKEN" = "null" ]; then
-            echo "::error::Konnte keinen Installation-Token holen — GITHUB_REVIEWER_APP_KEY prüfen"
-            exit 1
-          fi
-
-          # List all reviews on the PR
           REVIEWS=$(curl -sS \
             "https://api.github.com/repos/$PR_REPO/pulls/$PR_NUMBER/reviews?per_page=100" \
-            -H "Authorization: token $INSTALL_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28")
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json")
 
           BOT_CR_IDS=$(echo "$REVIEWS" | jq -r \
             '.[] | select(.state == "CHANGES_REQUESTED" and (.user.login | endswith("[bot]"))) | .id')
 
           if [ -z "$BOT_CR_IDS" ]; then
-            echo "::notice::Keine offenen CHANGES_REQUESTED-Reviews vom Bot auf PR #$PR_NUMBER — nichts zu tun"
+            echo "::notice::Keine offenen CHANGES_REQUESTED-Reviews vom Bot — nichts zu tun"
             exit 0
           fi
 
-          # Dismiss each blocking review
-          DISMISSED=0
           while IFS= read -r REVIEW_ID; do
             [ -z "$REVIEW_ID" ] && continue
             D_RESP=$(curl -sS -w "\n%{http_code}" \
               -X PUT \
               "https://api.github.com/repos/$PR_REPO/pulls/$PR_NUMBER/reviews/$REVIEW_ID/dismissals" \
-              -H "Authorization: token $INSTALL_TOKEN" \
+              -H "Authorization: token $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
               -H "Content-Type: application/json" \
-              -d "{\"message\":\"Regel F auto-dismiss: svenherbert APPROVED — CHANGES_REQUESTED zurückgezogen (HBE-1216).\"}")
+              -d '{"message":"Regel F auto-dismiss: svenherbert APPROVED — CHANGES_REQUESTED zurückgezogen."}')
             D_HTTP=$(echo "$D_RESP" | tail -1)
             if [ "$D_HTTP" = "200" ]; then
-              DISMISSED=$((DISMISSED + 1))
               echo "::notice::Review $REVIEW_ID dismissed (Regel F)"
             else
-              echo "::error::Dismiss fehlgeschlagen (HTTP $D_HTTP): $(echo "$D_RESP" | head -n -1)"
+              echo "::error::Dismiss fehlgeschlagen (HTTP $D_HTTP)"
               exit 1
             fi
           done <<< "$BOT_CR_IDS"
-
-          echo "::notice::Regel F: $DISMISSED CHANGES_REQUESTED-Review(s) dismissed nach Sven-APPROVE auf PR #$PR_NUMBER"
 
   auto-close-on-merge:
     if: >-
