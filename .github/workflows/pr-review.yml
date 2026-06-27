@@ -78,13 +78,7 @@ jobs:
           # Build escalation guard block for Code Reviewer instructions
           if [ "$BOT_CR_ACTIVE" = "true" ]; then
             ESCALATION_STATE="⚠️ BOT_CR_ACTIVE=true — Bot hat noch aktive CHANGES_REQUESTED-Reviews:\n${BOT_CR_DISMISS_BLOCK}"
-            ESCALATION_INSTRUCTION="**Wichtig für HIGH-Risk-Eskalation (HBE-1286):**\n\
-- Falls HIGH-Risk klassifiziert UND noch **keine Paperclip-Entscheidung** (Option A/B) getroffen: Sven-Eskalations-Issue **noch nicht** anlegen. Warte bis Bot-Reviews dismisst sind (Regel F auto-dismiss bei Sven-APPROVE) oder eine Paperclip-Entscheidung vorliegt.\n\
-- Falls HIGH-Risk UND **Paperclip-Entscheidung bereits getroffen** aber Bot-Review noch offen: Sven-Issue anlegen und **folgenden Dismiss-Hinweis** einbauen:\n\n\
-  ⚠️ Vor dem Merge: Bot-Review auf GitHub dismissen\n\
-  → PR #${PR_NUMBER}: ${PR_URL}\n\
-  Schritt 1: Im PR auf 'Dismiss review' klicken (Bot-Review zurückziehen)\n\
-  Schritt 2: Danach Approve + Merge durchführen"
+            ESCALATION_INSTRUCTION="**Wichtig für HIGH-Risk-Eskalation (HBE-1286):**\n- Falls HIGH-Risk UND keine Paperclip-Entscheidung getroffen: Sven-Eskalations-Issue noch nicht anlegen. Warte bis Bot-Reviews dismisst sind (Regel F auto-dismiss bei Sven-APPROVE) oder eine Paperclip-Entscheidung vorliegt.\n- Falls HIGH-Risk UND Paperclip-Entscheidung bereits getroffen aber Bot-Review noch offen: Sven-Issue anlegen und Dismiss-Hinweis einbauen:\n\n  Vor dem Merge: Bot-Review auf GitHub dismissen\n  PR #${PR_NUMBER}: ${PR_URL}\n  Schritt 1: Im PR auf Dismiss review klicken (Bot-Review zurueckziehen)\n  Schritt 2: Danach Approve + Merge durchfuehren"
           else
             ESCALATION_STATE="✅ BOT_CR_ACTIVE=false — Keine aktiven Bot-CHANGES_REQUESTED. Sven-Issue kann direkt angelegt werden."
             ESCALATION_INSTRUCTION="Bei HIGH-Risk: Sven-Eskalations-Issue normal anlegen (keine offenen Bot-Reviews)."
