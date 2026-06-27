@@ -32,6 +32,7 @@ rules:
       - "migrations/**"
       - "database/**"
       # CI/CD, CODEOWNERS und Meta-Schutz (CODEOWNERS-Sync — HBE-989)
+      # pull_request_review trigger required for Regel F auto-dismiss (HBE-1216)
       - ".github/workflows/**"
       - ".github/CODEOWNERS"
       - ".github/risk-rules.yml"
