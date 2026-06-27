@@ -503,6 +503,122 @@ def _pc_add_comment_to_issue(issue_id: str, username: str, text: str) -> bool:
     return False
 
 
+# ── Triage v2 – Telegram Trigger Detection (HBE-1321) ─────────────────────
+
+_ACTION_RUN_PATTERN = re.compile(
+    r"(?i)\b(?:lena[,\s]+)?(ablegen|weiterleiten|tun|antworten|warten|recherchieren)\b"
+)
+
+_ACTION_RUN_CAT_MAP = {
+    "ablegen":       "Lena: Ablegen",
+    "weiterleiten":  "Lena: Weiterleiten",
+    "tun":           "Lena: Tun",
+    "antworten":     "Lena: Antworten",
+    "warten":        "Lena: Warten",
+    "recherchieren": "Lena: Recherchieren",
+}
+
+
+def _detect_action_run_category(text: str) -> Optional[str]:
+    """
+    Erkennt Triage-v2-Trigger ('Lena, Ablegen', 'weiterleiten starten', etc.).
+    Gibt den Kategorie-Key (z.B. 'ablegen') zurück oder None.
+    """
+    m = _ACTION_RUN_PATTERN.search(text)
+    return m.group(1).lower() if m else None
+
+
+def _pc_create_action_run_issue(
+    chat_id: str, message_id: int, username: str, category: str
+) -> Optional[str]:
+    """
+    Erstellt ein Paperclip-Action-Run-Issue fuer 'Lena, [Kategorie]'-Trigger (HBE-1321).
+    Laed die Mail-Liste per Graph API und fuegt sie als Tabelle in die Beschreibung ein.
+    Gibt die Issue-ID oder None zurueck.
+    """
+    if not (_PC_API_URL and _PC_API_KEY):
+        return None
+
+    lena_cat = _ACTION_RUN_CAT_MAP.get(category.lower(), f"Lena: {category.capitalize()}")
+    cat_display = category.capitalize()
+
+    mail_table = ""
+    mail_count = 0
+    try:
+        tool = _get_outlook_tool()
+        if tool.is_authenticated():
+            import requests as _rq
+            escaped = lena_cat.replace("'", "''")
+            resp = _rq.get(
+                "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
+                f"?$filter=categories/any(c:c eq '{escaped}')"
+                "&$select=id,subject,from,receivedDateTime"
+                "&$top=50&$orderby=receivedDateTime asc",
+                headers={"Authorization": f"Bearer {tool.access_token}"},
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                mails = resp.json().get("value", [])
+                mail_count = len(mails)
+                if mails:
+                    rows = []
+                    for i, m in enumerate(mails[:20], 1):
+                        sender = (m.get("from") or {}).get("emailAddress", {}) or {}
+                        rows.append(
+                            f"| {i} | {(m.get('subject') or '')[:60]} "
+                            f"| {sender.get('address', '')} "
+                            f"| {(m.get('receivedDateTime') or '')[:10]} |"
+                        )
+                    mail_table = (
+                        f"\n\n## Mails ({mail_count})\n\n"
+                        "| # | Betreff | Absender | Datum |\n"
+                        "|---|---|---|---|\n"
+                        + "\n".join(rows)
+                    )
+                    if mail_count > 20:
+                        mail_table += f"\n_(+{mail_count - 20} weitere)_"
+    except Exception:
+        pass
+
+    count_label = f" ({mail_count} Mails)" if mail_count else ""
+    title = f"Action-Run: {cat_display}{count_label}"
+    description = (
+        f"Sven-Trigger per Telegram (@{username}): **{cat_display}**\n\n"
+        f"Kategorie: `{lena_cat}`\n"
+        "Lena arbeitet die Mails dieser Kategorie sequenziell ab."
+        f"{mail_table}\n\n---\n"
+        f"TELEGRAM_CHAT_ID: {chat_id}\n"
+        f"TELEGRAM_MESSAGE_ID: {message_id}\n"
+    )
+    try:
+        resp = _http.post(
+            f"{_PC_API_URL}/api/companies/{_PC_COMPANY_ID}/issues",
+            json={
+                "title": title,
+                "description": description,
+                "assigneeAgentId": _PC_LENA_AGENT_ID,
+                "priority": "high",
+            },
+            headers={"Authorization": f"Bearer {_PC_API_KEY}"},
+            timeout=15,
+        )
+    except Exception as exc:
+        logger.warning("[telegram/action-run] Paperclip request error: %s", type(exc).__name__)
+        return None
+    if resp.status_code in (200, 201):
+        issue_id = resp.json().get("id")
+        logger.info(
+            "[telegram/action-run] created issue %s for category=%s mail_count=%d",
+            issue_id, category, mail_count,
+        )
+        return issue_id
+    logger.warning(
+        "[telegram/action-run] issue creation failed: %s %s",
+        resp.status_code, resp.text[:300],
+    )
+    return None
+
+
 def _pc_create_issue(chat_id: str, message_id: int, username: str, text: str) -> Optional[str]:
     """Create a high-priority Paperclip issue assigned to Lena. Returns issue ID or None."""
     if not (_PC_API_URL and _PC_API_KEY):
@@ -4567,12 +4683,22 @@ async def telegram_lena_webhook(req: Request):
             )
         _pc_add_comment_to_issue(active_issue_id, username, comment_text)
     else:
-        issue_id = _pc_create_issue(
-            chat_id=chat_id,
-            message_id=msg.message_id,
-            username=username,
-            text=msg.text,
-        )
+        # Detect Triage-v2 action-run trigger ("Lena, Ablegen" etc.) — HBE-1321.
+        action_cat = _detect_action_run_category(msg.text or "")
+        if action_cat:
+            issue_id = _pc_create_action_run_issue(
+                chat_id=chat_id,
+                message_id=msg.message_id,
+                username=username,
+                category=action_cat,
+            )
+        else:
+            issue_id = _pc_create_issue(
+                chat_id=chat_id,
+                message_id=msg.message_id,
+                username=username,
+                text=msg.text,
+            )
         if issue_id:
             # Variant-1 guard: only track issues that are actually assigned to Lena.
             # Prevents foreign issue IDs from entering pending_issues if the API ever
