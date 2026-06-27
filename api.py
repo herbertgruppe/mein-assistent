@@ -3113,6 +3113,39 @@ class LenaArchiveByCategoryResponse(BaseModel):
     message_ids: List[str]
 
 
+class LenaClearCategoriesRequest(BaseModel):
+    category: Optional[str] = None  # None = alle Lena:-Kategorien loeschen
+
+
+class LenaClearCategoriesResponse(BaseModel):
+    cleared_count: int
+    message_ids: List[str]
+
+
+class LenaByCategoryMail(BaseModel):
+    message_id: str
+    subject: str
+    sender_email: str
+    sender_name: str
+    received_at: str
+    body_preview: str
+
+
+class LenaByCategoryResponse(BaseModel):
+    mails: List[LenaByCategoryMail]
+    category: str
+
+
+class LenaActionRunRequest(BaseModel):
+    category: str  # "weiterleiten", "tun", "ablegen", etc.
+
+
+class LenaActionRunResponse(BaseModel):
+    mails: List[LenaByCategoryMail]
+    category: str
+    mail_count: int
+
+
 # ── Mail-Triage (HBE-Mail-Categorize) ─────────────────────────────────────
 LENA_ACTION_CATEGORIES = {
     "antworten":      "Lena: Antworten",
@@ -3502,6 +3535,219 @@ def lena_mail_archive_by_category(
     return LenaArchiveByCategoryResponse(
         archived_count=len(archived_ids),
         message_ids=archived_ids,
+    )
+
+
+# ── Triage v2 – On-Demand Action Runner (HBE-1320) ────────────────────────
+
+def _fetch_inbox_mails_by_lena_category(
+    headers: dict, lena_category_full: str, top: int = 250
+) -> List[dict]:
+    """
+    Hilfsfunktion: Holt Inbox-Mails mit exakt der angegebenen Lena-Vollkategorie
+    (z.B. 'Lena: Weiterleiten') per Graph API und gibt die value-Liste zurück.
+    Folgt @odata.nextLink bis alle Mails geladen sind (max. 500).
+    """
+    import requests as _rq
+
+    escaped = lena_category_full.replace("'", "''")
+    url = (
+        "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
+        f"?$filter=categories/any(c:c eq '{escaped}')"
+        f"&$select=id,subject,from,receivedDateTime,bodyPreview,categories"
+        f"&$top={min(top, 250)}"
+        "&$orderby=receivedDateTime asc"
+    )
+    mails: List[dict] = []
+    while url:
+        resp = _rq.get(url, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Graph API Fehler beim Abrufen der Kategorie-Mails: HTTP {resp.status_code} — {resp.text[:300]}",
+            )
+        data = resp.json()
+        mails.extend(data.get("value", []))
+        if len(mails) >= 500:
+            break
+        url = data.get("@odata.nextLink")
+    return mails
+
+
+def _graph_mails_to_lena_by_category(raw_mails: List[dict]) -> List[LenaByCategoryMail]:
+    result = []
+    for m in raw_mails:
+        sender = (m.get("from") or {}).get("emailAddress", {}) or {}
+        result.append(LenaByCategoryMail(
+            message_id=m.get("id", ""),
+            subject=(m.get("subject") or ""),
+            sender_email=(sender.get("address") or "").lower(),
+            sender_name=(sender.get("name") or ""),
+            received_at=(m.get("receivedDateTime") or ""),
+            body_preview=(m.get("bodyPreview") or ""),
+        ))
+    return result
+
+
+@app.post("/api/lena/mail/clear-categories", response_model=LenaClearCategoriesResponse)
+def lena_mail_clear_categories(
+    req: LenaClearCategoriesRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Loescht Lena-Kategorien (Lena:*) aus allen Inbox-Mails (HBE-1320).
+
+    Wenn `category` angegeben ist, werden nur Mails mit dieser spezifischen
+    Lena-Kategorie bereinigt. Ohne `category`: alle Mails mit irgendeiner
+    Lena:*-Kategorie.
+
+    Implementierung:
+    - Alle Inbox-Mails abrufen ($select=id,categories)
+    - Client-seitig filtern: Mails mit passenden Lena:-Kategorien
+    - Fuer jede Mail: PATCH mit categories = kept (ohne die Lena:-Kategorie)
+    """
+    import requests as _rq
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Content-Type": "application/json",
+    }
+
+    # Bestimme welche Lena:-Kategorie(n) entfernt werden sollen
+    target_cat: Optional[str] = None
+    if req.category:
+        cat_key = req.category.strip().lower()
+        if cat_key in LENA_ACTION_CATEGORIES:
+            target_cat = LENA_ACTION_CATEGORIES[cat_key]
+        elif req.category.startswith("Lena: "):
+            target_cat = req.category.strip()
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unbekannte Kategorie '{req.category}'. Gueltig: {', '.join(LENA_ACTION_CATEGORIES.keys())}",
+            )
+
+    # Alle Inbox-Mails mit Kategorien abrufen (paginiert)
+    url = (
+        "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
+        "?$select=id,categories&$top=250"
+    )
+    all_mails: List[dict] = []
+    while url:
+        resp = _rq.get(url, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Graph API Fehler beim Abrufen: HTTP {resp.status_code} — {resp.text[:300]}",
+            )
+        data = resp.json()
+        all_mails.extend(data.get("value", []))
+        if len(all_mails) >= 500:
+            break
+        url = data.get("@odata.nextLink")
+
+    cleared_ids: List[str] = []
+    for msg in all_mails:
+        msg_id = msg.get("id", "")
+        if not msg_id:
+            continue
+        cats = msg.get("categories") or []
+        if target_cat:
+            has_target = target_cat in cats
+            if not has_target:
+                continue
+            new_cats = [c for c in cats if c != target_cat]
+        else:
+            has_lena = any(c.startswith("Lena: ") for c in cats)
+            if not has_lena:
+                continue
+            new_cats = [c for c in cats if not c.startswith("Lena: ")]
+
+        patch_resp = _rq.patch(
+            f"https://graph.microsoft.com/v1.0/me/messages/{msg_id}",
+            headers=headers,
+            json={"categories": new_cats},
+            timeout=30,
+        )
+        if patch_resp.status_code in (200, 201):
+            cleared_ids.append(msg_id)
+
+    return LenaClearCategoriesResponse(
+        cleared_count=len(cleared_ids),
+        message_ids=cleared_ids,
+    )
+
+
+@app.get("/api/lena/mail/by-category/{category}", response_model=LenaByCategoryResponse)
+def lena_mail_by_category(
+    category: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Gibt alle Inbox-Mails mit der angegebenen Lena-Kategorie zurueck (HBE-1320).
+
+    Pfad-Parameter `category`: Kurzname der Kategorie (z.B. 'Weiterleiten', 'Tun',
+    'Ablegen', 'Antworten', 'Warten', 'Recherchieren') — Gross-/Kleinschreibung egal.
+
+    Antwort: Liste der Mails mit id, subject, from, receivedDateTime, body_preview.
+    """
+    cat_key = category.strip().lower()
+    if cat_key not in LENA_ACTION_CATEGORIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unbekannte Kategorie '{category}'. Gueltig: {', '.join(LENA_ACTION_CATEGORIES.keys())}",
+        )
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {"Authorization": f"Bearer {tool.access_token}"}
+    lena_cat = LENA_ACTION_CATEGORIES[cat_key]
+    raw_mails = _fetch_inbox_mails_by_lena_category(headers, lena_cat)
+    mails = _graph_mails_to_lena_by_category(raw_mails)
+
+    return LenaByCategoryResponse(mails=mails, category=lena_cat)
+
+
+@app.post("/api/lena/mail/action-run", response_model=LenaActionRunResponse)
+def lena_mail_action_run(
+    req: LenaActionRunRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Einstiegspunkt fuer On-Demand-Action-Run einer Kategorie (HBE-1320).
+
+    Lena ruft diesen Endpoint auf wenn Sven per Telegram eine Kategorie triggert
+    ('Lena, Ablegen', 'Lena, Weiterleiten', etc.). Der Endpoint liefert alle
+    Inbox-Mails mit der Kategorie — Lena verarbeitet sie danach sequenziell.
+
+    Gueltige Kategorie-Keys: antworten, tun, warten, recherchieren, weiterleiten, ablegen.
+    """
+    cat_key = req.category.strip().lower()
+    if cat_key not in LENA_ACTION_CATEGORIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unbekannte Kategorie '{req.category}'. Gueltig: {', '.join(LENA_ACTION_CATEGORIES.keys())}",
+        )
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {"Authorization": f"Bearer {tool.access_token}"}
+    lena_cat = LENA_ACTION_CATEGORIES[cat_key]
+    raw_mails = _fetch_inbox_mails_by_lena_category(headers, lena_cat)
+    mails = _graph_mails_to_lena_by_category(raw_mails)
+
+    return LenaActionRunResponse(
+        mails=mails,
+        category=lena_cat,
+        mail_count=len(mails),
     )
 
 
