@@ -15,7 +15,8 @@ jobs:
       (github.event_name == 'pull_request' && github.event.action != 'closed') ||
       (github.event_name == 'pull_request_review' &&
        github.event.review.state == 'approved' &&
-       github.event.review.user.login == 'svenherbert')
+       (github.event.review.user.login == 'svenherbert' ||
+    github.event.review.user.login == 'herbert-consult-ceo[bot]'))
     steps:
       - name: Create or update Paperclip review issue
         env:
@@ -162,8 +163,12 @@ jobs:
           fi
 
   dismiss-blocking-review:
-    # Regel F: Bot dismisst eigene CHANGES_REQUESTED wenn svenherbert APPROVED
-    if: github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && github.event.review.user.login == 'svenherbert'
+    # Regel F: Bot dismisst eigene CHANGES_REQUESTED wenn svenherbert oder Felix (CEO) APPROVED
+    if: >-
+      github.event_name == 'pull_request_review' &&
+      github.event.review.state == 'approved' &&
+      (github.event.review.user.login == 'svenherbert' ||
+       github.event.review.user.login == 'herbert-consult-ceo[bot]')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -200,7 +205,7 @@ jobs:
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
               -H "Content-Type: application/json" \
-              -d '{"message":"Regel F auto-dismiss: svenherbert APPROVED — CHANGES_REQUESTED zurückgezogen (HBE-1216)."}')
+              -d '{"message":"Regel F auto-dismiss: Sven oder Felix (CEO) APPROVED — CHANGES_REQUESTED zurückgezogen (HBE-999)."}')
             D_HTTP=$(echo "$D_RESP" | tail -1)
             if [ "$D_HTTP" = "200" ]; then
               DISMISSED=$((DISMISSED + 1))
