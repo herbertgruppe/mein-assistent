@@ -5071,14 +5071,17 @@ async def telegram_agent_webhook(slug: str, req: Request):
         elif slug == "mara":
             sender_id = str(cq.from_.id) if cq.from_ else ""
             if cfg.admin_chat_id and sender_id != cfg.admin_chat_id:
-                _tg_agent_ack_callback(cfg.token, cq.id)
+                _tg_mara_answer_callback_query(cq.id)
                 logger.warning(
                     "[telegram/mara] callback_query from unexpected sender %s — ignored", sender_id
                 )
                 return {"ok": True}
-            _tg_agent_ack_callback(cfg.token, cq.id)
-            # Generic inline button handler for Mara (HBE-1452)
-            _handle_inline_button_reply(cfg, cq)
+            _tg_mara_answer_callback_query(cq.id)
+            data = cq.data or ""
+            chat_id_cb = str(cq.message.chat.id) if cq.message else cfg.admin_chat_id
+            # Post TELEGRAM_CALLBACK comment if callback_data contains issue_id; fall back to generic
+            if not _handle_inline_button_reply(cfg, cq):
+                _handle_mara_callback(data, chat_id_cb)
         else:
             # New agents: ack + try generic inline button handler
             _tg_agent_ack_callback(cfg.token, cq.id)
@@ -5207,12 +5210,54 @@ async def telegram_agent_webhook(slug: str, req: Request):
     return {"ok": True}
 
 
-# Backward-compat function alias (tests call telegram_lena_webhook / telegram_mara_webhook directly)
+# Backward-compat function aliases (tests call telegram_lena_webhook / telegram_mara_webhook directly)
 async def telegram_lena_webhook(req: Request):
     return await telegram_agent_webhook("lena", req)
 
 
+@app.post("/api/telegram/mara/webhook")
 async def telegram_mara_webhook(req: Request):
+    """
+    Telegram-Webhook für @mara_hberatung_bot (HBE-1205).
+
+    Auth: X-Telegram-Bot-Api-Secret-Token Header.
+    Erstellt ein Paperclip-Issue (Assignee: Mara) pro Text-Nachricht von Sven.
+    Reply-Threading via outbound_messages in telegram_mara.db.
+    """
+    incoming_secret = req.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not _TG_MARA_WEBHOOK_SECRET:
+        logger.warning("[telegram/mara] webhook received but TELEGRAM_MARA_WEBHOOK_SECRET not set — rejecting.")
+        return {"ok": True}
+    if not hmac.compare_digest(incoming_secret, _TG_MARA_WEBHOOK_SECRET):
+        _client = getattr(req, "client", None)
+        logger.warning(
+            "[telegram/mara] webhook auth failure: secret mismatch (client=%s)",
+            _client.host if _client else "unknown",
+        )
+        return {"ok": True}
+
+    try:
+        body = await req.json()
+        update = TelegramUpdate(**body)
+    except Exception:
+        return {"ok": True}
+
+    if update.callback_query:
+        cq = update.callback_query
+        # Security: only accept callbacks from the configured admin chat (Sven)
+        sender_id = str(cq.from_.id) if cq.from_ else ""
+        if _TG_MARA_ADMIN_CHAT_ID and sender_id != _TG_MARA_ADMIN_CHAT_ID:
+            _tg_mara_answer_callback_query(cq.id)
+            logger.warning(
+                "[telegram/mara] callback_query from unexpected sender %s — ignored", sender_id
+            )
+            return {"ok": True}
+        _tg_mara_answer_callback_query(cq.id)
+        data = cq.data or ""
+        chat_id = str(cq.message.chat.id) if cq.message else _TG_MARA_ADMIN_CHAT_ID
+        _handle_mara_callback(data, chat_id)
+        return {"ok": True}
+
     return await telegram_agent_webhook("mara", req)
 
 
@@ -5312,6 +5357,25 @@ def _handle_inline_button_reply(cfg: "_TgAgentCfg", cq: "_TgCallbackQuery") -> b
         cfg.slug, issue_id, callback_data, ok,
     )
     return ok
+
+
+def _handle_mara_callback(data: str, chat_id: str) -> None:
+    """Post a Mara callback_query result as a system comment on the referenced Paperclip issue.
+
+    Expected data format: "{action}:{issue_id}:{value}" or "{action}:{issue_id}"
+    e.g. "speaker:HBE-1258:dragan" or "approve:HBE-1300"
+    The Mara agent reads the TELEGRAM_CALLBACK comment and acts on it.
+    """
+    parts = data.split(":", 2)
+    if len(parts) < 2 or not parts[1]:
+        logger.warning("[telegram/mara] malformed callback data, skipping: %r", data)
+        return
+    action = parts[0]
+    issue_id = parts[1]
+    value = parts[2] if len(parts) > 2 else ""
+    comment = f"TELEGRAM_CALLBACK: {action}={value}" if value else f"TELEGRAM_CALLBACK: {action}"
+    _pc_post_system_comment(issue_id, comment)
+    logger.info("[telegram/mara] callback action=%s issue=%s value=%r → comment posted", action, issue_id, value)
 
 
 @app.post("/api/telegram/{slug}/send", response_model=LenaTelegramSendResponse)
