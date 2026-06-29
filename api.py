@@ -378,6 +378,20 @@ def _tg_answer_callback_query(callback_query_id: str, text: str = "") -> None:
         pass
 
 
+def _tg_mara_answer_callback_query(callback_query_id: str, text: str = "") -> None:
+    """Acknowledge a Telegram callback_query via Mara's bot to dismiss the loading spinner."""
+    if not _TG_MARA_BOT_TOKEN:
+        return
+    try:
+        _http.post(
+            f"https://api.telegram.org/bot{_TG_MARA_BOT_TOKEN}/answerCallbackQuery",
+            json={"callback_query_id": callback_query_id, "text": text},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
 def _tg_mara_send_message(
     chat_id: str,
     text: str,
@@ -1185,6 +1199,7 @@ class LenaTelegramSendRequest(BaseModel):
     parse_mode: str = Field("MarkdownV2", description="Telegram parse_mode (MarkdownV2 empfohlen)")
     issue_id: Optional[str] = Field(None, description="Paperclip Issue-ID für outbound_messages Tracking")
     comment_id: Optional[str] = Field(None, description="Paperclip Comment-ID für outbound_messages Tracking")
+    reply_markup: Optional[dict] = Field(None, description="Telegram InlineKeyboardMarkup (z.B. {inline_keyboard: [[{text, callback_data}]]})")
 
 
 class LenaTelegramSendResponse(BaseModel):
@@ -4389,6 +4404,25 @@ def _handle_speaker_callback(data: str, chat_id: str) -> None:
         logger.warning("[telegram] unknown speaker callback action: %s", action)
 
 
+def _handle_mara_callback(data: str, chat_id: str) -> None:
+    """Post a Mara callback_query result as a system comment on the referenced Paperclip issue.
+
+    Expected data format: "{action}:{issue_id}:{value}" or "{action}:{issue_id}"
+    e.g. "speaker:HBE-1258:dragan" or "approve:HBE-1300"
+    The Mara agent reads the TELEGRAM_CALLBACK comment and acts on it.
+    """
+    parts = data.split(":", 2)
+    if len(parts) < 2 or not parts[1]:
+        logger.warning("[telegram/mara] malformed callback data, skipping: %r", data)
+        return
+    action = parts[0]
+    issue_id = parts[1]
+    value = parts[2] if len(parts) > 2 else ""
+    comment = f"TELEGRAM_CALLBACK: {action}={value}" if value else f"TELEGRAM_CALLBACK: {action}"
+    _pc_post_system_comment(issue_id, comment)
+    logger.info("[telegram/mara] callback action=%s issue=%s value=%r → comment posted", action, issue_id, value)
+
+
 @app.post("/api/telegram/lena/send", response_model=SimpleResult)
 def telegram_lena_send(
     req: TelegramSendRequest,
@@ -4425,7 +4459,9 @@ def lena_telegram_send(
             detail="Rate-Limit überschritten: max. 10 Telegram-Sends pro Minute (Lena).",
             headers={"Retry-After": "60"},
         )
-    sent_msg_id = _tg_send_message(req.chat_id, req.text, parse_mode=req.parse_mode)
+    sent_msg_id = _tg_send_message(
+        req.chat_id, req.text, reply_markup=req.reply_markup, parse_mode=req.parse_mode
+    )
     # Always track in outbound_messages (HBE-1212: auch ohne issue_id für retroaktive Flood-Analyse)
     if sent_msg_id:
         with _telegram_db() as db:
@@ -4465,7 +4501,19 @@ async def telegram_mara_webhook(req: Request):
         return {"ok": True}
 
     if update.callback_query:
-        # Mara-Bot hat keine Inline-Keyboards vorerst — ignorieren
+        cq = update.callback_query
+        # Security: only accept callbacks from the configured admin chat (Sven)
+        sender_id = str(cq.from_.id) if cq.from_ else ""
+        if _TG_MARA_ADMIN_CHAT_ID and sender_id != _TG_MARA_ADMIN_CHAT_ID:
+            _tg_mara_answer_callback_query(cq.id)
+            logger.warning(
+                "[telegram/mara] callback_query from unexpected sender %s — ignored", sender_id
+            )
+            return {"ok": True}
+        _tg_mara_answer_callback_query(cq.id)
+        data = cq.data or ""
+        chat_id = str(cq.message.chat.id) if cq.message else _TG_MARA_ADMIN_CHAT_ID
+        _handle_mara_callback(data, chat_id)
         return {"ok": True}
 
     msg = update.message
@@ -4569,7 +4617,9 @@ def mara_telegram_send(
             detail="Rate-Limit überschritten: max. 10 Telegram-Sends pro Minute (Mara).",
             headers={"Retry-After": "60"},
         )
-    sent_msg_id = _tg_mara_send_message(req.chat_id, req.text, parse_mode=req.parse_mode)
+    sent_msg_id = _tg_mara_send_message(
+        req.chat_id, req.text, reply_markup=req.reply_markup, parse_mode=req.parse_mode
+    )
     # Always track in outbound_messages (HBE-1212: auch ohne issue_id für retroaktive Flood-Analyse)
     if sent_msg_id:
         with _telegram_mara_db() as db:

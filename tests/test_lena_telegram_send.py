@@ -56,7 +56,7 @@ class LenaTelegramSendEndpointTest(unittest.TestCase):
             resp = self.api.lena_telegram_send(req, _key="test-key")
         self.assertTrue(resp.success)
         self.assertEqual(resp.telegram_msg_id, 55)
-        m_send.assert_called_once_with("111222333", "Hallo Sven", parse_mode="MarkdownV2")
+        m_send.assert_called_once_with("111222333", "Hallo Sven", reply_markup=None, parse_mode="MarkdownV2")
 
     def test_stores_outbound_message_when_issue_id_set(self):
         with tempfile.TemporaryDirectory() as tmp:

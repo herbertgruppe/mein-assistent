@@ -504,7 +504,7 @@ class MaraTelegramSendTest(unittest.TestCase):
 
         self.assertTrue(resp.success)
         self.assertEqual(resp.telegram_msg_id, 55)
-        m_send.assert_called_once_with("444555666", "Hallo von Mara", parse_mode="MarkdownV2")
+        m_send.assert_called_once_with("444555666", "Hallo von Mara", reply_markup=None, parse_mode="MarkdownV2")
 
     def test_stores_in_mara_db_not_lena_db(self):
         """mara_telegram_send must write to telegram_mara.db, not telegram.db."""
@@ -535,7 +535,8 @@ class MaraTelegramSendTest(unittest.TestCase):
         self.assertEqual(row[3], "cmt-mara-01")
         self.assertEqual(row[4], "Hallo von Mara")
 
-    def test_no_db_insert_without_issue_id(self):
+    def test_db_insert_even_without_issue_id(self):
+        """HBE-1212: every send is tracked in outbound_messages for retroactive flood analysis."""
         with tempfile.TemporaryDirectory() as tmp:
             mara_db_path = Path(tmp) / "telegram_mara.db"
             with mock.patch.object(self.api, "_TG_MARA_BOT_TOKEN", "mara-bot-token"), \
@@ -544,11 +545,11 @@ class MaraTelegramSendTest(unittest.TestCase):
                 req = self._make_request()  # no issue_id
                 self.api.mara_telegram_send(req, _key="test-key")
 
-            if mara_db_path.exists():
-                conn = sqlite3.connect(str(mara_db_path))
-                count = conn.execute("SELECT COUNT(*) FROM outbound_messages").fetchone()[0]
-                conn.close()
-                self.assertEqual(count, 0, "No row must be inserted without issue_id")
+            conn = sqlite3.connect(str(mara_db_path))
+            row = conn.execute("SELECT issue_id FROM outbound_messages WHERE telegram_msg_id = 88").fetchone()
+            conn.close()
+            self.assertIsNotNone(row, "Row must be inserted even without issue_id (HBE-1212)")
+            self.assertEqual(row[0], "", "issue_id must be '' (empty string) when not provided")
 
     def test_comment_id_defaults_to_empty_string(self):
         """comment_id=None stored as '' to satisfy NOT NULL constraint (same as Lena)."""
@@ -591,6 +592,100 @@ class MaraTelegramSendTest(unittest.TestCase):
         call_url = m_post.call_args[0][0]
         self.assertIn("real-mara-token-xyz", call_url,
                       "URL must contain Mara's own bot token")
+
+
+# ---------------------------------------------------------------------------
+# Inline Buttons — callback_query handling (HBE-1422)
+# ---------------------------------------------------------------------------
+class MaraCallbackQueryTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.api = _load_api("api_mara_callback_test")
+
+    def _make_callback_req(self, data: str, from_id: int = 12345):
+        class _Req:
+            client = None
+            headers = {"X-Telegram-Bot-Api-Secret-Token": "mara-secret"}
+
+            async def json(self):
+                return {
+                    "update_id": 99,
+                    "callback_query": {
+                        "id": "cq-id-001",
+                        "from": {"id": from_id, "is_bot": False, "first_name": "Sven"},
+                        "message": {
+                            "message_id": 77,
+                            "chat": {"id": from_id},
+                        },
+                        "data": data,
+                    },
+                }
+        return _Req()
+
+    def test_callback_query_answers_spinner_and_posts_comment(self):
+        """callback_query from Sven must answer spinner and post system comment on issue."""
+        mock_answer = mock.MagicMock()
+        mock_comment = mock.MagicMock(return_value=True)
+
+        req = self._make_callback_req("speaker:HBE-1258:dragan", from_id=12345)
+        with mock.patch.object(self.api, "_TG_MARA_WEBHOOK_SECRET", "mara-secret"), \
+             mock.patch.object(self.api, "_TG_MARA_ADMIN_CHAT_ID", "12345"), \
+             mock.patch.object(self.api, "_tg_mara_answer_callback_query", mock_answer), \
+             mock.patch.object(self.api, "_pc_post_system_comment", mock_comment):
+            result = asyncio.run(self.api.telegram_mara_webhook(req))
+
+        self.assertEqual(result, {"ok": True})
+        mock_answer.assert_called_once_with("cq-id-001")
+        mock_comment.assert_called_once_with("HBE-1258", "TELEGRAM_CALLBACK: speaker=dragan")
+
+    def test_callback_query_rejected_from_non_admin(self):
+        """callback_query from an unknown sender must be answered but not processed."""
+        mock_answer = mock.MagicMock()
+        mock_comment = mock.MagicMock()
+
+        req = self._make_callback_req("approve:HBE-1300", from_id=99999)
+        with mock.patch.object(self.api, "_TG_MARA_WEBHOOK_SECRET", "mara-secret"), \
+             mock.patch.object(self.api, "_TG_MARA_ADMIN_CHAT_ID", "12345"), \
+             mock.patch.object(self.api, "_tg_mara_answer_callback_query", mock_answer), \
+             mock.patch.object(self.api, "_pc_post_system_comment", mock_comment):
+            result = asyncio.run(self.api.telegram_mara_webhook(req))
+
+        self.assertEqual(result, {"ok": True})
+        mock_answer.assert_called_once_with("cq-id-001")
+        mock_comment.assert_not_called()
+
+    def test_callback_without_admin_guard_skips_check(self):
+        """When _TG_MARA_ADMIN_CHAT_ID is empty, all senders are accepted."""
+        mock_answer = mock.MagicMock()
+        mock_comment = mock.MagicMock(return_value=True)
+
+        req = self._make_callback_req("approve:HBE-1300", from_id=99999)
+        with mock.patch.object(self.api, "_TG_MARA_WEBHOOK_SECRET", "mara-secret"), \
+             mock.patch.object(self.api, "_TG_MARA_ADMIN_CHAT_ID", ""), \
+             mock.patch.object(self.api, "_tg_mara_answer_callback_query", mock_answer), \
+             mock.patch.object(self.api, "_pc_post_system_comment", mock_comment):
+            result = asyncio.run(self.api.telegram_mara_webhook(req))
+
+        self.assertEqual(result, {"ok": True})
+        mock_comment.assert_called_once_with("HBE-1300", "TELEGRAM_CALLBACK: approve")
+
+    def test_mara_send_passes_reply_markup(self):
+        """reply_markup must be forwarded to _tg_mara_send_message."""
+        keyboard = {"inline_keyboard": [[{"text": "✅ Ja", "callback_data": "approve:HBE-1300"}]]}
+        with mock.patch.object(self.api, "_TG_MARA_BOT_TOKEN", "mara-bot-token"), \
+             mock.patch.object(self.api, "_tg_mara_send_message", return_value=200) as m_send, \
+             mock.patch.object(self.api, "_telegram_mara_db") as mock_db_factory:
+            mock_db_factory.return_value.__enter__ = mock.MagicMock(return_value=mock.MagicMock())
+            mock_db_factory.return_value.__exit__ = mock.MagicMock(return_value=False)
+            req = self.api.LenaTelegramSendRequest(
+                chat_id="12345", text="Protokoll bereit", reply_markup=keyboard
+            )
+            resp = self.api.mara_telegram_send(req, _key="test-key")
+
+        self.assertTrue(resp.success)
+        m_send.assert_called_once_with(
+            "12345", "Protokoll bereit", reply_markup=keyboard, parse_mode="MarkdownV2"
+        )
 
 
 if __name__ == "__main__":
