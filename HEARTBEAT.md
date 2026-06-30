@@ -9,6 +9,7 @@ und welche Quick-Paths für häufige Aktionen gelten.
 
 | Titel enthält | Skill laden |
 |---|---|
+| Action-Run: | `SKILL_TRIAGE_V2.md` |
 | Termin, Meeting, Kalender, verschieben, einladen, Slot, Besprechung | `SKILL_MEETING_OPERATIONS.md` |
 | Mail, E-Mail, Posteingang, Entwurf, Antwort, weiterleiten | `SKILL_EMAIL.md` (sofern vorhanden) |
 | Daily, Protokoll, Notiz, Tagesnotiz | `SKILL_DAILY_NOTE.md` (sofern vorhanden) |
@@ -53,6 +54,24 @@ Beim Erkennen von Mail-Schlüsselwörtern in Sven-Telegram-Nachricht oder Issue-
 Hinweis: Seit HBE-1064 (2026-06-20) wird die Priorität nicht mehr als Outlook-Kategorie
 (Priorität: Hoch/Mittel/Niedrig) gesetzt, sondern als Outlook-Wichtigkeitsspalte via
 `set-importance`. Pro Mail wird nur noch eine einzige Kategorie gesetzt.
+
+---
+
+## Quick-Path: Action-Run (Triage v2)
+
+Wenn ein Issue-Titel mit `Action-Run:` beginnt oder ein Telegram-Trigger erkannt wurde:
+
+```
+1. SKILL_TRIAGE_V2.md laden
+2. Kategorie aus Issue-Titel extrahieren (z.B. "Action-Run: Ablegen")
+3. POST /api/lena/mail/action-run { "category": "<key>" } aufrufen
+4. Falls mail_count == 0: Telegram "Keine Mails mit Kategorie '[X]' — alles erledigt. 👍" → done
+5. Falls Mails vorhanden: Kategorie-Flow gemaess SKILL_TRIAGE_V2.md sequenziell abarbeiten
+6. Issue nach Abschluss auf done setzen
+```
+
+Erkennungs-Varianten (auch ohne explizites Issue):
+- Sven Telegram: "Lena, Ablegen" / "lena weiterleiten" / "tun abarbeiten" → api.py erstellt Issue automatisch
 
 ---
 
