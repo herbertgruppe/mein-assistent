@@ -391,9 +391,16 @@ def _tg_agent_db(cfg: _TgAgentCfg):
         issue_id        TEXT NOT NULL,
         comment_id      TEXT NOT NULL,
         comment_excerpt TEXT,
+        button_options  TEXT,
         sent_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (telegram_msg_id, chat_id)
     )""")
+    # HBE-1452: add button_options to existing DBs that predate the column
+    try:
+        conn.execute("ALTER TABLE outbound_messages ADD COLUMN button_options TEXT")
+        conn.commit()
+    except Exception:
+        pass  # column already exists
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_outbound_issue ON outbound_messages(issue_id)"
     )
@@ -4268,7 +4275,9 @@ async def telegram_agent_webhook(slug: str, req: Request):
             _tg_agent_ack_callback(cfg.token, cq.id)
             data = cq.data or ""
             chat_id = str(cq.message.chat.id) if cq.message else cfg.admin_chat_id
-            _handle_speaker_callback(data, chat_id)
+            # Try speaker-specific callbacks first; fall back to generic inline buttons (HBE-1452)
+            if not _handle_speaker_callback(data, chat_id):
+                _handle_inline_button_reply(cfg, cq)
         elif slug == "mara":
             sender_id = str(cq.from_.id) if cq.from_ else ""
             if cfg.admin_chat_id and sender_id != cfg.admin_chat_id:
@@ -4278,12 +4287,12 @@ async def telegram_agent_webhook(slug: str, req: Request):
                 )
                 return {"ok": True}
             _tg_agent_ack_callback(cfg.token, cq.id)
-            data = cq.data or ""
-            chat_id = str(cq.message.chat.id) if cq.message else cfg.admin_chat_id
-            _handle_mara_callback(data, chat_id)
+            # Generic inline button handler for Mara (HBE-1452)
+            _handle_inline_button_reply(cfg, cq)
         else:
-            # New agents: ack the callback without action (extend per-agent later)
+            # New agents: ack + try generic inline button handler
             _tg_agent_ack_callback(cfg.token, cq.id)
+            _handle_inline_button_reply(cfg, cq)
         return {"ok": True}
 
     msg = update.message
@@ -4386,12 +4395,15 @@ async def telegram_mara_webhook(req: Request):
     return await telegram_agent_webhook("mara", req)
 
 
-def _handle_speaker_callback(data: str, chat_id: str) -> None:
-    """Process a speaker-question callback_query from Sven."""
+def _handle_speaker_callback(data: str, chat_id: str) -> bool:
+    """
+    Process a speaker-question callback_query from Sven.
+    Returns True if the callback matched a speaker action, False otherwise.
+    """
     # data format: "spkr_pause:HBE-753", "spkr_cont:HBE-753", "spkr_ready:HBE-753"
     parts = data.split(":", 1)
     if len(parts) != 2 or not parts[0].startswith("spkr_"):
-        return
+        return False
     action, issue_id = parts[0], parts[1]
 
     if action == "spkr_pause":
@@ -4426,6 +4438,59 @@ def _handle_speaker_callback(data: str, chat_id: str) -> None:
 
     else:
         logger.warning("[telegram] unknown speaker callback action: %s", action)
+        return False
+
+    return True
+
+
+def _handle_inline_button_reply(cfg: "_TgAgentCfg", cq: "_TgCallbackQuery") -> bool:
+    """
+    Generic inline button handler (HBE-1452).
+    Looks up the originating Paperclip issue via outbound_messages,
+    posts the selected callback_data as a comment, and resets issue status to in_progress.
+    Returns True if an issue was found and the comment posted, False otherwise.
+    """
+    if not cq.message:
+        return False
+    chat_id = str(cq.message.chat.id)
+    msg_id = cq.message.message_id
+    callback_data = cq.data or ""
+    username = (
+        (cq.from_.username or cq.from_.first_name)
+        if cq.from_
+        else "Unbekannt"
+    )
+
+    with _tg_agent_db(cfg) as db:
+        row = db.execute(
+            "SELECT issue_id FROM outbound_messages WHERE telegram_msg_id = ? AND chat_id = ?",
+            (msg_id, chat_id),
+        ).fetchone()
+
+    if not row or not row["issue_id"]:
+        logger.warning(
+            "[telegram/%s] inline button callback: no outbound_message for msg_id=%s chat_id=%s",
+            cfg.slug, msg_id, chat_id,
+        )
+        return False
+
+    issue_id = row["issue_id"]
+    comment_body = f"Telegram-Button von @{username}: {callback_data}"
+
+    status = _pc_get_issue_status(issue_id)
+    if status in {"in_review", "blocked"}:
+        _pc_patch_issue_status(issue_id, "in_progress")
+        logger.info(
+            "[telegram/%s] inline button: reset issue %s from %s to in_progress",
+            cfg.slug, issue_id, status,
+        )
+
+    ok = _pc_post_system_comment(issue_id, comment_body)
+    logger.info(
+        "[telegram/%s] inline button posted to %s (data=%r, ok=%s)",
+        cfg.slug, issue_id, callback_data, ok,
+    )
+    return ok
 
 
 @app.post("/api/telegram/{slug}/send", response_model=LenaTelegramSendResponse)
@@ -4456,12 +4521,19 @@ def telegram_agent_send(
     )
     # Always track in outbound_messages (HBE-1212: auch ohne issue_id für retroaktive Flood-Analyse)
     if sent_msg_id:
+        import json as _json
+        _btn_opts = None
+        if req.reply_markup:
+            try:
+                _btn_opts = _json.dumps(req.reply_markup, ensure_ascii=False)
+            except Exception:
+                pass
         with _tg_agent_db(cfg) as db:
             db.execute(
                 "INSERT OR REPLACE INTO outbound_messages "
-                "(telegram_msg_id, chat_id, issue_id, comment_id, comment_excerpt) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (sent_msg_id, req.chat_id, req.issue_id or "", req.comment_id or "", req.text[:200]),
+                "(telegram_msg_id, chat_id, issue_id, comment_id, comment_excerpt, button_options) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (sent_msg_id, req.chat_id, req.issue_id or "", req.comment_id or "", req.text[:200], _btn_opts),
             )
     return LenaTelegramSendResponse(success=bool(sent_msg_id), telegram_msg_id=sent_msg_id)
 
