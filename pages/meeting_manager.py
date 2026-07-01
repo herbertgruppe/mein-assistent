@@ -1,4 +1,4 @@
-"""
+﻿"""
 Meeting Manager Tab: Transkript-Upload, Protokoll-Erstellung (Streaming),
 Task-Extraktion, Finalisierung & Asana-Export.
 """
@@ -1428,6 +1428,7 @@ def render_transcripts_tab():
                         }
                         _rows.append({
                             "Datum": r.get("start_at", "")[:10] if r.get("start_at") else "?",
+                            "Titel": (r.get("recording_title") or r.get("issue_identifier") or r.get("recording_id", "")[:8])[:60],
                             "Issue": r.get("issue_identifier") or "-",
                             "Status": _status_map.get(r.get("tracking_status"), r.get("tracking_status") or "?"),
                             "Poller": _poller_map.get(r.get("poller_status"), r.get("poller_status") or "OK"),
@@ -1814,3 +1815,4 @@ def render_transcripts_tab():
         render_transcript_detail_view(selected_idx)
     else:
         st.info("💡 Wähle ein Transkript aus der Liste oben um zu beginnen")
+
