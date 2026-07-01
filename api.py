@@ -1,4 +1,4 @@
-"""
+﻿"""
 FastAPI REST-Endpunkt für den Meeting-Protokoll-Workflow der Herbert Gruppe.
 
 Wird vom Cowork-Skill `meeting-protokoll` aufgerufen, sobald Sven ein Protokoll
@@ -1184,6 +1184,7 @@ class PlaudRecordingStatus(BaseModel):
     poller_status: Optional[str]
     tracking_status: Optional[str]
     tracking_notes: Optional[str]
+    recording_title: Optional[str] = None
 
 
 class PlaudRecordingPatch(BaseModel):
@@ -1211,7 +1212,7 @@ def list_plaud_recordings(
     try:
         query = """
             SELECT recording_id, start_at, processed_at, issue_identifier,
-                   status as poller_status, tracking_status, tracking_notes
+                   status as poller_status, tracking_status, tracking_notes, recording_title
             FROM plaud_processed_recordings
         """
         params = []
@@ -1267,6 +1268,116 @@ def patch_plaud_recording(
     finally:
         conn.close()
     return {"recording_id": recording_id, "updated": True}
+
+
+@app.post("/api/plaud/recordings/{recording_id}/process")
+def trigger_plaud_recording_process(
+    recording_id: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Verarbeitet eine spezifische Plaud-Aufnahme on-demand, unabhängig vom Alter (HBE-1527).
+    Wird genutzt wenn Sprecher-Bestätigung für ältere Aufnahmen vorliegt.
+    """
+    import sqlite3 as _sqlite3
+
+    if not Path(PLAUD_STATE_DB).exists():
+        raise HTTPException(status_code=503, detail="Plaud state DB nicht verfügbar.")
+
+    # Check recording exists in DB
+    conn = _sqlite3.connect(PLAUD_STATE_DB)
+    try:
+        row = conn.execute(
+            "SELECT recording_id, issue_identifier, status FROM plaud_processed_recordings WHERE recording_id = ?",
+            (recording_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Recording {recording_id} nicht in DB. Erst via GET /api/plaud/recordings prüfen.")
+
+    existing_issue = row[1]
+    if existing_issue:
+        return {"recording_id": recording_id, "status": "already_processed", "issue_identifier": existing_issue}
+
+    # Delegate to Mara via Paperclip issue with the recording_id
+    try:
+        mara_agent_id = os.getenv("PAPERCLIP_PROTOKOLL_AGENT_ID", "ed26f194-f0a9-4f70-a52d-6e39be9013e3")
+
+        # Get recording title and start_at from DB
+        conn2 = _sqlite3.connect(PLAUD_STATE_DB)
+        try:
+            title_row = conn2.execute(
+                "SELECT recording_title, start_at FROM plaud_processed_recordings WHERE recording_id = ?",
+                (recording_id,)
+            ).fetchone()
+        finally:
+            conn2.close()
+
+        recording_title = (title_row[0] if title_row and title_row[0] else recording_id[:16])
+        start_at = title_row[1] if title_row else "?"
+
+        import requests as _rq_proc
+        pc_url = os.getenv("PAPERCLIP_API_URL", "https://paperclip.herbertgruppe.com")
+        pc_key = os.getenv("PAPERCLIP_API_KEY_MA", "")
+        pc_company = os.getenv("PAPERCLIP_COMPANY_ID_MA", "9df4976b-9ac8-4e8f-a156-c06c7fa40cdc")
+
+        issue_payload = {
+            "title": f"Neue Plaud-Aufnahme (manuell): {recording_title}",
+            "description": (
+                f"Manuelle Verarbeitung angefordert via API.\n\n"
+                f"Plaud Recording-ID: `{recording_id}`\n"
+                f"Aufnahme-Zeitpunkt: {start_at}\n\n"
+                f"Bitte Transkript abrufen (`plaud summary {recording_id}`), "
+                f"Protokoll erstellen und Sven zur Überprüfung schicken."
+            ),
+            "assigneeAgentId": mara_agent_id,
+            "priority": "medium",
+        }
+
+        resp = _rq_proc.post(
+            f"{pc_url}/api/companies/{pc_company}/issues",
+            headers={"Authorization": f"Bearer {pc_key}", "Content-Type": "application/json"},
+            json=issue_payload,
+            timeout=15,
+        )
+
+        if resp.status_code not in (200, 201):
+            raise HTTPException(
+                status_code=502,
+                detail=f"Paperclip Issue konnte nicht erstellt werden: {resp.status_code} — {resp.text[:200]}"
+            )
+
+        new_issue = resp.json()
+        issue_id = new_issue.get("identifier", "?")
+        issue_uuid = new_issue.get("id", "")
+
+        # Update DB: mark as triggered
+        from datetime import datetime as _dt_proc, timezone as _tz_proc
+        now = _dt_proc.now(_tz_proc.utc).isoformat()
+        conn3 = _sqlite3.connect(PLAUD_STATE_DB)
+        try:
+            conn3.execute(
+                "UPDATE plaud_processed_recordings SET issue_identifier = ?, processed_at = ?, status = 'manual_trigger' WHERE recording_id = ?",
+                (issue_id, now, recording_id)
+            )
+            conn3.commit()
+        finally:
+            conn3.close()
+
+        return {
+            "recording_id": recording_id,
+            "status": "triggered",
+            "issue_identifier": issue_id,
+            "issue_uuid": issue_uuid,
+            "recording_title": recording_title,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Fehler beim Triggern: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -5398,3 +5509,4 @@ def lena_vault_write(
 
     _vault_audit(req.path, req.mode, commit_sha, "OK")
     return VaultWriteResponse(status="ok", commit_sha=commit_sha, path=req.path)
+
