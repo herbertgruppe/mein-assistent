@@ -50,6 +50,10 @@ RECENT_DAYS          = int(os.getenv("PLAUD_RECENT_DAYS", "1"))
 PC_API_URL      = os.getenv("PAPERCLIP_API_URL",    "https://paperclip.herbertgruppe.com")
 PC_API_KEY      = os.getenv("PAPERCLIP_API_KEY_MA", "")
 PC_COMPANY_ID   = os.getenv("PAPERCLIP_COMPANY_ID_MA", "9df4976b-9ac8-4e8f-a156-c06c7fa40cdc")
+
+# mein-assistent API — Recording-Tracking (HBE-1526)
+MA_API_URL      = os.getenv("MA_API_URL", "http://localhost:8000")
+MA_API_KEY      = os.getenv("API_SECRET_KEY", "")
 # Protokoll-Agent-ID — ersetzt durch echte ID sobald HBE-682 erledigt ist
 PC_PROTOKOLL_AGENT_ID = os.getenv(
     "PAPERCLIP_PROTOKOLL_AGENT_ID",
@@ -352,6 +356,40 @@ def _create_pc_issue(payload: dict) -> Optional[str]:
     return str(data.get("identifier") or data.get("id", "?"))
 
 
+# ── Recording-Tracking (HBE-1526) ─────────────────────────────────────────────
+def _create_recording_entry(
+    recording_id: str,
+    meta: Dict[str, Any],
+    paperclip_issue_id: str,
+) -> None:
+    """POST /api/protocols/recordings — legt Tracking-Eintrag an (best-effort)."""
+    if not MA_API_KEY:
+        logger.debug("MA_API_KEY not set — skipping recording entry for %s", recording_id)
+        return
+    url = f"{MA_API_URL}/api/protocols/recordings"
+    name = meta.get("name") or meta.get("title") or ""
+    start_at = meta.get("start_at") or meta.get("date") or meta.get("created_at") or None
+    duration_sec = _extract_duration_sec(meta) or None
+    try:
+        resp = requests.post(
+            url,
+            json={
+                "recording_id": recording_id,
+                "plaud_title": name,
+                "recorded_at": start_at,
+                "duration_seconds": duration_sec,
+                "paperclip_issue_id": paperclip_issue_id,
+                "status": "new",
+            },
+            headers={"X-API-Key": MA_API_KEY},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        logger.info("[recording-tracking] entry created for %s (issue=%s)", recording_id, paperclip_issue_id)
+    except Exception as exc:
+        logger.warning("[recording-tracking] failed for %s: %s", recording_id, exc)
+
+
 # ── Telegram ───────────────────────────────────────────────────────────────────
 def _tg_alert(text: str) -> None:
     if not TG_BOT_TOKEN or not TG_ADMIN_CHAT:
@@ -453,6 +491,7 @@ def _poll_account(
                     start_at = meta.get("start_at", "")
                     _mark_processed(db, recording_id, start_at, identifier, home_dir)
                     logger.info("Created issue %s for recording %s", identifier, recording_id)
+                    _create_recording_entry(recording_id, meta, identifier)
                 break
             except Exception as exc:
                 if attempt == 3:
