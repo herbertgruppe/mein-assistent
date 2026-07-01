@@ -1171,6 +1171,104 @@ def plaud_cancel(
     return {"status": "ok", "recording_id": req.recording_id, "cancelled_as": issue_ref}
 
 
+# ── Plaud Recording Tracking (HBE-1527) ──────────────────────────────────────
+
+PLAUD_STATE_DB = os.getenv("PLAUD_DB_PATH", "/var/lib/plaud-poller/state.db")
+
+
+class PlaudRecordingStatus(BaseModel):
+    recording_id: str
+    start_at: Optional[str]
+    processed_at: Optional[str]
+    issue_identifier: Optional[str]
+    poller_status: Optional[str]
+    tracking_status: Optional[str]
+    tracking_notes: Optional[str]
+
+
+class PlaudRecordingPatch(BaseModel):
+    tracking_status: Optional[str] = None
+    tracking_notes: Optional[str] = None
+
+
+class PlaudRecordingsResponse(BaseModel):
+    recordings: List[PlaudRecordingStatus]
+    total: int
+
+
+@app.get("/api/plaud/recordings", response_model=PlaudRecordingsResponse)
+def list_plaud_recordings(
+    tracking_status: Optional[str] = None,
+    limit: int = 100,
+    _key: str = Security(verify_api_key),
+):
+    """Liste aller Plaud-Aufnahmen mit aktuellem Tracking-Status (HBE-1527)."""
+    import sqlite3 as _sqlite3
+    if not Path(PLAUD_STATE_DB).exists():
+        return PlaudRecordingsResponse(recordings=[], total=0)
+    conn = _sqlite3.connect(PLAUD_STATE_DB)
+    conn.row_factory = _sqlite3.Row
+    try:
+        query = """
+            SELECT recording_id, start_at, processed_at, issue_identifier,
+                   status as poller_status, tracking_status, tracking_notes
+            FROM plaud_processed_recordings
+        """
+        params = []
+        if tracking_status:
+            query += " WHERE tracking_status = ?"
+            params.append(tracking_status)
+        query += " ORDER BY start_at DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
+        recordings = [PlaudRecordingStatus(**dict(r)) for r in rows]
+        total = conn.execute("SELECT COUNT(*) FROM plaud_processed_recordings").fetchone()[0]
+    finally:
+        conn.close()
+    return PlaudRecordingsResponse(recordings=recordings, total=total)
+
+
+@app.patch("/api/plaud/recordings/{recording_id}")
+def patch_plaud_recording(
+    recording_id: str,
+    req: PlaudRecordingPatch,
+    _key: str = Security(verify_api_key),
+):
+    """Tracking-Status oder Notiz einer Plaud-Aufnahme aktualisieren (HBE-1527)."""
+    import sqlite3 as _sqlite3
+    valid_statuses = {None, "new", "speakers_ok", "review_ready", "done", "abandoned"}
+    if req.tracking_status not in valid_statuses:
+        raise HTTPException(status_code=400, detail=f"Ungültiger Status: {req.tracking_status}")
+    if not Path(PLAUD_STATE_DB).exists():
+        raise HTTPException(status_code=503, detail="Plaud state DB nicht verfügbar.")
+    conn = _sqlite3.connect(PLAUD_STATE_DB)
+    try:
+        row = conn.execute(
+            "SELECT recording_id FROM plaud_processed_recordings WHERE recording_id = ?",
+            (recording_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Recording {recording_id} nicht gefunden.")
+        updates = []
+        params = []
+        if req.tracking_status is not None:
+            updates.append("tracking_status = ?")
+            params.append(req.tracking_status)
+        if req.tracking_notes is not None:
+            updates.append("tracking_notes = ?")
+            params.append(req.tracking_notes)
+        if updates:
+            params.append(recording_id)
+            conn.execute(
+                f"UPDATE plaud_processed_recordings SET {', '.join(updates)} WHERE recording_id = ?",
+                params
+            )
+            conn.commit()
+    finally:
+        conn.close()
+    return {"recording_id": recording_id, "updated": True}
+
+
 # ---------------------------------------------------------------------------
 # Transkripte (Outlook-Subfolder)
 # ---------------------------------------------------------------------------
