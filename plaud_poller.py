@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 plaud_poller.py
 
@@ -136,6 +136,15 @@ def _init_db(db_path: str) -> sqlite3.Connection:
         )
     except sqlite3.OperationalError:
         pass
+    # Safe migration: add tracking columns for HBE-1527 (no-op if already present)
+    try:
+        conn.execute("ALTER TABLE plaud_processed_recordings ADD COLUMN tracking_status TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE plaud_processed_recordings ADD COLUMN tracking_notes TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     return conn
 
@@ -161,17 +170,19 @@ def _mark_processed(
     start_at: str,
     issue_identifier: str,
     account_home: str,
+    recording_title: Optional[str] = None,
 ) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO plaud_processed_recordings"
-        " (recording_id, start_at, processed_at, issue_identifier, account_home)"
-        " VALUES (?, ?, ?, ?, ?)",
+        " (recording_id, start_at, processed_at, issue_identifier, account_home, recording_title)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
         (
             recording_id,
             start_at,
             datetime.now(timezone.utc).isoformat(),
             issue_identifier,
             account_home,
+            recording_title,
         ),
     )
     conn.commit()
@@ -421,7 +432,8 @@ def _poll_account(
                 recording_id, duration_sec, MIN_DURATION_SEC,
             )
             skipped.append(recording_id)
-            _mark_processed(db, recording_id, meta.get("start_at", ""), "skipped:too_short", home_dir)
+            _title = meta.get("name") or meta.get("title") or None
+            _mark_processed(db, recording_id, meta.get("start_at", ""), "skipped:too_short", home_dir, recording_title=_title)
             continue
 
         # Skip Plaud demo/tutorial recordings (HBE-1212)
@@ -432,7 +444,8 @@ def _poll_account(
                 recording_id, meta.get("name") or meta.get("title"),
             )
             skipped.append(recording_id)
-            _mark_processed(db, recording_id, meta.get("start_at", ""), "skipped:demo_recording", home_dir)
+            _title = meta.get("name") or meta.get("title") or None
+            _mark_processed(db, recording_id, meta.get("start_at", ""), "skipped:demo_recording", home_dir, recording_title=_title)
             continue
 
         # Get summary (best-effort — don't fail if unavailable)
@@ -451,7 +464,8 @@ def _poll_account(
                 if identifier:
                     created_issues.append(identifier)
                     start_at = meta.get("start_at", "")
-                    _mark_processed(db, recording_id, start_at, identifier, home_dir)
+                    _recording_title = meta.get("name") or meta.get("title") or None
+                    _mark_processed(db, recording_id, start_at, identifier, home_dir, recording_title=_recording_title)
                     logger.info("Created issue %s for recording %s", identifier, recording_id)
                 break
             except Exception as exc:
@@ -577,3 +591,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
