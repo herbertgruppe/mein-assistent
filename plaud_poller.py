@@ -136,6 +136,15 @@ def _init_db(db_path: str) -> sqlite3.Connection:
         )
     except sqlite3.OperationalError:
         pass
+    # Safe migration: add tracking columns for HBE-1527 (no-op if already present)
+    try:
+        conn.execute("ALTER TABLE plaud_processed_recordings ADD COLUMN tracking_status TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE plaud_processed_recordings ADD COLUMN tracking_notes TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     return conn
 
