@@ -47,7 +47,80 @@ dass Sven eine Handlungs-Option erhalten hat.
 
 ---
 
-## 3. Plaud-Aufnahme abbrechen (Cancel-Schutz)
+## 3. Recording-Tracking (HBE-1526)
+
+Jede Plaud-Aufnahme hat einen Eintrag in `protocol_recordings` (angelegt durch den plaud_poller
+beim Issue-Erstellen). Mara kann diesen Eintrag lesen und aktualisieren.
+
+### Status-Werte
+
+| Status | Bedeutung |
+|---|---|
+| `new` | Aufnahme eingegangen, noch nicht verarbeitet |
+| `speakers_pending` | Sprecherzuordnung noch nicht bestätigt |
+| `speakers_ok` | Sprecherzuordnung ok, bereit für Review |
+| `review_ready` | Protokoll erstellt, Sven-Review steht aus |
+| `done` | Protokoll freigegeben und versendet |
+| `abandoned` | Wird nicht weiterverfolgt (z.B. kein Meeting) |
+
+### Endpoints
+
+**Alle offenen Aufnahmen abfragen** (z.B. auf Sven-Frage "Welche Protokolle sind offen?"):
+```
+GET /api/protocols/recordings?open_only=true
+X-API-Key: <API_SECRET_KEY>
+```
+
+**Nach Status filtern** (z.B. alle die Sprecherzuordnung brauchen):
+```
+GET /api/protocols/recordings?status=speakers_pending
+X-API-Key: <API_SECRET_KEY>
+```
+
+**Stale-Aufnahmen abfragen** (> 7 Tage ohne Fortschritt):
+```
+GET /api/protocols/recordings?stale_days=7
+X-API-Key: <API_SECRET_KEY>
+```
+
+**Status aktualisieren** (z.B. nach Sven-Bestätigung der Sprecher):
+```
+PATCH /api/protocols/recordings/{recording_id}
+X-API-Key: <API_SECRET_KEY>
+Content-Type: application/json
+
+{
+  "status": "speakers_ok",
+  "speakers_confirmed": true
+}
+```
+
+**Draft-ID verknüpfen** (nach POST /api/protocols/draft):
+```
+PATCH /api/protocols/recordings/{recording_id}
+{
+  "status": "review_ready",
+  "protocol_draft_id": "<draft_id>"
+}
+```
+
+### Mara-Pflichten im Intake-Workflow
+
+1. Nach Sprecher-Bestätigung durch Sven → `PATCH` mit `status=speakers_ok, speakers_confirmed=true`
+2. Nach Protokoll-Generierung → `PATCH` mit `status=review_ready, protocol_draft_id=<id>`
+3. Bei Aufnahme abbrechen (cancelled) → `PATCH` mit `status=abandoned, notes=<Grund>` **zusätzlich** zum `POST /api/plaud/cancel`
+4. Nach Protokoll-Freigabe → `PATCH` mit `status=done`
+
+### Proaktive Nachfass-Abfrage
+
+Auf Sven-Fragen wie "Was ist mit den Protokollen?" oder "Welche Aufnahmen hängen noch?":
+- `GET /api/protocols/recordings?open_only=true` aufrufen
+- Aufnahmen älter als 7 Tage (`stale_days=7`) separat markieren
+- Kompakte Übersicht nach Status gruppiert antworten
+
+---
+
+## 4. Plaud-Aufnahme abbrechen (Cancel-Schutz)
 
 Wenn ein Plaud-Issue (Origin: `plaud:` oder `plaud-poller`) auf `cancelled` gesetzt wird
 (z. B. weil die Aufnahme zu kurz oder unbeabsichtigt war), **muss Mara sofort danach**
@@ -80,7 +153,7 @@ Content-Type: application/json
 
 ---
 
-## 4. Telegram-Send-Regeln (Anti-Flood, HBE-1212)
+## 5. Telegram-Send-Regeln (Anti-Flood, HBE-1212)
 
 **Genau EINE Telegram-Nachricht pro Aktion.** Niemals den Send-Endpoint mehrfach pro
 Heartbeat aufrufen. Die folgenden Regeln sind verbindlich:
@@ -108,7 +181,7 @@ Heartbeat aufrufen. Die folgenden Regeln sind verbindlich:
 
 ---
 
-## 5. Fehlerbehandlung
+## 6. Fehlerbehandlung
 
 | Situation | Verhalten |
 |---|---|
@@ -121,7 +194,7 @@ Heartbeat aufrufen. Die folgenden Regeln sind verbindlich:
 
 ---
 
-## 6. Umgebungs-Konfiguration
+## 7. Umgebungs-Konfiguration
 
 Relevante Env-Variablen fuer den Intake-Workflow:
 

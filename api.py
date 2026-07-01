@@ -65,6 +65,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
 
 from database.protocols_db import ProtocolsDB
+from database.recordings_db import RecordingsDB, VALID_STATUSES as RECORDING_VALID_STATUSES
 
 load_dotenv()
 
@@ -125,6 +126,9 @@ app.mount("/review-static", StaticFiles(directory=str(_STATIC_DIR)), name="revie
 
 # protocols.db beim API-Start initialisieren (führt Migration automatisch aus)
 _protocols_db = ProtocolsDB(db_path=str(_BASE_DIR / "data" / "protocols.db"))
+
+# recordings.db beim API-Start initialisieren (HBE-1526)
+_recordings_db = RecordingsDB(db_path=str(_BASE_DIR / "data" / "recordings.db"))
 
 # Trusted Proxies: nur von diesen IPs werden Authentik-Header (X-Authentik-Username,
 # X-Forwarded-Email) akzeptiert. nginx läuft auf 127.0.0.1 — daher Default.
@@ -5300,3 +5304,117 @@ def lena_vault_write(
 
     _vault_audit(req.path, req.mode, commit_sha, "OK")
     return VaultWriteResponse(status="ok", commit_sha=commit_sha, path=req.path)
+
+
+# ---------------------------------------------------------------------------
+# Protokoll-Recording-Tracking (HBE-1526)
+# ---------------------------------------------------------------------------
+
+class RecordingUpsertRequest(BaseModel):
+    recording_id: str = Field(..., description="Plaud recording_id (32-Hex)")
+    plaud_title: Optional[str] = None
+    recorded_at: Optional[str] = None
+    duration_seconds: Optional[int] = None
+    paperclip_issue_id: Optional[str] = Field(None, description="Paperclip-Issue UUID")
+    status: str = Field("new", description="new|speakers_pending|speakers_ok|review_ready|done|abandoned")
+    notes: Optional[str] = None
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str) -> str:
+        if v not in RECORDING_VALID_STATUSES:
+            raise ValueError(f"Ungültiger Status: {v!r} — erlaubt: {sorted(RECORDING_VALID_STATUSES)}")
+        return v
+
+
+class RecordingPatchRequest(BaseModel):
+    status: Optional[str] = None
+    speakers_confirmed: Optional[bool] = None
+    protocol_draft_id: Optional[str] = None
+    protocol_pdf_url: Optional[str] = None
+    paperclip_issue_id: Optional[str] = None
+    notes: Optional[str] = None
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in RECORDING_VALID_STATUSES:
+            raise ValueError(f"Ungültiger Status: {v!r} — erlaubt: {sorted(RECORDING_VALID_STATUSES)}")
+        return v
+
+
+@app.post("/api/protocols/recordings", status_code=201)
+def upsert_recording(
+    req: RecordingUpsertRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Legt einen neuen Recording-Eintrag an oder aktualisiert metadata-Felder
+    eines bestehenden (idempotent). Wird vom plaud_poller beim Issue-Anlegen aufgerufen.
+    """
+    recording = _recordings_db.upsert(
+        recording_id=req.recording_id,
+        plaud_title=req.plaud_title,
+        recorded_at=req.recorded_at,
+        duration_seconds=req.duration_seconds,
+        paperclip_issue_id=req.paperclip_issue_id,
+        status=req.status,
+        notes=req.notes,
+    )
+    return recording
+
+
+@app.get("/api/protocols/recordings")
+def list_recordings(
+    status: Optional[str] = Query(None, description="Filtert nach Status"),
+    open_only: bool = Query(False, description="Nur offene (nicht done/abandoned)"),
+    stale_days: Optional[int] = Query(None, description="Nur Recordings ohne Fortschritt seit N Tagen"),
+    limit: int = Query(100, ge=1, le=500),
+    _key: str = Security(verify_api_key),
+):
+    """
+    Listet alle Aufnahmen. Mara nutzt diesen Endpoint für Statusabfragen
+    (z.B. 'Welche Protokolle sind offen?') und proaktive Stale-Alerts.
+    """
+    if open_only:
+        recordings = _recordings_db.list_open()
+    else:
+        recordings = _recordings_db.list_recordings(
+            status=status,
+            limit=limit,
+            stale_days=stale_days,
+        )
+    return {"recordings": recordings, "count": len(recordings)}
+
+
+@app.get("/api/protocols/recordings/{recording_id}")
+def get_recording(recording_id: str, _key: str = Security(verify_api_key)):
+    """Einzelner Recording-Eintrag per Plaud-ID."""
+    rec = _recordings_db.get_by_id(recording_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail=f"Recording {recording_id!r} nicht gefunden")
+    return rec
+
+
+@app.patch("/api/protocols/recordings/{recording_id}")
+def patch_recording(
+    recording_id: str,
+    req: RecordingPatchRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Aktualisiert Status und/oder Metadaten einer Aufnahme.
+    Wird von Mara und vom Webhook aufgerufen.
+    """
+    result = _recordings_db.update(
+        recording_id=recording_id,
+        status=req.status,
+        speakers_confirmed=req.speakers_confirmed,
+        protocol_draft_id=req.protocol_draft_id,
+        protocol_pdf_url=req.protocol_pdf_url,
+        paperclip_issue_id=req.paperclip_issue_id,
+        notes=req.notes,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Recording {recording_id!r} nicht gefunden")
+    return result
