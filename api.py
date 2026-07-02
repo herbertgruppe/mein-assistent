@@ -3687,6 +3687,7 @@ class LenaCategorizeResponse(BaseModel):
     success: bool
     message_id: str
     categories: List[str]
+    moved_to_archive: Optional[bool] = None  # True wenn action=ablegen und Mail archiviert (HBE-1603)
 
 
 class LenaSyncCategoriesResponse(BaseModel):
@@ -4328,10 +4329,33 @@ def lena_mail_categorize(
             detail=f"Graph API Fehler beim Setzen der Kategorien: HTTP {patch_resp.status_code} — {patch_resp.text[:300]}",
         )
 
+    # HBE-1603: Wenn action="ablegen", Mail sofort archivieren — keine zweite API-Call-Runde notwendig
+    moved_to_archive: Optional[bool] = None
+    if req.action == "ablegen":
+        try:
+            archive_folder_id = _resolve_folder_id("archive", headers)
+            archive_resp = _rq.patch(
+                f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
+                headers=headers,
+                json={"parentFolderId": archive_folder_id},
+                timeout=30,
+            )
+            moved_to_archive = archive_resp.status_code in (200, 201)
+            if not moved_to_archive:
+                logger.warning(
+                    "[categorize] action=ablegen: archive PATCH fehlgeschlagen HTTP %s — %s",
+                    archive_resp.status_code,
+                    archive_resp.text[:200],
+                )
+        except Exception as _exc:
+            logger.warning("[categorize] action=ablegen: archive fehlgeschlagen: %s", _exc)
+            moved_to_archive = False
+
     return LenaCategorizeResponse(
         success=True,
         message_id=req.message_id,
         categories=new_categories,
+        moved_to_archive=moved_to_archive,
     )
 
 
