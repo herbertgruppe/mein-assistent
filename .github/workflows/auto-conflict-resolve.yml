@@ -215,11 +215,9 @@ jobs:
 
           # All conflicts resolved — commit and push
           RESOLVED_LIST=$(printf '%s, ' "${RESOLVED_FILES[@]}")
-          git commit -m "Auto-resolve merge conflicts in PR #$PR_NUMBER [skip ci]
-
-Resolved: ${RESOLVED_LIST%, }
-
-Co-Authored-By: Paperclip <noreply@paperclip.ing>"
+          COMMIT_MSG=$(printf 'Auto-resolve merge conflicts in PR #%s [skip ci]\n\nResolved: %s\n\nCo-Authored-By: Paperclip <noreply@paperclip.ing>' \
+            "$PR_NUMBER" "${RESOLVED_LIST%, }")
+          git commit -m "$COMMIT_MSG"
 
           git push origin "$PR_BRANCH"
           echo "✓ Auto-conflict-resolve complete for PR #$PR_NUMBER. Pushed to $PR_BRANCH."
