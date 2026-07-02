@@ -1392,7 +1392,7 @@ def list_plaud_recordings(
             for r in recordings_raw:
                 proto = proto_map.get(r["recording_id"])
                 if proto:
-                    if not r.get("review_link"):
+                    if not r.get("review_link") and proto.get("token"):
                         r["review_link"] = f"https://mein-assistent.herbertgruppe.com/review/{proto['token']}"
                     if r.get("tracking_status") in (None, "new", ""):
                         r["tracking_status"] = _proto_status_map.get(proto["status"], "review_ready")
