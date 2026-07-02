@@ -1296,13 +1296,11 @@ def plaud_cancel(
 PLAUD_STATE_DB = _PLAUD_DB_PATH
 # protocols.db path — used to resolve review_link for plaud recordings (HBE-1603)
 _PROTOCOLS_DB_PATH = str(_BASE_DIR / "data" / "protocols.db")
-
-
-# protocols.status → tracking_status mapping (HBE-1612: approved stays review_ready until finalized)
-_PROTO_STATUS_MAP = {
+# protocols.status → tracking_status mapping (module-level constant, not per-request)
+_PROTO_STATUS_MAP: dict = {
     "draft":     "review_ready",
     "in_review": "review_ready",
-    "approved":  "review_ready",
+    "approved":  "review_ready",   # BackgroundTask kann scheitern; nur finalized = done
     "finalized": "done",
     "rejected":  "review_ready",
 }
@@ -1339,7 +1337,6 @@ def list_plaud_recordings(
     """Liste aller Plaud-Aufnahmen mit aktuellem Tracking-Status (HBE-1527).
 
     Ergaenzt review_link live aus protocols.db wenn in state.db noch nicht gesetzt (HBE-1603).
-    Filter tracking_status wird post-Enrichment angewendet damit total und Status-Werte konsistent sind.
     """
     import sqlite3 as _sqlite3
     if not Path(PLAUD_STATE_DB).exists():
@@ -1347,20 +1344,33 @@ def list_plaud_recordings(
     conn = _sqlite3.connect(PLAUD_STATE_DB)
     conn.row_factory = _sqlite3.Row
     try:
-        # Fetch without SQL filter — filter applied post-enrichment for consistency (HBE-1612)
-        rows = conn.execute(
-            """SELECT recording_id, start_at, processed_at, issue_identifier,
-                      status as poller_status, tracking_status, tracking_notes, recording_title,
-                      review_link
-               FROM plaud_processed_recordings
-               ORDER BY start_at DESC LIMIT ?""",
-            [1000],
-        ).fetchall()
+        query = """
+            SELECT recording_id, start_at, processed_at, issue_identifier,
+                   status as poller_status, tracking_status, tracking_notes, recording_title,
+                   review_link
+            FROM plaud_processed_recordings
+        """
+        params = []
+        if tracking_status:
+            query += " WHERE tracking_status = ?"
+            params.append(tracking_status)
+        query += " ORDER BY start_at DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
         recordings_raw = [dict(r) for r in rows]
+        # Count reflects active filter so callers get consistent total vs. recordings length
+        count_query = "SELECT COUNT(*) FROM plaud_processed_recordings"
+        count_params: list = []
+        if tracking_status:
+            count_query += " WHERE tracking_status = ?"
+            count_params.append(tracking_status)
+        total = conn.execute(count_query, count_params).fetchone()[0]
     finally:
         conn.close()
 
     # HBE-1603: Ergaenze review_link + tracking_status aus protocols.db (state.db ist :ro, kein Schreiben moeglich)
+    # Enrichment immer durchfuehren (auch ohne tracking_status-Filter), damit Caller konsistente Werte
+    # erhaelt. tracking_status-Filter betrifft SQL (inkl. COUNT), nicht das post-fetch Enrichment.
     recordings_needing_proto = [
         r["recording_id"] for r in recordings_raw
         if not r.get("review_link") or r.get("tracking_status") in (None, "new", "")
@@ -1369,7 +1379,7 @@ def list_plaud_recordings(
         try:
             pconn = _sqlite3.connect(f"file:{_PROTOCOLS_DB_PATH}?mode=ro", uri=True)
             try:
-                pconn.row_factory = _sqlite3.Row
+                pconn.row_factory = _sqlite3.Row  # inside try so pconn.close() always runs
                 placeholders = ",".join("?" * len(recordings_needing_proto))
                 proto_rows = pconn.execute(
                     f"SELECT recording_id, reviewer_token, status FROM protocols WHERE recording_id IN ({placeholders})",
@@ -1384,18 +1394,16 @@ def list_plaud_recordings(
             for r in recordings_raw:
                 proto = proto_map.get(r["recording_id"])
                 if proto:
+                    # Fix: NULL-Guard fuer reviewer_token (kann NULL sein)
                     if not r.get("review_link") and proto.get("token"):
                         r["review_link"] = f"https://mein-assistent.herbertgruppe.com/review/{proto['token']}"
+                    # Fix: approved → review_ready (BackgroundTask kann scheitern, nur finalized = done)
                     if r.get("tracking_status") in (None, "new", ""):
-                        r["tracking_status"] = _PROTO_STATUS_MAP.get(proto["status"], "review_ready")
+                        r["tracking_status"] = _PROTO_STATUS_MAP.get(proto.get("status", ""), "review_ready")
         except Exception as _exc:
             logger.warning("[plaud/recordings] protocols.db join fehlgeschlagen: %s", _exc)
 
-    # Apply filter post-enrichment so total reflects enriched state (HBE-1612)
-    if tracking_status:
-        recordings_raw = [r for r in recordings_raw if r.get("tracking_status") == tracking_status]
-    total = len(recordings_raw)
-    recordings = [PlaudRecordingStatus(**r) for r in recordings_raw[:limit]]
+    recordings = [PlaudRecordingStatus(**r) for r in recordings_raw]
     return PlaudRecordingsResponse(recordings=recordings, total=total)
 
 
