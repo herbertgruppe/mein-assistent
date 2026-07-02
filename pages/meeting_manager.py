@@ -1427,7 +1427,7 @@ def render_transcripts_tab():
                             "cancelled_by_user": "🚫 Abgebrochen",
                         }
                         _rows.append({
-                            "Datum": r.get("start_at", "")[:10] if r.get("start_at") else "?",
+                            "Datum": r.get("start_at", "")[:16].replace("T", " ") if r.get("start_at") else "?",
                             "Titel": (r.get("recording_title") or r.get("issue_identifier") or r.get("recording_id", "")[:8])[:60],
                             "Issue": r.get("issue_identifier") or "-",
                             "Status": _status_map.get(r.get("tracking_status"), r.get("tracking_status") or "?"),
