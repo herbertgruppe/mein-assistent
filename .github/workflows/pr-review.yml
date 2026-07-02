@@ -9,14 +9,10 @@ jobs:
   trigger-code-reviewer:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # For pull_request events: skip closed (handled by auto-close-on-merge)
-    # For pull_request_review events: only trigger when svenherbert submits APPROVED
-    if: >-
-      (github.event_name == 'pull_request' && github.event.action != 'closed') ||
-      (github.event_name == 'pull_request_review' &&
-       github.event.review.state == 'approved' &&
-       (github.event.review.user.login == 'svenherbert' ||
-        github.event.review.user.login == 'herbert-consult-ceo[bot]'))
+    # Only trigger on new commits (open/sync/reopen). Do NOT re-trigger on Sven approval:
+    # dismiss-blocking-review handles that; re-triggering causes an infinite CHANGES_REQUESTED loop
+    # for HIGH-risk PRs (HBE-1538: code reviewer re-classifies → CHANGES_REQUESTED again).
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
     steps:
       - name: Create or update Paperclip review issue
         env:
@@ -288,3 +284,4 @@ jobs:
           done <<< "$ISSUE_IDS"
 
           echo "::notice::Auto-Close-on-Merge abgeschlossen — ${CLOSED_COUNT} Issue(s) geschlossen (PR #${PR_NUMBER})"
+
