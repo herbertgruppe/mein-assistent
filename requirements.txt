@@ -36,7 +36,7 @@ msal
 requests
 
 # Background Worker
-apscheduler>=3.11.2
+apscheduler>=3.11.3
 beautifulsoup4
 
 # Auth: Rollen-Config (Login selbst läuft über Authentik / st.login)
