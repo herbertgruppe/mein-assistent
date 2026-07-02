@@ -1331,6 +1331,16 @@ def plaud_cancel(
 
 # Reuse _PLAUD_DB_PATH defined above — same env var, same default path
 PLAUD_STATE_DB = _PLAUD_DB_PATH
+# protocols.db path — used to resolve review_link for plaud recordings (HBE-1603)
+_PROTOCOLS_DB_PATH = str(_BASE_DIR / "data" / "protocols.db")
+# protocols.status → tracking_status mapping (module-level constant, not per-request)
+_PROTO_STATUS_MAP: dict = {
+    "draft":     "review_ready",
+    "in_review": "review_ready",
+    "approved":  "review_ready",   # BackgroundTask kann scheitern; nur finalized = done
+    "finalized": "done",
+    "rejected":  "review_ready",
+}
 
 
 class PlaudRecordingStatus(BaseModel):
@@ -1361,7 +1371,10 @@ def list_plaud_recordings(
     limit: int = 100,
     _key: str = Security(verify_api_key),
 ):
-    """Liste aller Plaud-Aufnahmen mit aktuellem Tracking-Status (HBE-1527)."""
+    """Liste aller Plaud-Aufnahmen mit aktuellem Tracking-Status (HBE-1527).
+
+    Ergaenzt review_link live aus protocols.db wenn in state.db noch nicht gesetzt (HBE-1603).
+    """
     import sqlite3 as _sqlite3
     if not Path(PLAUD_STATE_DB).exists():
         return PlaudRecordingsResponse(recordings=[], total=0)
@@ -1381,7 +1394,7 @@ def list_plaud_recordings(
         query += " ORDER BY start_at DESC LIMIT ?"
         params.append(limit)
         rows = conn.execute(query, params).fetchall()
-        recordings = [PlaudRecordingStatus(**dict(r)) for r in rows]
+        recordings_raw = [dict(r) for r in rows]
         # Count reflects active filter so callers get consistent total vs. recordings length
         count_query = "SELECT COUNT(*) FROM plaud_processed_recordings"
         count_params: list = []
@@ -1391,6 +1404,43 @@ def list_plaud_recordings(
         total = conn.execute(count_query, count_params).fetchone()[0]
     finally:
         conn.close()
+
+    # HBE-1603: Ergaenze review_link + tracking_status aus protocols.db (state.db ist :ro, kein Schreiben moeglich)
+    # Enrichment immer durchfuehren (auch ohne tracking_status-Filter), damit Caller konsistente Werte
+    # erhaelt. tracking_status-Filter betrifft SQL (inkl. COUNT), nicht das post-fetch Enrichment.
+    recordings_needing_proto = [
+        r["recording_id"] for r in recordings_raw
+        if not r.get("review_link") or r.get("tracking_status") in (None, "new", "")
+    ]
+    if recordings_needing_proto and Path(_PROTOCOLS_DB_PATH).exists():
+        try:
+            pconn = _sqlite3.connect(f"file:{_PROTOCOLS_DB_PATH}?mode=ro", uri=True)
+            try:
+                pconn.row_factory = _sqlite3.Row  # inside try so pconn.close() always runs
+                placeholders = ",".join("?" * len(recordings_needing_proto))
+                proto_rows = pconn.execute(
+                    f"SELECT recording_id, reviewer_token, status FROM protocols WHERE recording_id IN ({placeholders})",
+                    recordings_needing_proto,
+                ).fetchall()
+                proto_map = {
+                    row["recording_id"]: {"token": row["reviewer_token"], "status": row["status"]}
+                    for row in proto_rows
+                }
+            finally:
+                pconn.close()
+            for r in recordings_raw:
+                proto = proto_map.get(r["recording_id"])
+                if proto:
+                    # Fix: NULL-Guard fuer reviewer_token (kann NULL sein)
+                    if not r.get("review_link") and proto.get("token"):
+                        r["review_link"] = f"https://mein-assistent.herbertgruppe.com/review/{proto['token']}"
+                    # Fix: approved → review_ready (BackgroundTask kann scheitern, nur finalized = done)
+                    if r.get("tracking_status") in (None, "new", ""):
+                        r["tracking_status"] = _PROTO_STATUS_MAP.get(proto.get("status", ""), "review_ready")
+        except Exception as _exc:
+            logger.warning("[plaud/recordings] protocols.db join fehlgeschlagen: %s", _exc)
+
+    recordings = [PlaudRecordingStatus(**r) for r in recordings_raw]
     return PlaudRecordingsResponse(recordings=recordings, total=total)
 
 
