@@ -4001,26 +4001,15 @@ def lena_mail_archive_by_category(
         "Content-Type": "application/json",
     }
 
-    escaped = req.category.replace("'", "''")
-    params = {
-        "$select": "id,categories",
-        "$filter": f"categories/any(c:c eq '{escaped}')",
-        "$top": 100,
-    }
+    # Alle Seiten laden via _fetch_inbox_mails_by_lena_category (folgt @odata.nextLink, HBE-1614)
+    try:
+        raw = _fetch_inbox_mails_by_lena_category(headers, req.category)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Graph API Fehler beim Abrufen: {exc}") from exc
 
-    resp = _rq.get(
-        "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages",
-        headers=headers,
-        params=params,
-        timeout=30,
-    )
-    if resp.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Graph API Fehler beim Abrufen: HTTP {resp.status_code} — {resp.text[:300]}",
-        )
-
-    messages = resp.json().get("value", [])
+    messages = raw
     archive_folder_id = _resolve_folder_id("archive", headers)
 
     archived_ids: List[str] = []
