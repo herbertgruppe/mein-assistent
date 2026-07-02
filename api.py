@@ -1294,6 +1294,8 @@ def plaud_cancel(
 
 # Reuse _PLAUD_DB_PATH defined above — same env var, same default path
 PLAUD_STATE_DB = _PLAUD_DB_PATH
+# protocols.db path — used to resolve review_link for plaud recordings (HBE-1603)
+_PROTOCOLS_DB_PATH = str(_BASE_DIR / "data" / "protocols.db")
 
 
 class PlaudRecordingStatus(BaseModel):
@@ -1324,7 +1326,10 @@ def list_plaud_recordings(
     limit: int = 100,
     _key: str = Security(verify_api_key),
 ):
-    """Liste aller Plaud-Aufnahmen mit aktuellem Tracking-Status (HBE-1527)."""
+    """Liste aller Plaud-Aufnahmen mit aktuellem Tracking-Status (HBE-1527).
+
+    Ergaenzt review_link live aus protocols.db wenn in state.db noch nicht gesetzt (HBE-1603).
+    """
     import sqlite3 as _sqlite3
     if not Path(PLAUD_STATE_DB).exists():
         return PlaudRecordingsResponse(recordings=[], total=0)
@@ -1344,7 +1349,7 @@ def list_plaud_recordings(
         query += " ORDER BY start_at DESC LIMIT ?"
         params.append(limit)
         rows = conn.execute(query, params).fetchall()
-        recordings = [PlaudRecordingStatus(**dict(r)) for r in rows]
+        recordings_raw = [dict(r) for r in rows]
         # Count reflects active filter so callers get consistent total vs. recordings length
         count_query = "SELECT COUNT(*) FROM plaud_processed_recordings"
         count_params: list = []
@@ -1354,6 +1359,32 @@ def list_plaud_recordings(
         total = conn.execute(count_query, count_params).fetchone()[0]
     finally:
         conn.close()
+
+    # HBE-1603: Ergaenze review_link aus protocols.db fuer Eintraege wo er noch nicht gesetzt ist
+    recordings_needing_link = [
+        r["recording_id"] for r in recordings_raw if not r.get("review_link")
+    ]
+    if recordings_needing_link and Path(_PROTOCOLS_DB_PATH).exists():
+        try:
+            pconn = _sqlite3.connect(f"file:{_PROTOCOLS_DB_PATH}?mode=ro", uri=True)
+            pconn.row_factory = _sqlite3.Row
+            try:
+                placeholders = ",".join("?" * len(recordings_needing_link))
+                proto_rows = pconn.execute(
+                    f"SELECT recording_id, reviewer_token FROM protocols WHERE recording_id IN ({placeholders})",
+                    recordings_needing_link,
+                ).fetchall()
+                token_map = {row["recording_id"]: row["reviewer_token"] for row in proto_rows}
+            finally:
+                pconn.close()
+            for r in recordings_raw:
+                if not r.get("review_link") and r["recording_id"] in token_map:
+                    token = token_map[r["recording_id"]]
+                    r["review_link"] = f"https://mein-assistent.herbertgruppe.com/review/{token}"
+        except Exception as _exc:
+            logger.warning("[plaud/recordings] protocols.db join fehlgeschlagen: %s", _exc)
+
+    recordings = [PlaudRecordingStatus(**r) for r in recordings_raw]
     return PlaudRecordingsResponse(recordings=recordings, total=total)
 
 
