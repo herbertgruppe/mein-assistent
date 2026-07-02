@@ -415,12 +415,20 @@ def _tg_agent_db(cfg: _TgAgentCfg):
 # Backward-compat wrappers so existing code and tests can still use the old names.
 def _telegram_db():
     """Backward-compat wrapper — use _tg_agent_db(_lena_cfg) directly for new code."""
-    return _tg_agent_db(_TELEGRAM_AGENTS["lena"])
+    if _lena_cfg is None:
+        raise RuntimeError(
+            "Telegram agent 'lena' not configured — set TELEGRAM_BOT_TOKEN + TELEGRAM_WEBHOOK_SECRET env vars"
+        )
+    return _tg_agent_db(_lena_cfg)
 
 
 def _telegram_mara_db():
     """Backward-compat wrapper — use _tg_agent_db(_mara_cfg) directly for new code."""
-    return _tg_agent_db(_TELEGRAM_AGENTS["mara"])
+    if _mara_cfg is None:
+        raise RuntimeError(
+            "Telegram agent 'mara' not configured — set TELEGRAM_MARA_BOT_TOKEN + TELEGRAM_MARA_WEBHOOK_SECRET env vars"
+        )
+    return _tg_agent_db(_mara_cfg)
 
 
 def _tg_agent_send(
@@ -749,11 +757,19 @@ def _pc_create_tg_issue(
 
 # Backward-compat wrappers (existing code/tests call these names directly)
 def _pc_create_issue(chat_id: str, message_id: int, username: str, text: str) -> Optional[str]:
-    return _pc_create_tg_issue(_TELEGRAM_AGENTS["lena"], chat_id, message_id, username, text)
+    if _lena_cfg is None:
+        raise RuntimeError(
+            "Telegram agent 'lena' not configured — set TELEGRAM_BOT_TOKEN + TELEGRAM_WEBHOOK_SECRET env vars"
+        )
+    return _pc_create_tg_issue(_lena_cfg, chat_id, message_id, username, text)
 
 
 def _pc_create_mara_issue(chat_id: str, message_id: int, username: str, text: str) -> Optional[str]:
-    return _pc_create_tg_issue(_TELEGRAM_AGENTS["mara"], chat_id, message_id, username, text)
+    if _mara_cfg is None:
+        raise RuntimeError(
+            "Telegram agent 'mara' not configured — set TELEGRAM_MARA_BOT_TOKEN + TELEGRAM_MARA_WEBHOOK_SECRET env vars"
+        )
+    return _pc_create_tg_issue(_mara_cfg, chat_id, message_id, username, text)
 
 
 def _poll_tg_agent_replies(cfg: _TgAgentCfg) -> None:

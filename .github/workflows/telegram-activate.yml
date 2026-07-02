@@ -74,10 +74,18 @@ jobs:
           TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
+          PAYLOAD=$(python3 -c "
+import json, os
+print(json.dumps({
+    'url': 'https://mein-assistent.herbertgruppe.com/api/telegram/lena/webhook',
+    'secret_token': os.environ['TELEGRAM_WEBHOOK_SECRET'],
+    'allowed_updates': ['message', 'callback_query'],
+}))
+")
           RESPONSE=$(curl -s -X POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
             -H "Content-Type: application/json" \
-            -d '{"url":"https://mein-assistent.herbertgruppe.com/api/telegram/lena/webhook","secret_token":"'"${TELEGRAM_WEBHOOK_SECRET}"'","allowed_updates":["message","callback_query"]}')
+            -d "$PAYLOAD")
           echo "setWebhook (Lena) response: $RESPONSE"
           OK=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ok','false'))")
           if [ "$OK" != "True" ]; then
@@ -92,10 +100,18 @@ jobs:
           TELEGRAM_MARA_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_MARA_WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
+          PAYLOAD=$(python3 -c "
+import json, os
+print(json.dumps({
+    'url': 'https://mein-assistent.herbertgruppe.com/api/telegram/mara/webhook',
+    'secret_token': os.environ['TELEGRAM_MARA_WEBHOOK_SECRET'],
+    'allowed_updates': ['message', 'callback_query'],
+}))
+")
           RESPONSE=$(curl -s -X POST \
             "https://api.telegram.org/bot${TELEGRAM_MARA_BOT_TOKEN}/setWebhook" \
             -H "Content-Type: application/json" \
-            -d '{"url":"https://mein-assistent.herbertgruppe.com/api/telegram/mara/webhook","secret_token":"'"${TELEGRAM_MARA_WEBHOOK_SECRET}"'","allowed_updates":["message","callback_query"]}')
+            -d "$PAYLOAD")
           echo "setWebhook (Mara) response: $RESPONSE"
           OK=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ok','false'))")
           if [ "$OK" != "True" ]; then
