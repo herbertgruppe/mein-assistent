@@ -1,4 +1,4 @@
-﻿"""
+"""
 FastAPI REST-Endpunkt für den Meeting-Protokoll-Workflow der Herbert Gruppe.
 
 Wird vom Cowork-Skill `meeting-protokoll` aufgerufen, sobald Sven ein Protokoll
@@ -1087,13 +1087,8 @@ def _strip_obsidian_syntax(md: str) -> str:
 _PLAUD_CLIENT_ID = "client_f9e0b214-c11f-434b-8b95-c4497d1feb81"
 _PLAUD_TOKEN_URL = "https://platform.plaud.ai/developer/api/oauth/third-party/access-token"
 _PLAUD_REFRESH_URL = "https://platform.plaud.ai/developer/api/oauth/third-party/access-token/refresh"
-_PLAUD_AUTH_URL = "https://web.plaud.ai/platform/oauth"
-_PLAUD_SCOPES = "profile,files-all,file-sources,file-notes,file-audio"
 _PLAUD_HOME = Path(os.getenv("PLAUD_HOME", "/opt/mein-assistent/data/.plaud"))
 _PLAUD_TOKEN_FILE = _PLAUD_HOME / "tokens.json"
-_PLAUD_REDIRECT_URI = os.getenv("PUBLIC_BASE_URL", "https://mein-assistent.herbertgruppe.com") + "/plaud/callback"
-# OAuth state store (in-memory, single-server, short-lived)
-_plaud_oauth_states: dict = {}  # state -> created_at timestamp
 
 
 def _read_plaud_tokens() -> dict:
@@ -1171,71 +1166,36 @@ def plaud_auth_refresh(_key: str = Security(verify_api_key)):
     return {"ok": True, "expires_at": new_tokens.get("expires_at")}
 
 
+@app.post("/plaud/auth/upload-tokens")
+def plaud_upload_tokens(
+    payload: dict,
+    _key: str = Security(verify_api_key),
+):
+    """Upload Plaud tokens from local plaud login. Expects the full tokens.json content."""
+    import time as _time_auth
+    required = {"access_token", "refresh_token", "token_type"}
+    missing = required - set(payload.keys())
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Fehlende Felder: {missing}")
+    # Normalize expires_at to milliseconds if needed
+    if "expires_at" not in payload and "expires_in" in payload:
+        payload["expires_at"] = int((_time_auth.time() + payload["expires_in"]) * 1000)
+    elif "expires_at" in payload and payload["expires_at"] < 1e12:
+        # Looks like seconds, convert to ms
+        payload["expires_at"] = int(payload["expires_at"] * 1000)
+    _write_plaud_tokens(payload)
+    return {"ok": True, "expires_at": payload.get("expires_at")}
+
+
 @app.get("/plaud/auth/start")
 def plaud_auth_start(_key: str = Security(verify_api_key)):
-    """Generate Plaud OAuth authorization URL. User opens this URL to re-authenticate."""
-    import secrets as _sec
-    import time as _time_auth
-    from urllib.parse import urlencode
-    state = _sec.token_urlsafe(16)
-    _plaud_oauth_states[state] = _time_auth.time()
-    # Clean up states older than 10 minutes
-    old = [s for s, t in list(_plaud_oauth_states.items()) if _time_auth.time() - t > 600]
-    for s in old:
-        del _plaud_oauth_states[s]
-    params = {
-        "client_id": _PLAUD_CLIENT_ID,
-        "redirect_uri": _PLAUD_REDIRECT_URI,
-        "response_type": "code",
-        "scope": _PLAUD_SCOPES,
-        "state": state,
-    }
-    auth_url = f"{_PLAUD_AUTH_URL}?{urlencode(params)}"
-    return {"auth_url": auth_url, "state": state}
+    raise HTTPException(status_code=410, detail="OAuth-Flow nicht verfügbar. Bitte Tokens lokal generieren und via /plaud/auth/upload-tokens hochladen.")
 
 
 @app.get("/plaud/callback")
 def plaud_oauth_callback(code: str = "", state: str = "", error: str = ""):
-    """Public OAuth callback endpoint. Plaud redirects here after user authorizes."""
     from fastapi.responses import HTMLResponse
-    import base64 as _b64
-    import time as _time_auth
-    if error:
-        return HTMLResponse(f"<h2>&#10060; Plaud Auth fehlgeschlagen</h2><p>{error}</p>", status_code=400)
-    if not code:
-        return HTMLResponse("<h2>&#10060; Kein Auth-Code erhalten</h2>", status_code=400)
-    if state not in _plaud_oauth_states:
-        return HTMLResponse("<h2>&#10060; Ungültiger State-Parameter (CSRF-Schutz)</h2>", status_code=400)
-    del _plaud_oauth_states[state]
-    # Exchange code for tokens
-    basic = _b64.b64encode(f"{_PLAUD_CLIENT_ID}:".encode()).decode()
-    resp = _http.post(
-        _PLAUD_TOKEN_URL,
-        headers={"Authorization": f"Basic {basic}", "Content-Type": "application/x-www-form-urlencoded"},
-        data={
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": _PLAUD_REDIRECT_URI,
-        },
-        timeout=15,
-    )
-    if resp.status_code != 200:
-        return HTMLResponse(
-            f"<h2>&#10060; Token-Austausch fehlgeschlagen</h2><p>{resp.status_code}: {resp.text[:300]}</p>",
-            status_code=502,
-        )
-    new_tokens = resp.json()
-    if "expires_in" in new_tokens and "expires_at" not in new_tokens:
-        new_tokens["expires_at"] = int((_time_auth.time() + new_tokens["expires_in"]) * 1000)
-    _write_plaud_tokens(new_tokens)
-    return HTMLResponse("""
-    <html><head><title>Plaud Authentifizierung</title></head>
-    <body style="font-family:sans-serif;text-align:center;padding:60px">
-    <h2>&#9989; Plaud erfolgreich authentifiziert</h2>
-    <p>Du kannst dieses Tab schlie&szlig;en und zu mein-assistent zur&uuml;ckkehren.</p>
-    <script>setTimeout(() => window.close(), 3000)</script>
-    </body></html>
-    """)
+    return HTMLResponse("<h2>OAuth-Flow deaktiviert</h2><p>Bitte Tokens lokal via <code>plaud login</code> generieren und in mein-assistent hochladen.</p>", status_code=410)
 
 
 # ---------------------------------------------------------------------------
