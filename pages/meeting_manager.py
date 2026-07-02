@@ -1398,7 +1398,7 @@ def render_transcripts_tab():
     with st.expander("📋 Plaud-Aufnahmen Übersicht", expanded=True):
         import requests as _req_track
         import os as _os_track
-        _api_url = _os_track.getenv("MEIN_ASSISTENT_INTERNAL_URL", "http://localhost:8001")
+        _api_url = _os_track.getenv("MEIN_ASSISTENT_INTERNAL_URL", "http://api:8502")
         _api_key = _os_track.getenv("API_SECRET_KEY", "")
         try:
             _resp = _req_track.get(
