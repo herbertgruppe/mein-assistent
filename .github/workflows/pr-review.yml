@@ -16,7 +16,7 @@ jobs:
       (github.event_name == 'pull_request_review' &&
        github.event.review.state == 'approved' &&
        (github.event.review.user.login == 'svenherbert' ||
-        github.event.review.user.login == 'herbert-consult-ceo[bot]'))
+    github.event.review.user.login == 'herbert-consult-ceo[bot]'))
     steps:
       - name: Create or update Paperclip review issue
         env:
