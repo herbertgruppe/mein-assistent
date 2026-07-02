@@ -1427,18 +1427,37 @@ def render_transcripts_tab():
                     _rt_exp = (_auth.get("refresh_token_expires_at", "") or "")[:10] or "?"
                     st.caption(f"🔑 Plaud: ✅ aktiv noch {_exp_min} Min · Refresh-Token bis {_rt_exp}")
 
-                if st.button("🔑 Plaud neu anmelden", key="plaud_reauth"):
-                    _start_resp = _req_track.get(
-                        f"{_api_url}/plaud/auth/start",
-                        headers={"X-API-Key": _api_key},
-                        timeout=5,
-                    )
-                    if _start_resp.status_code == 200:
-                        _auth_url = _start_resp.json().get("auth_url", "")
-                        st.markdown(f"**[👉 Hier klicken um Plaud zu autorisieren]({_auth_url})**")
-                        st.info("Nach der Autorisierung kannst du dieses Fenster schließen und die Seite neu laden.")
-                    else:
-                        st.error("Konnte Auth-URL nicht generieren.")
+        # Re-auth: Token-Upload (plaud login lokal, dann JSON hier einfügen)
+        with st.expander("🔑 Plaud Tokens erneuern", expanded=False):
+            st.markdown("""
+**So gehst du vor:**
+1. Öffne **CMD oder PowerShell** auf deinem Windows-Rechner
+2. Führe aus: `plaud login`
+3. Autorisiere im Browser
+4. Öffne `%USERPROFILE%\\.plaud\\tokens.json` und kopiere den gesamten Inhalt
+5. Füge ihn unten ein und klicke **Speichern**
+""")
+            _token_json = st.text_area("tokens.json Inhalt", height=120, key="plaud_token_upload", placeholder='{"access_token": "...", "refresh_token": "...", ...}')
+            if st.button("💾 Tokens speichern", key="plaud_token_save"):
+                if _token_json.strip():
+                    try:
+                        import json as _json_mod
+                        _parsed = _json_mod.loads(_token_json)
+                        _up_resp = _req_track.post(
+                            f"{_api_url}/plaud/auth/upload-tokens",
+                            headers={"X-API-Key": _api_key, "Content-Type": "application/json"},
+                            json=_parsed,
+                            timeout=10,
+                        )
+                        if _up_resp.status_code == 200:
+                            st.success("✅ Tokens gespeichert — Plaud ist wieder authentifiziert.")
+                            st.rerun()
+                        else:
+                            st.error(f"Fehler: {_up_resp.status_code} {_up_resp.text[:200]}")
+                    except Exception as _ex:
+                        st.error(f"Ungültiges JSON: {_ex}")
+                else:
+                    st.warning("Bitte tokens.json Inhalt einfügen.")
         except Exception as _e_auth:
             st.caption(f"Plaud Auth-Status nicht verfügbar: {_e_auth}")
 
