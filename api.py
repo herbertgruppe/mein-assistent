@@ -1082,7 +1082,7 @@ def _strip_obsidian_syntax(md: str) -> str:
 # ---------------------------------------------------------------------------
 # Plaud-Poller: state.db path (shared with plaud_poller.py)
 # ---------------------------------------------------------------------------
-_PLAUD_DB_PATH = os.getenv("PLAUD_DB_PATH", "/var/lib/plaud/state.db")
+_PLAUD_DB_PATH = os.getenv("PLAUD_DB_PATH", "/var/lib/plaud-poller/state.db")
 
 
 # ---------------------------------------------------------------------------
