@@ -380,6 +380,51 @@ def _tg_alert(text: str) -> None:
         logger.error("Telegram alert failed: %s", exc)
 
 
+# ── Plaud Auth: Auto-Refresh ───────────────────────────────────────────────────
+def _auto_refresh_token(home_dir: str) -> None:
+    """Refresh Plaud access_token if it expires within the next hour."""
+    import base64 as _b64
+    token_file = Path(home_dir) / ".plaud" / "tokens.json"
+    if not token_file.exists():
+        # Also try home_dir directly (when home_dir is the .plaud dir itself)
+        token_file_alt = Path(home_dir) / "tokens.json"
+        if token_file_alt.exists():
+            token_file = token_file_alt
+        else:
+            return
+    try:
+        tokens = json.loads(token_file.read_text())
+        expires_at_ms = tokens.get("expires_at", 0)
+        now_ms = time.time() * 1000
+        # Refresh if token expires within 60 minutes
+        if expires_at_ms - now_ms > 3_600_000:
+            return
+        refresh_token = tokens.get("refresh_token")
+        if not refresh_token:
+            logger.warning("[plaud_auth] Kein Refresh-Token — manueller Login nötig")
+            return
+        logger.info("[plaud_auth] Access-Token läuft ab, refreshe...")
+        basic = _b64.b64encode(b"client_f9e0b214-c11f-434b-8b95-c4497d1feb81:").decode()
+        resp = requests.post(
+            "https://platform.plaud.ai/developer/api/oauth/third-party/access-token/refresh",
+            headers={"Authorization": f"Basic {basic}", "Content-Type": "application/x-www-form-urlencoded"},
+            data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            new_tokens = resp.json()
+            if not new_tokens.get("refresh_token"):
+                new_tokens["refresh_token"] = refresh_token
+            if "expires_in" in new_tokens and "expires_at" not in new_tokens:
+                new_tokens["expires_at"] = int((time.time() + new_tokens["expires_in"]) * 1000)
+            token_file.write_text(json.dumps(new_tokens, indent=2))
+            logger.info("[plaud_auth] Token erfolgreich aktualisiert")
+        else:
+            logger.error("[plaud_auth] Refresh fehlgeschlagen: %s %s", resp.status_code, resp.text[:200])
+    except Exception as exc:
+        logger.error("[plaud_auth] Refresh-Fehler: %s", exc)
+
+
 # ── Poll one account ───────────────────────────────────────────────────────────
 def _poll_account(
     home_dir: str,
@@ -396,6 +441,7 @@ def _poll_account(
     errors: List[str] = []
 
     logger.info("Polling account home=%s", home_dir)
+    _auto_refresh_token(home_dir)
     try:
         recent_out = _run_plaud(["recent", "--days", str(RECENT_DAYS)], home_dir)
     except Exception as exc:
