@@ -1433,9 +1433,13 @@ def render_transcripts_tab():
                             "Status": _status_map.get(r.get("tracking_status"), r.get("tracking_status") or "?"),
                             "Poller": _poller_map.get(r.get("poller_status"), r.get("poller_status") or "OK"),
                             "Notiz": r.get("tracking_notes") or "",
+                            "Review": r.get("review_link") or "",
                         })
                     st.dataframe(
                         _pd.DataFrame(_rows),
+                        column_config={
+                            "Review": st.column_config.LinkColumn("Review", display_text="🔗 Öffnen"),
+                        },
                         use_container_width=True,
                         hide_index=True,
                     )

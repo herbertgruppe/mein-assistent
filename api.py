@@ -1186,6 +1186,7 @@ class PlaudRecordingStatus(BaseModel):
     tracking_status: Optional[str]
     tracking_notes: Optional[str]
     recording_title: Optional[str] = None
+    review_link: Optional[str] = None
 
 
 class PlaudRecordingPatch(BaseModel):
@@ -1213,7 +1214,8 @@ def list_plaud_recordings(
     try:
         query = """
             SELECT recording_id, start_at, processed_at, issue_identifier,
-                   status as poller_status, tracking_status, tracking_notes, recording_title
+                   status as poller_status, tracking_status, tracking_notes, recording_title,
+                   review_link
             FROM plaud_processed_recordings
         """
         params = []
