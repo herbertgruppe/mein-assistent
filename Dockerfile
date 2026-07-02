@@ -13,6 +13,9 @@ RUN apt-get update && apt-get install -y \
     libffi-dev \
     libcairo2 \
     libglib2.0-0 \
+    openssl \
+    libssl3t64 \
+    libssh2-1t64 \
     && rm -rf /var/lib/apt/lists/*
 
 # Python-Abhängigkeiten zuerst (Layer-Caching)
