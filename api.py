@@ -29,12 +29,16 @@ Lokaler Start:
 """
 import base64
 import hmac
+import json
 import logging
 import os
 import re
 import sqlite3
 import subprocess
 import tempfile
+import threading
+import time as _time
+from collections import defaultdict, deque
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -209,6 +213,49 @@ if os.getenv("TELEGRAM_MARA_BOT_TOKEN") and not os.getenv("PAPERCLIP_MARA_AGENT_
 
 _TELEGRAM_DB_PATH      = Path(__file__).resolve().parent / "data" / "telegram.db"
 _TELEGRAM_MARA_DB_PATH = Path(__file__).resolve().parent / "data" / "telegram_mara.db"
+
+# ── Per-endpoint Telegram rate limiter (HBE-1212) ─────────────────────────────
+# Limits both /api/lena/telegram/send and /api/mara/telegram/send independently.
+# On breach: returns HTTP 429 + alerts Sven once per flood event.
+_TG_RATE_LIMIT = int(os.getenv("TELEGRAM_SEND_RATE_LIMIT", "10"))  # max calls per window
+_TG_RATE_WINDOW = 60  # seconds
+_TG_RATE_LOCK: threading.Lock = threading.Lock()
+_TG_RATE_BUCKETS: dict = defaultdict(deque)
+_TG_RATE_LAST_ALERT: dict = {}  # endpoint -> monotonic timestamp of last alert
+
+
+def _tg_rate_check(endpoint: str) -> bool:
+    """
+    Returns True if this call is within rate limit, False if limit exceeded.
+    Automatically fires a Sven alert on the first breach per flood event (cooldown 60 s).
+    """
+    now = _time.monotonic()
+    should_alert = False
+    with _TG_RATE_LOCK:
+        bucket = _TG_RATE_BUCKETS[endpoint]
+        while bucket and now - bucket[0] > _TG_RATE_WINDOW:
+            bucket.popleft()
+        if len(bucket) >= _TG_RATE_LIMIT:
+            last_alert = _TG_RATE_LAST_ALERT.get(endpoint, 0.0)
+            if now - last_alert > _TG_RATE_WINDOW:
+                _TG_RATE_LAST_ALERT[endpoint] = now
+                should_alert = bool(_TG_ADMIN_CHAT_ID)
+            # return value decided inside lock, but I/O fires outside
+            result = False
+        else:
+            bucket.append(now)
+            result = True
+    if should_alert:
+        try:
+            _tg_send_message(
+                _TG_ADMIN_CHAT_ID,
+                f"⚠️ Telegram-Flood erkannt auf /{endpoint}/telegram/send"
+                f" (>{_TG_RATE_LIMIT} Calls/Min). Agent pausiert oder Loop?"
+                " Sven-Aktion erforderlich.",
+            )
+        except Exception:
+            pass
+    return result
 
 
 @contextmanager
@@ -455,6 +502,122 @@ def _pc_add_comment_to_issue(issue_id: str, username: str, text: str) -> bool:
         return True
     logger.warning("[telegram] comment post failed for %s: %s %s", issue_id, resp.status_code, resp.text[:200])
     return False
+
+
+# ── Triage v2 – Telegram Trigger Detection (HBE-1321) ─────────────────────
+
+_ACTION_RUN_PATTERN = re.compile(
+    r"(?i)^\s*lena[,\s]+(ablegen|weiterleiten|tun|antworten|warten|recherchieren)\b"
+)
+
+_ACTION_RUN_CAT_MAP = {
+    "ablegen":       "Lena: Ablegen",
+    "weiterleiten":  "Lena: Weiterleiten",
+    "tun":           "Lena: Tun",
+    "antworten":     "Lena: Antworten",
+    "warten":        "Lena: Warten",
+    "recherchieren": "Lena: Recherchieren",
+}
+
+
+def _detect_action_run_category(text: str) -> Optional[str]:
+    """
+    Erkennt Triage-v2-Trigger ('Lena, Ablegen', 'weiterleiten starten', etc.).
+    Gibt den Kategorie-Key (z.B. 'ablegen') zurück oder None.
+    """
+    m = _ACTION_RUN_PATTERN.search(text)
+    return m.group(1).lower() if m else None
+
+
+def _pc_create_action_run_issue(
+    chat_id: str, message_id: int, username: str, category: str
+) -> Optional[str]:
+    """
+    Erstellt ein Paperclip-Action-Run-Issue fuer 'Lena, [Kategorie]'-Trigger (HBE-1321).
+    Laed die Mail-Liste per Graph API und fuegt sie als Tabelle in die Beschreibung ein.
+    Gibt die Issue-ID oder None zurueck.
+    """
+    if not (_PC_API_URL and _PC_API_KEY):
+        return None
+
+    lena_cat = _ACTION_RUN_CAT_MAP.get(category.lower(), f"Lena: {category.capitalize()}")
+    cat_display = category.capitalize()
+
+    mail_table = ""
+    mail_count = 0
+    try:
+        tool = _get_outlook_tool()
+        if tool.is_authenticated():
+            import requests as _rq
+            escaped = lena_cat.replace("'", "''")
+            resp = _rq.get(
+                "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
+                f"?$filter=categories/any(c:c eq '{escaped}')"
+                "&$select=id,subject,from,receivedDateTime"
+                "&$top=50&$orderby=receivedDateTime asc",
+                headers={"Authorization": f"Bearer {tool.access_token}"},
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                mails = resp.json().get("value", [])
+                mail_count = len(mails)
+                if mails:
+                    rows = []
+                    for i, m in enumerate(mails[:20], 1):
+                        sender = (m.get("from") or {}).get("emailAddress", {}) or {}
+                        rows.append(
+                            f"| {i} | {(m.get('subject') or '')[:60]} "
+                            f"| {sender.get('address', '')} "
+                            f"| {(m.get('receivedDateTime') or '')[:10]} |"
+                        )
+                    mail_table = (
+                        f"\n\n## Mails ({mail_count})\n\n"
+                        "| # | Betreff | Absender | Datum |\n"
+                        "|---|---|---|---|\n"
+                        + "\n".join(rows)
+                    )
+                    if mail_count > 20:
+                        mail_table += f"\n_(+{mail_count - 20} weitere)_"
+    except Exception:
+        pass
+
+    count_label = f" ({mail_count} Mails)" if mail_count else ""
+    title = f"Action-Run: {cat_display}{count_label}"
+    description = (
+        f"Sven-Trigger per Telegram (@{username}): **{cat_display}**\n\n"
+        f"Kategorie: `{lena_cat}`\n"
+        "Lena arbeitet die Mails dieser Kategorie sequenziell ab."
+        f"{mail_table}\n\n---\n"
+        f"TELEGRAM_CHAT_ID: {chat_id}\n"
+        f"TELEGRAM_MESSAGE_ID: {message_id}\n"
+    )
+    try:
+        resp = _http.post(
+            f"{_PC_API_URL}/api/companies/{_PC_COMPANY_ID}/issues",
+            json={
+                "title": title,
+                "description": description,
+                "assigneeAgentId": _PC_LENA_AGENT_ID,
+                "priority": "high",
+            },
+            headers={"Authorization": f"Bearer {_PC_API_KEY}"},
+            timeout=15,
+        )
+    except Exception as exc:
+        logger.warning("[telegram/action-run] Paperclip request error: %s", type(exc).__name__)
+        return None
+    if resp.status_code in (200, 201):
+        issue_id = resp.json().get("id")
+        logger.info(
+            "[telegram/action-run] created issue %s for category=%s mail_count=%d",
+            issue_id, category, mail_count,
+        )
+        return issue_id
+    logger.warning(
+        "[telegram/action-run] issue creation failed: %s %s",
+        resp.status_code, resp.text[:300],
+    )
+    return None
 
 
 def _pc_create_issue(chat_id: str, message_id: int, username: str, text: str) -> Optional[str]:
@@ -918,9 +1081,127 @@ def _strip_obsidian_syntax(md: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Plaud Auth Management (Stage 1+2)
+# ---------------------------------------------------------------------------
+
+_PLAUD_CLIENT_ID = "client_f9e0b214-c11f-434b-8b95-c4497d1feb81"
+_PLAUD_TOKEN_URL = "https://platform.plaud.ai/developer/api/oauth/third-party/access-token"
+_PLAUD_REFRESH_URL = "https://platform.plaud.ai/developer/api/oauth/third-party/access-token/refresh"
+_PLAUD_HOME = Path(os.getenv("PLAUD_HOME", "/opt/mein-assistent/data/.plaud"))
+_PLAUD_TOKEN_FILE = _PLAUD_HOME / "tokens.json"
+
+
+def _read_plaud_tokens() -> dict:
+    """Read tokens.json from PLAUD_HOME. Returns None if missing or invalid."""
+    try:
+        if _PLAUD_TOKEN_FILE.exists():
+            return json.loads(_PLAUD_TOKEN_FILE.read_text())
+    except Exception:
+        pass
+    return None
+
+
+def _write_plaud_tokens(tokens: dict) -> None:
+    """Write tokens to PLAUD_HOME/tokens.json."""
+    _PLAUD_HOME.mkdir(parents=True, exist_ok=True)
+    _PLAUD_TOKEN_FILE.write_text(json.dumps(tokens, indent=2))
+
+
+@app.get("/plaud/auth/status")
+def plaud_auth_status(_key: str = Security(verify_api_key)):
+    """Token status: expiry, validity, whether refresh is possible."""
+    tokens = _read_plaud_tokens()
+    if not tokens:
+        return {"authenticated": False, "has_refresh_token": False}
+    import time as _time_auth
+    now_ms = _time_auth.time() * 1000
+    expires_at_ms = tokens.get("expires_at", 0)
+    # Decode refresh token expiry from JWT payload
+    refresh_exp = None
+    try:
+        import base64 as _b64
+        rt = tokens.get("refresh_token", "")
+        payload = rt.split(".")[1]
+        payload += "=" * (4 - len(payload) % 4)
+        rt_data = json.loads(_b64.urlsafe_b64decode(payload))
+        refresh_exp = rt_data.get("exp")  # seconds
+    except Exception:
+        pass
+    return {
+        "authenticated": bool(tokens.get("access_token")),
+        "access_token_expires_at": datetime.fromtimestamp(expires_at_ms / 1000).isoformat() if expires_at_ms else None,
+        "access_token_expired": expires_at_ms < now_ms,
+        "access_token_expires_in_minutes": int((expires_at_ms - now_ms) / 60000) if expires_at_ms > now_ms else 0,
+        "refresh_token_expires_at": datetime.fromtimestamp(refresh_exp).isoformat() if refresh_exp else None,
+        "refresh_token_expired": (refresh_exp * 1000 < now_ms) if refresh_exp else True,
+        "has_refresh_token": bool(tokens.get("refresh_token")),
+    }
+
+
+@app.post("/plaud/auth/refresh")
+def plaud_auth_refresh(_key: str = Security(verify_api_key)):
+    """Use refresh_token to get a new access_token."""
+    import base64 as _b64
+    import time as _time_auth
+    tokens = _read_plaud_tokens()
+    if not tokens or not tokens.get("refresh_token"):
+        raise HTTPException(status_code=400, detail="Kein Refresh-Token vorhanden. Bitte neu anmelden.")
+    basic = _b64.b64encode(f"{_PLAUD_CLIENT_ID}:".encode()).decode()
+    resp = _http.post(
+        _PLAUD_REFRESH_URL,
+        headers={"Authorization": f"Basic {basic}", "Content-Type": "application/x-www-form-urlencoded"},
+        data={"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"]},
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Plaud Refresh fehlgeschlagen: {resp.status_code} {resp.text[:200]}")
+    new_tokens = resp.json()
+    # Preserve refresh_token if not returned
+    if not new_tokens.get("refresh_token"):
+        new_tokens["refresh_token"] = tokens["refresh_token"]
+    # Add expires_at in ms if not present
+    if "expires_in" in new_tokens and "expires_at" not in new_tokens:
+        new_tokens["expires_at"] = int((_time_auth.time() + new_tokens["expires_in"]) * 1000)
+    _write_plaud_tokens(new_tokens)
+    return {"ok": True, "expires_at": new_tokens.get("expires_at")}
+
+
+@app.post("/plaud/auth/upload-tokens")
+def plaud_upload_tokens(
+    payload: dict,
+    _key: str = Security(verify_api_key),
+):
+    """Upload Plaud tokens from local plaud login. Expects the full tokens.json content."""
+    import time as _time_auth
+    required = {"access_token", "refresh_token", "token_type"}
+    missing = required - set(payload.keys())
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Fehlende Felder: {missing}")
+    # Normalize expires_at to milliseconds if needed
+    if "expires_at" not in payload and "expires_in" in payload:
+        payload["expires_at"] = int((_time_auth.time() + payload["expires_in"]) * 1000)
+    elif "expires_at" in payload and payload["expires_at"] < 1e12:
+        # Looks like seconds, convert to ms
+        payload["expires_at"] = int(payload["expires_at"] * 1000)
+    _write_plaud_tokens(payload)
+    return {"ok": True, "expires_at": payload.get("expires_at")}
+
+
+@app.get("/plaud/auth/start")
+def plaud_auth_start(_key: str = Security(verify_api_key)):
+    raise HTTPException(status_code=410, detail="OAuth-Flow nicht verfügbar. Bitte Tokens lokal generieren und via /plaud/auth/upload-tokens hochladen.")
+
+
+@app.get("/plaud/callback")
+def plaud_oauth_callback(code: str = "", state: str = "", error: str = ""):
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse("<h2>OAuth-Flow deaktiviert</h2><p>Bitte Tokens lokal via <code>plaud login</code> generieren und in mein-assistent hochladen.</p>", status_code=410)
+
+
+# ---------------------------------------------------------------------------
 # Plaud-Poller: state.db path (shared with plaud_poller.py)
 # ---------------------------------------------------------------------------
-_PLAUD_DB_PATH = os.getenv("PLAUD_DB_PATH", "/var/lib/plaud/state.db")
+_PLAUD_DB_PATH = os.getenv("PLAUD_DB_PATH", "/var/lib/plaud-poller/state.db")
 
 
 # ---------------------------------------------------------------------------
@@ -1007,6 +1288,274 @@ def plaud_cancel(
         issue_ref,
     )
     return {"status": "ok", "recording_id": req.recording_id, "cancelled_as": issue_ref}
+
+
+# ── Plaud Recording Tracking (HBE-1527) ──────────────────────────────────────
+
+# Reuse _PLAUD_DB_PATH defined above — same env var, same default path
+PLAUD_STATE_DB = _PLAUD_DB_PATH
+# protocols.db path — used to resolve review_link for plaud recordings (HBE-1603)
+_PROTOCOLS_DB_PATH = str(_BASE_DIR / "data" / "protocols.db")
+# protocols.status → tracking_status mapping (module-level constant, not per-request)
+_PROTO_STATUS_MAP: dict = {
+    "draft":     "review_ready",
+    "in_review": "review_ready",
+    "approved":  "review_ready",   # BackgroundTask kann scheitern; nur finalized = done
+    "finalized": "done",
+    "rejected":  "review_ready",
+}
+
+
+class PlaudRecordingStatus(BaseModel):
+    recording_id: str
+    start_at: Optional[str]
+    processed_at: Optional[str]
+    issue_identifier: Optional[str]
+    poller_status: Optional[str]
+    tracking_status: Optional[str]
+    tracking_notes: Optional[str]
+    recording_title: Optional[str] = None
+    review_link: Optional[str] = None
+
+
+class PlaudRecordingPatch(BaseModel):
+    tracking_status: Optional[str] = None
+    tracking_notes: Optional[str] = None
+
+
+class PlaudRecordingsResponse(BaseModel):
+    recordings: List[PlaudRecordingStatus]
+    total: int
+
+
+@app.get("/api/plaud/recordings", response_model=PlaudRecordingsResponse)
+def list_plaud_recordings(
+    tracking_status: Optional[str] = None,
+    limit: int = 100,
+    _key: str = Security(verify_api_key),
+):
+    """Liste aller Plaud-Aufnahmen mit aktuellem Tracking-Status (HBE-1527).
+
+    Ergaenzt review_link live aus protocols.db wenn in state.db noch nicht gesetzt (HBE-1603).
+    """
+    import sqlite3 as _sqlite3
+    if not Path(PLAUD_STATE_DB).exists():
+        return PlaudRecordingsResponse(recordings=[], total=0)
+    conn = _sqlite3.connect(PLAUD_STATE_DB)
+    conn.row_factory = _sqlite3.Row
+    try:
+        query = """
+            SELECT recording_id, start_at, processed_at, issue_identifier,
+                   status as poller_status, tracking_status, tracking_notes, recording_title,
+                   review_link
+            FROM plaud_processed_recordings
+        """
+        params = []
+        if tracking_status:
+            query += " WHERE tracking_status = ?"
+            params.append(tracking_status)
+        query += " ORDER BY start_at DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
+        recordings_raw = [dict(r) for r in rows]
+        # Count reflects active filter so callers get consistent total vs. recordings length
+        count_query = "SELECT COUNT(*) FROM plaud_processed_recordings"
+        count_params: list = []
+        if tracking_status:
+            count_query += " WHERE tracking_status = ?"
+            count_params.append(tracking_status)
+        total = conn.execute(count_query, count_params).fetchone()[0]
+    finally:
+        conn.close()
+
+    # HBE-1603: Ergaenze review_link + tracking_status aus protocols.db (state.db ist :ro, kein Schreiben moeglich)
+    # Enrichment immer durchfuehren (auch ohne tracking_status-Filter), damit Caller konsistente Werte
+    # erhaelt. tracking_status-Filter betrifft SQL (inkl. COUNT), nicht das post-fetch Enrichment.
+    recordings_needing_proto = [
+        r["recording_id"] for r in recordings_raw
+        if not r.get("review_link") or r.get("tracking_status") in (None, "new", "")
+    ]
+    if recordings_needing_proto and Path(_PROTOCOLS_DB_PATH).exists():
+        try:
+            pconn = _sqlite3.connect(f"file:{_PROTOCOLS_DB_PATH}?mode=ro", uri=True)
+            try:
+                pconn.row_factory = _sqlite3.Row  # inside try so pconn.close() always runs
+                placeholders = ",".join("?" * len(recordings_needing_proto))
+                proto_rows = pconn.execute(
+                    f"SELECT recording_id, reviewer_token, status FROM protocols WHERE recording_id IN ({placeholders})",
+                    recordings_needing_proto,
+                ).fetchall()
+                proto_map = {
+                    row["recording_id"]: {"token": row["reviewer_token"], "status": row["status"]}
+                    for row in proto_rows
+                }
+            finally:
+                pconn.close()
+            for r in recordings_raw:
+                proto = proto_map.get(r["recording_id"])
+                if proto:
+                    # Fix: NULL-Guard fuer reviewer_token (kann NULL sein)
+                    if not r.get("review_link") and proto.get("token"):
+                        r["review_link"] = f"https://mein-assistent.herbertgruppe.com/review/{proto['token']}"
+                    # Fix: approved → review_ready (BackgroundTask kann scheitern, nur finalized = done)
+                    if r.get("tracking_status") in (None, "new", ""):
+                        r["tracking_status"] = _PROTO_STATUS_MAP.get(proto.get("status", ""), "review_ready")
+        except Exception as _exc:
+            logger.warning("[plaud/recordings] protocols.db join fehlgeschlagen: %s", _exc)
+
+    recordings = [PlaudRecordingStatus(**r) for r in recordings_raw]
+    return PlaudRecordingsResponse(recordings=recordings, total=total)
+
+
+@app.patch("/api/plaud/recordings/{recording_id}")
+def patch_plaud_recording(
+    recording_id: str,
+    req: PlaudRecordingPatch,
+    _key: str = Security(verify_api_key),
+):
+    """Tracking-Status oder Notiz einer Plaud-Aufnahme aktualisieren (HBE-1527)."""
+    import sqlite3 as _sqlite3
+    valid_statuses = {None, "new", "speakers_ok", "review_ready", "done", "abandoned"}
+    if req.tracking_status not in valid_statuses:
+        raise HTTPException(status_code=400, detail=f"Ungültiger Status: {req.tracking_status}")
+    if not Path(PLAUD_STATE_DB).exists():
+        raise HTTPException(status_code=503, detail="Plaud state DB nicht verfügbar.")
+    conn = _sqlite3.connect(PLAUD_STATE_DB)
+    try:
+        row = conn.execute(
+            "SELECT recording_id FROM plaud_processed_recordings WHERE recording_id = ?",
+            (recording_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Recording {recording_id} nicht gefunden.")
+        updates = []
+        params = []
+        if req.tracking_status is not None:
+            updates.append("tracking_status = ?")
+            params.append(req.tracking_status)
+        if req.tracking_notes is not None:
+            updates.append("tracking_notes = ?")
+            params.append(req.tracking_notes)
+        if updates:
+            params.append(recording_id)
+            conn.execute(
+                f"UPDATE plaud_processed_recordings SET {', '.join(updates)} WHERE recording_id = ?",
+                params
+            )
+            conn.commit()
+    finally:
+        conn.close()
+    return {"recording_id": recording_id, "updated": True}
+
+
+@app.post("/api/plaud/recordings/{recording_id}/process")
+def trigger_plaud_recording_process(
+    recording_id: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Verarbeitet eine spezifische Plaud-Aufnahme on-demand, unabhängig vom Alter (HBE-1527).
+    Wird genutzt wenn Sprecher-Bestätigung für ältere Aufnahmen vorliegt.
+
+    Side effects:
+    - Erstellt ein Paperclip-Issue für den Mara-Agenten (PAPERCLIP_PROTOKOLL_AGENT_ID)
+    - Setzt status = 'manual_trigger' und issue_identifier in plaud_processed_recordings
+
+    Idempotent: Wenn issue_identifier bereits gesetzt ist, wird kein neues Issue erstellt.
+    Rückgabe: {"status": "already_processed"} wenn bereits verarbeitet,
+              {"status": "triggered"} wenn ein neues Issue erstellt wurde.
+    """
+    import sqlite3 as _sqlite3
+
+    if not Path(PLAUD_STATE_DB).exists():
+        raise HTTPException(status_code=503, detail="Plaud state DB nicht verfügbar.")
+
+    # Single connection for all reads + write to avoid concurrency issues
+    conn = _sqlite3.connect(PLAUD_STATE_DB)
+    conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        row = conn.execute(
+            "SELECT recording_id, issue_identifier, status, recording_title, start_at FROM plaud_processed_recordings WHERE recording_id = ?",
+            (recording_id,)
+        ).fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Recording {recording_id} nicht in DB. Erst via GET /api/plaud/recordings prüfen.")
+
+        existing_issue = row[1]
+        if existing_issue:
+            return {"recording_id": recording_id, "status": "already_processed", "issue_identifier": existing_issue}
+
+        recording_title = row[3] or recording_id[:16]
+        start_at = row[4] or "?"
+    finally:
+        conn.close()
+
+    # Delegate to Mara via Paperclip issue with the recording_id
+    try:
+        mara_agent_id = os.getenv("PAPERCLIP_PROTOKOLL_AGENT_ID", "ed26f194-f0a9-4f70-a52d-6e39be9013e3")
+
+        import requests as _rq_proc
+        pc_url = os.getenv("PAPERCLIP_API_URL", "https://paperclip.herbertgruppe.com")
+        pc_key = os.getenv("PAPERCLIP_API_KEY_MA", "")
+        pc_company = os.getenv("PAPERCLIP_COMPANY_ID_MA", "9df4976b-9ac8-4e8f-a156-c06c7fa40cdc")
+
+        issue_payload = {
+            "title": f"Neue Plaud-Aufnahme (manuell): {recording_title}",
+            "description": (
+                f"Manuelle Verarbeitung angefordert via API.\n\n"
+                f"Plaud Recording-ID: `{recording_id}`\n"
+                f"Aufnahme-Zeitpunkt: {start_at}\n\n"
+                f"Bitte Transkript abrufen (`plaud summary {recording_id}`), "
+                f"Protokoll erstellen und Sven zur Überprüfung schicken."
+            ),
+            "assigneeAgentId": mara_agent_id,
+            "priority": "medium",
+        }
+
+        resp = _rq_proc.post(
+            f"{pc_url}/api/companies/{pc_company}/issues",
+            headers={"Authorization": f"Bearer {pc_key}", "Content-Type": "application/json"},
+            json=issue_payload,
+            timeout=15,
+        )
+
+        if resp.status_code not in (200, 201):
+            raise HTTPException(
+                status_code=502,
+                detail=f"Paperclip Issue konnte nicht erstellt werden: {resp.status_code} — {resp.text[:200]}"
+            )
+
+        new_issue = resp.json()
+        issue_id = new_issue.get("identifier", "?")
+        issue_uuid = new_issue.get("id", "")
+
+        # Update DB: mark as triggered (single connection, WAL already set above)
+        from datetime import datetime as _dt_proc, timezone as _tz_proc
+        now = _dt_proc.now(_tz_proc.utc).isoformat()
+        conn_upd = _sqlite3.connect(PLAUD_STATE_DB)
+        conn_upd.execute("PRAGMA journal_mode=WAL")
+        try:
+            conn_upd.execute(
+                "UPDATE plaud_processed_recordings SET issue_identifier = ?, processed_at = ?, status = 'manual_trigger' WHERE recording_id = ?",
+                (issue_id, now, recording_id)
+            )
+            conn_upd.commit()
+        finally:
+            conn_upd.close()
+
+        return {
+            "recording_id": recording_id,
+            "status": "triggered",
+            "issue_identifier": issue_id,
+            "issue_uuid": issue_uuid,
+            "recording_title": recording_title,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Fehler beim Triggern: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -3067,6 +3616,40 @@ class LenaArchiveByCategoryResponse(BaseModel):
     message_ids: List[str]
 
 
+class LenaClearCategoriesRequest(BaseModel):
+    category: Optional[str] = None  # None = alle Lena:-Kategorien loeschen
+    dry_run: bool = False  # Wenn True: nur Mails zählen, keine PATCH-Aufrufe
+
+
+class LenaClearCategoriesResponse(BaseModel):
+    cleared_count: int
+    message_ids: List[str]
+
+
+class LenaByCategoryMail(BaseModel):
+    message_id: str
+    subject: str
+    sender_email: str
+    sender_name: str
+    received_at: str
+    body_preview: str
+
+
+class LenaByCategoryResponse(BaseModel):
+    mails: List[LenaByCategoryMail]
+    category: str
+
+
+class LenaActionRunRequest(BaseModel):
+    category: str  # "weiterleiten", "tun", "ablegen", etc.
+
+
+class LenaActionRunResponse(BaseModel):
+    mails: List[LenaByCategoryMail]
+    category: str
+    mail_count: int
+
+
 # ── Mail-Triage (HBE-Mail-Categorize) ─────────────────────────────────────
 LENA_ACTION_CATEGORIES = {
     "antworten":      "Lena: Antworten",
@@ -3154,6 +3737,7 @@ class LenaCategorizeResponse(BaseModel):
     success: bool
     message_id: str
     categories: List[str]
+    moved_to_archive: Optional[bool] = None  # True wenn action=ablegen und Mail archiviert (HBE-1603)
 
 
 class LenaSyncCategoriesResponse(BaseModel):
@@ -3417,26 +4001,15 @@ def lena_mail_archive_by_category(
         "Content-Type": "application/json",
     }
 
-    escaped = req.category.replace("'", "''")
-    params = {
-        "$select": "id,categories",
-        "$filter": f"categories/any(c:c eq '{escaped}')",
-        "$top": 100,
-    }
+    # Alle Seiten laden via _fetch_inbox_mails_by_lena_category (folgt @odata.nextLink, HBE-1614)
+    try:
+        raw = _fetch_inbox_mails_by_lena_category(headers, req.category)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Graph API Fehler beim Abrufen: {exc}") from exc
 
-    resp = _rq.get(
-        "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages",
-        headers=headers,
-        params=params,
-        timeout=30,
-    )
-    if resp.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Graph API Fehler beim Abrufen: HTTP {resp.status_code} — {resp.text[:300]}",
-        )
-
-    messages = resp.json().get("value", [])
+    messages = raw
     archive_folder_id = _resolve_folder_id("archive", headers)
 
     archived_ids: List[str] = []
@@ -3456,6 +4029,222 @@ def lena_mail_archive_by_category(
     return LenaArchiveByCategoryResponse(
         archived_count=len(archived_ids),
         message_ids=archived_ids,
+    )
+
+
+# ── Triage v2 – On-Demand Action Runner (HBE-1320) ────────────────────────
+
+def _fetch_inbox_mails_by_lena_category(
+    headers: dict, lena_category_full: str, top: int = 250
+) -> List[dict]:
+    """
+    Hilfsfunktion: Holt Inbox-Mails mit exakt der angegebenen Lena-Vollkategorie
+    (z.B. 'Lena: Weiterleiten') per Graph API und gibt die value-Liste zurück.
+    Folgt @odata.nextLink bis alle Mails geladen sind (max. 500).
+    """
+    import requests as _rq
+
+    escaped = lena_category_full.replace("'", "''")
+    url = (
+        "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
+        f"?$filter=categories/any(c:c eq '{escaped}')"
+        f"&$select=id,subject,from,receivedDateTime,bodyPreview,categories"
+        f"&$top={min(top, 250)}"
+        "&$orderby=receivedDateTime asc"
+    )
+    mails: List[dict] = []
+    while url:
+        resp = _rq.get(url, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Graph API Fehler beim Abrufen der Kategorie-Mails: HTTP {resp.status_code} — {resp.text[:300]}",
+            )
+        data = resp.json()
+        mails.extend(data.get("value", []))
+        if len(mails) >= 500:
+            break
+        url = data.get("@odata.nextLink")
+    return mails
+
+
+def _graph_mails_to_lena_by_category(raw_mails: List[dict]) -> List[LenaByCategoryMail]:
+    result = []
+    for m in raw_mails:
+        sender = (m.get("from") or {}).get("emailAddress", {}) or {}
+        result.append(LenaByCategoryMail(
+            message_id=m.get("id", ""),
+            subject=(m.get("subject") or ""),
+            sender_email=(sender.get("address") or "").lower(),
+            sender_name=(sender.get("name") or ""),
+            received_at=(m.get("receivedDateTime") or ""),
+            body_preview=(m.get("bodyPreview") or ""),
+        ))
+    return result
+
+
+@app.post("/api/lena/mail/clear-categories", response_model=LenaClearCategoriesResponse)
+def lena_mail_clear_categories(
+    req: LenaClearCategoriesRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Loescht Lena-Kategorien (Lena:*) aus allen Inbox-Mails (HBE-1320).
+
+    Wenn `category` angegeben ist, werden nur Mails mit dieser spezifischen
+    Lena-Kategorie bereinigt. Ohne `category`: alle Mails mit irgendeiner
+    Lena:*-Kategorie.
+
+    Implementierung:
+    - Alle Inbox-Mails abrufen ($select=id,categories)
+    - Client-seitig filtern: Mails mit passenden Lena:-Kategorien
+    - Fuer jede Mail: PATCH mit categories = kept (ohne die Lena:-Kategorie)
+    """
+    import requests as _rq
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Content-Type": "application/json",
+    }
+
+    # Bestimme welche Lena:-Kategorie(n) entfernt werden sollen
+    target_cat: Optional[str] = None
+    if req.category:
+        cat_key = req.category.strip().lower()
+        if cat_key in LENA_ACTION_CATEGORIES:
+            target_cat = LENA_ACTION_CATEGORIES[cat_key]
+        elif req.category.startswith("Lena: "):
+            target_cat = req.category.strip()
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unbekannte Kategorie '{req.category}'. Gueltig: {', '.join(LENA_ACTION_CATEGORIES.keys())}",
+            )
+
+    # Alle Inbox-Mails mit Kategorien abrufen (paginiert)
+    url = (
+        "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
+        "?$select=id,categories&$top=250"
+    )
+    all_mails: List[dict] = []
+    while url:
+        resp = _rq.get(url, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Graph API Fehler beim Abrufen: HTTP {resp.status_code} — {resp.text[:300]}",
+            )
+        data = resp.json()
+        all_mails.extend(data.get("value", []))
+        if len(all_mails) >= 500:
+            break
+        url = data.get("@odata.nextLink")
+
+    cleared_ids: List[str] = []
+    for msg in all_mails:
+        msg_id = msg.get("id", "")
+        if not msg_id:
+            continue
+        cats = msg.get("categories") or []
+        if target_cat:
+            has_target = target_cat in cats
+            if not has_target:
+                continue
+            new_cats = [c for c in cats if c != target_cat]
+        else:
+            has_lena = any(c.startswith("Lena: ") for c in cats)
+            if not has_lena:
+                continue
+            new_cats = [c for c in cats if not c.startswith("Lena: ")]
+
+        if req.dry_run:
+            cleared_ids.append(msg_id)
+        else:
+            patch_resp = _rq.patch(
+                f"https://graph.microsoft.com/v1.0/me/messages/{msg_id}",
+                headers=headers,
+                json={"categories": new_cats},
+                timeout=30,
+            )
+            if patch_resp.status_code in (200, 201):
+                cleared_ids.append(msg_id)
+
+    return LenaClearCategoriesResponse(
+        cleared_count=len(cleared_ids),
+        message_ids=cleared_ids,
+    )
+
+
+@app.get("/api/lena/mail/by-category/{category}", response_model=LenaByCategoryResponse)
+def lena_mail_by_category(
+    category: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Gibt alle Inbox-Mails mit der angegebenen Lena-Kategorie zurueck (HBE-1320).
+
+    Pfad-Parameter `category`: Kurzname der Kategorie (z.B. 'Weiterleiten', 'Tun',
+    'Ablegen', 'Antworten', 'Warten', 'Recherchieren') — Gross-/Kleinschreibung egal.
+
+    Antwort: Liste der Mails mit id, subject, from, receivedDateTime, body_preview.
+    """
+    cat_key = category.strip().lower()
+    if cat_key not in LENA_ACTION_CATEGORIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unbekannte Kategorie '{category}'. Gueltig: {', '.join(LENA_ACTION_CATEGORIES.keys())}",
+        )
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {"Authorization": f"Bearer {tool.access_token}"}
+    lena_cat = LENA_ACTION_CATEGORIES[cat_key]
+    raw_mails = _fetch_inbox_mails_by_lena_category(headers, lena_cat)
+    mails = _graph_mails_to_lena_by_category(raw_mails)
+
+    return LenaByCategoryResponse(mails=mails, category=lena_cat)
+
+
+@app.post("/api/lena/mail/action-run", response_model=LenaActionRunResponse)
+def lena_mail_action_run(
+    req: LenaActionRunRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Einstiegspunkt fuer On-Demand-Action-Run einer Kategorie (HBE-1320).
+
+    Lena ruft diesen Endpoint auf wenn Sven per Telegram eine Kategorie triggert
+    ('Lena, Ablegen', 'Lena, Weiterleiten', etc.). Der Endpoint liefert alle
+    Inbox-Mails mit der Kategorie — Lena verarbeitet sie danach sequenziell.
+
+    Gueltige Kategorie-Keys: antworten, tun, warten, recherchieren, weiterleiten, ablegen.
+    """
+    cat_key = req.category.strip().lower()
+    if cat_key not in LENA_ACTION_CATEGORIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unbekannte Kategorie '{req.category}'. Gueltig: {', '.join(LENA_ACTION_CATEGORIES.keys())}",
+        )
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    headers = {"Authorization": f"Bearer {tool.access_token}"}
+    lena_cat = LENA_ACTION_CATEGORIES[cat_key]
+    raw_mails = _fetch_inbox_mails_by_lena_category(headers, lena_cat)
+    mails = _graph_mails_to_lena_by_category(raw_mails)
+
+    return LenaActionRunResponse(
+        mails=mails,
+        category=lena_cat,
+        mail_count=len(mails),
     )
 
 
@@ -3579,10 +4368,33 @@ def lena_mail_categorize(
             detail=f"Graph API Fehler beim Setzen der Kategorien: HTTP {patch_resp.status_code} — {patch_resp.text[:300]}",
         )
 
+    # HBE-1603: Wenn action="ablegen", Mail sofort archivieren — keine zweite API-Call-Runde notwendig
+    moved_to_archive: Optional[bool] = None
+    if req.action == "ablegen":
+        try:
+            archive_folder_id = _resolve_folder_id("archive", headers)
+            archive_resp = _rq.patch(
+                f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
+                headers=headers,
+                json={"parentFolderId": archive_folder_id},
+                timeout=30,
+            )
+            moved_to_archive = archive_resp.status_code in (200, 201)
+            if not moved_to_archive:
+                logger.warning(
+                    "[categorize] action=ablegen: archive PATCH fehlgeschlagen HTTP %s — %s",
+                    archive_resp.status_code,
+                    archive_resp.text[:200],
+                )
+        except Exception as _exc:
+            logger.warning("[categorize] action=ablegen: archive fehlgeschlagen: %s", _exc)
+            moved_to_archive = False
+
     return LenaCategorizeResponse(
         success=True,
         message_id=req.message_id,
         categories=new_categories,
+        moved_to_archive=moved_to_archive,
     )
 
 
@@ -4211,7 +5023,9 @@ async def telegram_lena_webhook(req: Request):
     chat_id = str(msg.chat.id)
 
     # Check for an existing active issue for this chat — clean all stale/foreign entries.
-    # An entry is stale if the issue is done, cancelled, blocked, or not found.
+    # An entry is stale if the issue is done, cancelled, or not found.
+    # blocked is NOT stale — Sven's reply on a blocked issue must add a comment and reset
+    # the issue to in_progress (HBE-1314), not create a new issue.
     # An entry is foreign if its assignee is not Lena (guards against stale DB rows from
     # older code paths landing Sven's messages on Mara-owned issues, causing silent 403s).
     active_issue_id = None
@@ -4222,7 +5036,7 @@ async def telegram_lena_webhook(req: Request):
         ).fetchall()
         for row in rows:
             status, assignee = _pc_get_issue_info(row["issue_id"])
-            is_stale = status is None or status in {"done", "cancelled", "blocked"}
+            is_stale = status is None or status in {"done", "cancelled"}
             is_foreign = bool(_PC_LENA_AGENT_ID) and assignee != _PC_LENA_AGENT_ID
             if is_stale or is_foreign:
                 db.execute("DELETE FROM pending_issues WHERE issue_id = ?", (row["issue_id"],))
@@ -4261,23 +5075,34 @@ async def telegram_lena_webhook(req: Request):
     comment_text = quote_block + (msg.text or "")
 
     if active_issue_id:
-        # Reset in_review → in_progress so the agent run is triggered on user messages.
+        # Reset in_review/blocked → in_progress so the agent run is triggered on user messages.
         # in_review blocks agent wake-up on new comments; a Telegram reply from the user
         # must always restart the agent to avoid a silent deadlock (HBE-794).
-        if active_issue_status == "in_review":
+        # blocked is treated the same way: Sven's reply signals an unblock (HBE-1314).
+        if active_issue_status in {"in_review", "blocked"}:
             _pc_patch_issue_status(active_issue_id, "in_progress")
             logger.info(
-                "[telegram] reset issue %s from in_review to in_progress on user message",
-                active_issue_id,
+                "[telegram] reset issue %s from %s to in_progress on user reply",
+                active_issue_id, active_issue_status,
             )
         _pc_add_comment_to_issue(active_issue_id, username, comment_text)
     else:
-        issue_id = _pc_create_issue(
-            chat_id=chat_id,
-            message_id=msg.message_id,
-            username=username,
-            text=msg.text,
-        )
+        # Detect Triage-v2 action-run trigger ("Lena, Ablegen" etc.) — HBE-1321.
+        action_cat = _detect_action_run_category(msg.text or "")
+        if action_cat:
+            issue_id = _pc_create_action_run_issue(
+                chat_id=chat_id,
+                message_id=msg.message_id,
+                username=username,
+                category=action_cat,
+            )
+        else:
+            issue_id = _pc_create_issue(
+                chat_id=chat_id,
+                message_id=msg.message_id,
+                username=username,
+                text=msg.text,
+            )
         if issue_id:
             # Variant-1 guard: only track issues that are actually assigned to Lena.
             # Prevents foreign issue IDs from entering pending_issues if the API ever
@@ -4365,42 +5190,26 @@ def lena_telegram_send(
     _key: str = Security(verify_api_key),
 ):
     """
-    Sendet eine Telegram-Nachricht und trackt sie optional in outbound_messages (Reply-Threading).
-    Erfordert X-API-Key. issue_id + comment_id aktivieren das outbound_messages-Tracking.
+    Sendet eine Telegram-Nachricht und trackt sie in outbound_messages (Reply-Threading).
+    Erfordert X-API-Key. Rate-Limit: 10 Calls/Min (HBE-1212 Flood-Schutz).
     """
     if not _TG_BOT_TOKEN:
         raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN nicht konfiguriert.")
+    if not _tg_rate_check("lena"):
+        raise HTTPException(
+            status_code=429,
+            detail="Rate-Limit überschritten: max. 10 Telegram-Sends pro Minute (Lena).",
+            headers={"Retry-After": "60"},
+        )
     sent_msg_id = _tg_send_message(req.chat_id, req.text, parse_mode=req.parse_mode)
-    if sent_msg_id and req.issue_id:
+    # Always track in outbound_messages (HBE-1212: auch ohne issue_id für retroaktive Flood-Analyse)
+    if sent_msg_id:
         with _telegram_db() as db:
             db.execute(
                 "INSERT OR REPLACE INTO outbound_messages "
                 "(telegram_msg_id, chat_id, issue_id, comment_id, comment_excerpt) "
                 "VALUES (?, ?, ?, ?, ?)",
-                (sent_msg_id, req.chat_id, req.issue_id, req.comment_id or "", req.text[:200]),
-            )
-    return LenaTelegramSendResponse(success=bool(sent_msg_id), telegram_msg_id=sent_msg_id)
-
-
-@app.post("/api/lena/telegram/send", response_model=LenaTelegramSendResponse)
-def lena_telegram_send(
-    req: LenaTelegramSendRequest,
-    _key: str = Security(verify_api_key),
-):
-    """
-    Sendet eine Telegram-Nachricht und trackt sie optional in outbound_messages (Reply-Threading).
-    Erfordert X-API-Key. issue_id + comment_id aktivieren das outbound_messages-Tracking.
-    """
-    if not _TG_BOT_TOKEN:
-        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN nicht konfiguriert.")
-    sent_msg_id = _tg_send_message(req.chat_id, req.text, parse_mode=req.parse_mode)
-    if sent_msg_id and req.issue_id:
-        with _telegram_db() as db:
-            db.execute(
-                "INSERT OR REPLACE INTO outbound_messages "
-                "(telegram_msg_id, chat_id, issue_id, comment_id, comment_excerpt) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (sent_msg_id, req.chat_id, req.issue_id, req.comment_id or "", req.text[:200]),
+                (sent_msg_id, req.chat_id, req.issue_id or "", req.comment_id or "", req.text[:200]),
             )
     return LenaTelegramSendResponse(success=bool(sent_msg_id), telegram_msg_id=sent_msg_id)
 
@@ -4443,7 +5252,9 @@ async def telegram_mara_webhook(req: Request):
     username = user.username or user.first_name or "Unbekannt"
     chat_id = str(msg.chat.id)
 
-    # Clean up stale pending_issues
+    # Clean up stale pending_issues.
+    # blocked is NOT stale — Sven's reply on a blocked Mara issue must add a comment and
+    # reset it to in_progress, not create a new issue (mirrors HBE-1314 fix for Lena).
     active_issue_id = None
     active_issue_status = None
     with _telegram_mara_db() as db:
@@ -4452,7 +5263,7 @@ async def telegram_mara_webhook(req: Request):
         ).fetchall()
         for row in rows:
             status, assignee = _pc_get_issue_info(row["issue_id"])
-            is_stale = status is None or status in {"done", "cancelled", "blocked"}
+            is_stale = status is None or status in {"done", "cancelled"}
             is_foreign = bool(_PC_MARA_AGENT_ID) and assignee != _PC_MARA_AGENT_ID
             if is_stale or is_foreign:
                 db.execute("DELETE FROM pending_issues WHERE issue_id = ?", (row["issue_id"],))
@@ -4486,11 +5297,11 @@ async def telegram_mara_webhook(req: Request):
     comment_text = quote_block + (msg.text or "")
 
     if active_issue_id:
-        if active_issue_status == "in_review":
+        if active_issue_status in {"in_review", "blocked"}:
             _pc_patch_issue_status(active_issue_id, "in_progress")
             logger.info(
-                "[telegram/mara] reset issue %s from in_review to in_progress on user message",
-                active_issue_id,
+                "[telegram/mara] reset issue %s from %s to in_progress on user reply",
+                active_issue_id, active_issue_status,
             )
         _pc_add_comment_to_issue(active_issue_id, username, comment_text)
     else:
@@ -4524,18 +5335,25 @@ def mara_telegram_send(
 ):
     """
     Sendet eine Telegram-Nachricht via Maras eigenem Bot und trackt sie in outbound_messages (HBE-1205).
-    Erfordert X-API-Key. issue_id + comment_id aktivieren das Reply-Threading.
+    Erfordert X-API-Key. Rate-Limit: 10 Calls/Min (HBE-1212 Flood-Schutz).
     """
     if not _TG_MARA_BOT_TOKEN:
         raise HTTPException(status_code=503, detail="TELEGRAM_MARA_BOT_TOKEN nicht konfiguriert.")
+    if not _tg_rate_check("mara"):
+        raise HTTPException(
+            status_code=429,
+            detail="Rate-Limit überschritten: max. 10 Telegram-Sends pro Minute (Mara).",
+            headers={"Retry-After": "60"},
+        )
     sent_msg_id = _tg_mara_send_message(req.chat_id, req.text, parse_mode=req.parse_mode)
-    if sent_msg_id and req.issue_id:
+    # Always track in outbound_messages (HBE-1212: auch ohne issue_id für retroaktive Flood-Analyse)
+    if sent_msg_id:
         with _telegram_mara_db() as db:
             db.execute(
                 "INSERT OR REPLACE INTO outbound_messages "
                 "(telegram_msg_id, chat_id, issue_id, comment_id, comment_excerpt) "
                 "VALUES (?, ?, ?, ?, ?)",
-                (sent_msg_id, req.chat_id, req.issue_id, req.comment_id or "", req.text[:200]),
+                (sent_msg_id, req.chat_id, req.issue_id or "", req.comment_id or "", req.text[:200]),
             )
     return LenaTelegramSendResponse(success=bool(sent_msg_id), telegram_msg_id=sent_msg_id)
 
@@ -4882,3 +5700,4 @@ def lena_vault_write(
 
     _vault_audit(req.path, req.mode, commit_sha, "OK")
     return VaultWriteResponse(status="ok", commit_sha=commit_sha, path=req.path)
+

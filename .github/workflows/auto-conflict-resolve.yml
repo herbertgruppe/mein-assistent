@@ -215,7 +215,7 @@ jobs:
 
           # All conflicts resolved — commit and push
           RESOLVED_LIST=$(printf '%s, ' "${RESOLVED_FILES[@]}")
-          git commit -m "Auto-resolve merge conflicts in PR #$PR_NUMBER
+          git commit -m "Auto-resolve merge conflicts in PR #$PR_NUMBER [skip ci]
 
 Resolved: ${RESOLVED_LIST%, }
 

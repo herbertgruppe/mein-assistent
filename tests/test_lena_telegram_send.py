@@ -1,13 +1,14 @@
 """
-Tests for HBE-1091: POST /api/lena/telegram/send — Telegram-Sendung mit outbound_messages Tracking.
+Tests for HBE-1091/HBE-1212: POST /api/lena/telegram/send — Telegram-Sendung + Flood-Schutz.
 
 Covers:
 - lena_telegram_send sends message and returns telegram_msg_id on success
 - lena_telegram_send stores row in outbound_messages when issue_id is provided
-- lena_telegram_send does NOT store in DB when issue_id is absent
+- lena_telegram_send stores row in outbound_messages even WITHOUT issue_id (HBE-1212)
 - lena_telegram_send uses empty string for comment_id when not provided (NOT NULL constraint)
 - lena_telegram_send returns success=False without raising when Telegram fails
 - _tg_send_message passes parse_mode to Telegram API payload
+- Rate limiter returns HTTP 429 after 10 calls/min (HBE-1212)
 """
 import importlib.util
 import os
@@ -77,7 +78,8 @@ class LenaTelegramSendEndpointTest(unittest.TestCase):
         self.assertEqual(row[3], "cmt-abc")
         self.assertEqual(row[4], "Hallo Sven")
 
-    def test_no_db_insert_when_issue_id_absent(self):
+    def test_db_insert_even_without_issue_id(self):
+        """HBE-1212: every send is tracked in outbound_messages for retroactive flood analysis."""
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "telegram.db"
             with mock.patch.object(self.api, "_TG_BOT_TOKEN", "fake-token"), \
@@ -86,11 +88,11 @@ class LenaTelegramSendEndpointTest(unittest.TestCase):
                 req = self._make_request()  # no issue_id
                 self.api.lena_telegram_send(req, _key="test-key")
 
-            if db_path.exists():
-                conn = sqlite3.connect(str(db_path))
-                count = conn.execute("SELECT COUNT(*) FROM outbound_messages").fetchone()[0]
-                conn.close()
-                self.assertEqual(count, 0, "No row should be inserted without issue_id")
+            conn = sqlite3.connect(str(db_path))
+            row = conn.execute("SELECT issue_id FROM outbound_messages WHERE telegram_msg_id = 88").fetchone()
+            conn.close()
+            self.assertIsNotNone(row, "Row must be inserted even without issue_id (HBE-1212)")
+            self.assertEqual(row[0], "", "issue_id must be '' (empty string) when not provided")
 
     def test_comment_id_defaults_to_empty_string(self):
         """comment_id=None must be stored as '' to satisfy NOT NULL constraint."""
@@ -142,6 +144,48 @@ class TgSendMessageParseModeTest(unittest.TestCase):
             self.api._tg_send_message("123", "hi")
         payload = m_post.call_args[1]["json"]
         self.assertNotIn("parse_mode", payload)
+
+
+class TgRateLimiterTest(unittest.TestCase):
+    """HBE-1212: rate limiter blocks > 10 lena/telegram/send calls per minute."""
+
+    def setUp(self):
+        # Load a fresh module instance so rate-limiter state is reset between tests
+        self.api = _load_api("api_ratelimit_test")
+        # Override rate limit to a small number for fast testing
+        self.api._TG_RATE_LIMIT = 3
+        # Clear the buckets
+        self.api._TG_RATE_BUCKETS.clear()
+
+    def _send(self, msg_id=1):
+        with mock.patch.object(self.api, "_TG_BOT_TOKEN", "fake-token"), \
+             mock.patch.object(self.api, "_TELEGRAM_DB_PATH", Path(tempfile.mkdtemp()) / "t.db"), \
+             mock.patch.object(self.api, "_tg_send_message", return_value=msg_id):
+            req = self.api.LenaTelegramSendRequest(chat_id="111", text="x")
+            return self.api.lena_telegram_send(req, _key="test-key")
+
+    def test_first_calls_succeed(self):
+        for _ in range(3):
+            resp = self._send()
+            self.assertTrue(resp.success)
+
+    def test_429_after_limit(self):
+        from fastapi import HTTPException as FHE
+        for _ in range(3):
+            self._send()
+        with self.assertRaises(FHE) as ctx:
+            self._send()
+        self.assertEqual(ctx.exception.status_code, 429)
+
+    def test_mara_bucket_independent_from_lena(self):
+        """Mara and Lena use separate rate-limit buckets."""
+        self.api._TG_RATE_BUCKETS.clear()
+        # Fill lena bucket
+        for _ in range(3):
+            self._send()
+        # Mara bucket should still be empty — _tg_rate_check("mara") must return True
+        result = self.api._tg_rate_check("mara")
+        self.assertTrue(result)
 
 
 if __name__ == "__main__":
