@@ -1400,6 +1400,49 @@ def render_transcripts_tab():
         import os as _os_track
         _api_url = _os_track.getenv("MEIN_ASSISTENT_INTERNAL_URL", "http://api:8502")
         _api_key = _os_track.getenv("API_SECRET_KEY", "")
+
+        # ── Plaud Auth Status ─────────────────────────────────────────────────
+        try:
+            _status_resp = _req_track.get(
+                f"{_api_url}/plaud/auth/status",
+                headers={"X-API-Key": _api_key},
+                timeout=5,
+            )
+            if _status_resp.status_code == 200:
+                _auth = _status_resp.json()
+                if not _auth.get("authenticated"):
+                    st.warning("⚠️ Plaud nicht authentifiziert")
+                elif _auth.get("access_token_expired"):
+                    _refresh_resp = _req_track.post(
+                        f"{_api_url}/plaud/auth/refresh",
+                        headers={"X-API-Key": _api_key},
+                        timeout=10,
+                    )
+                    if _refresh_resp.status_code == 200:
+                        st.success("🔄 Plaud Token automatisch erneuert")
+                    else:
+                        st.warning("⚠️ Plaud Token abgelaufen — automatischer Refresh fehlgeschlagen")
+                else:
+                    _exp_min = _auth.get("access_token_expires_in_minutes", 0)
+                    _rt_exp = (_auth.get("refresh_token_expires_at", "") or "")[:10] or "?"
+                    st.caption(f"🔑 Plaud: ✅ aktiv noch {_exp_min} Min · Refresh-Token bis {_rt_exp}")
+
+                if st.button("🔑 Plaud neu anmelden", key="plaud_reauth"):
+                    _start_resp = _req_track.get(
+                        f"{_api_url}/plaud/auth/start",
+                        headers={"X-API-Key": _api_key},
+                        timeout=5,
+                    )
+                    if _start_resp.status_code == 200:
+                        _auth_url = _start_resp.json().get("auth_url", "")
+                        st.markdown(f"**[👉 Hier klicken um Plaud zu autorisieren]({_auth_url})**")
+                        st.info("Nach der Autorisierung kannst du dieses Fenster schließen und die Seite neu laden.")
+                    else:
+                        st.error("Konnte Auth-URL nicht generieren.")
+        except Exception as _e_auth:
+            st.caption(f"Plaud Auth-Status nicht verfügbar: {_e_auth}")
+
+        # ── Aufnahmen-Übersicht ───────────────────────────────────────────────
         try:
             _resp = _req_track.get(
                 f"{_api_url}/api/plaud/recordings",
