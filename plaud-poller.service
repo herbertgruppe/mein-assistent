@@ -32,6 +32,8 @@ LogsDirectory=plaud-poller
 ReadWritePaths=/opt/mein-assistent/data
 
 # Defense-in-Depth
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
