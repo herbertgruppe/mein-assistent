@@ -1360,27 +1360,42 @@ def list_plaud_recordings(
     finally:
         conn.close()
 
-    # HBE-1603: Ergaenze review_link aus protocols.db fuer Eintraege wo er noch nicht gesetzt ist
-    recordings_needing_link = [
-        r["recording_id"] for r in recordings_raw if not r.get("review_link")
+    # HBE-1603: Ergaenze review_link + tracking_status aus protocols.db (state.db ist :ro, kein Schreiben moeglich)
+    recordings_needing_proto = [
+        r["recording_id"] for r in recordings_raw
+        if not r.get("review_link") or r.get("tracking_status") in (None, "new", "")
     ]
-    if recordings_needing_link and Path(_PROTOCOLS_DB_PATH).exists():
+    if recordings_needing_proto and Path(_PROTOCOLS_DB_PATH).exists():
         try:
             pconn = _sqlite3.connect(f"file:{_PROTOCOLS_DB_PATH}?mode=ro", uri=True)
             pconn.row_factory = _sqlite3.Row
             try:
-                placeholders = ",".join("?" * len(recordings_needing_link))
+                placeholders = ",".join("?" * len(recordings_needing_proto))
                 proto_rows = pconn.execute(
-                    f"SELECT recording_id, reviewer_token FROM protocols WHERE recording_id IN ({placeholders})",
-                    recordings_needing_link,
+                    f"SELECT recording_id, reviewer_token, status FROM protocols WHERE recording_id IN ({placeholders})",
+                    recordings_needing_proto,
                 ).fetchall()
-                token_map = {row["recording_id"]: row["reviewer_token"] for row in proto_rows}
+                proto_map = {
+                    row["recording_id"]: {"token": row["reviewer_token"], "status": row["status"]}
+                    for row in proto_rows
+                }
             finally:
                 pconn.close()
+            # Map protocols.status → tracking_status (nur ueberschreiben wenn state.db noch null/new)
+            _proto_status_map = {
+                "draft":     "review_ready",
+                "in_review": "review_ready",
+                "approved":  "done",
+                "finalized": "done",
+                "rejected":  "review_ready",
+            }
             for r in recordings_raw:
-                if not r.get("review_link") and r["recording_id"] in token_map:
-                    token = token_map[r["recording_id"]]
-                    r["review_link"] = f"https://mein-assistent.herbertgruppe.com/review/{token}"
+                proto = proto_map.get(r["recording_id"])
+                if proto:
+                    if not r.get("review_link"):
+                        r["review_link"] = f"https://mein-assistent.herbertgruppe.com/review/{proto['token']}"
+                    if r.get("tracking_status") in (None, "new", ""):
+                        r["tracking_status"] = _proto_status_map.get(proto["status"], "review_ready")
         except Exception as _exc:
             logger.warning("[plaud/recordings] protocols.db join fehlgeschlagen: %s", _exc)
 
