@@ -40,6 +40,8 @@ services:
       # Vault-Mirror: Sven's Obsidian-Vault (HBE-757)
       # Wird auf dem Host unter /opt/vault-mirror/ geclont (setup-vault-mirror.sh)
       - /opt/vault-mirror:/opt/vault-mirror
+      # Plaud-Poller state.db (HBE-1527)
+      - /var/lib/plaud-poller:/var/lib/plaud-poller:ro
     depends_on:
       - assistent
     healthcheck:
