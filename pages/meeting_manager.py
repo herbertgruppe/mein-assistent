@@ -1,4 +1,4 @@
-"""
+﻿"""
 Meeting Manager Tab: Transkript-Upload, Protokoll-Erstellung (Streaming),
 Task-Extraktion, Finalisierung & Asana-Export.
 """
@@ -1394,6 +1394,63 @@ def render_transcripts_tab():
 
     st.markdown("---")
 
+    # ── Protokoll-Übersicht (HBE-1527) ─────────────────────────────────────────
+    with st.expander("📋 Plaud-Aufnahmen Übersicht", expanded=True):
+        import requests as _req_track
+        import os as _os_track
+        _api_url = _os_track.getenv("MEIN_ASSISTENT_INTERNAL_URL", "http://localhost:8001")
+        _api_key = _os_track.getenv("API_SECRET_KEY", "")
+        try:
+            _resp = _req_track.get(
+                f"{_api_url}/api/plaud/recordings",
+                headers={"X-API-Key": _api_key},
+                timeout=5
+            )
+            if _resp.status_code == 200:
+                _data = _resp.json()
+                _recs = _data.get("recordings", [])
+                if _recs:
+                    import pandas as _pd
+                    _rows = []
+                    for r in _recs:
+                        _status_map = {
+                            None: "🆕 Neu",
+                            "new": "🆕 Neu",
+                            "speakers_ok": "✅ Sprecher OK",
+                            "review_ready": "👁 Review bereit",
+                            "done": "✅ Fertig",
+                            "abandoned": "❌ Nicht verfolgt",
+                        }
+                        _poller_map = {
+                            None: "📝 Issue erstellt",
+                            "skipped:too_short": "⏭ Zu kurz",
+                            "cancelled_by_user": "🚫 Abgebrochen",
+                        }
+                        _rows.append({
+                            "Datum": r.get("start_at", "")[:10] if r.get("start_at") else "?",
+                            "Titel": (r.get("recording_title") or r.get("issue_identifier") or r.get("recording_id", "")[:8])[:60],
+                            "Issue": r.get("issue_identifier") or "-",
+                            "Status": _status_map.get(r.get("tracking_status"), r.get("tracking_status") or "?"),
+                            "Poller": _poller_map.get(r.get("poller_status"), r.get("poller_status") or "OK"),
+                            "Notiz": r.get("tracking_notes") or "",
+                        })
+                    st.dataframe(
+                        _pd.DataFrame(_rows),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    _done = sum(1 for r in _recs if r.get("tracking_status") == "done")
+                    _open = sum(1 for r in _recs if r.get("tracking_status") not in ("done", "abandoned") and r.get("poller_status") not in ("skipped:too_short",))
+                    st.caption(f"Gesamt: {len(_recs)} · Fertig: {_done} · Offen: {_open}")
+                else:
+                    st.info("Keine Plaud-Aufnahmen gefunden.")
+            else:
+                st.warning(f"Tracking-API nicht erreichbar (HTTP {_resp.status_code})")
+        except Exception as _e:
+            st.warning(f"Protokoll-Übersicht nicht verfügbar: {_e}")
+
+    st.markdown("---")
+
     # -------------------------------------------------------------------------
     # 1. Upload-Bereich
     # -------------------------------------------------------------------------
@@ -1758,3 +1815,4 @@ def render_transcripts_tab():
         render_transcript_detail_view(selected_idx)
     else:
         st.info("💡 Wähle ein Transkript aus der Liste oben um zu beginnen")
+

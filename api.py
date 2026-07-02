@@ -1,4 +1,4 @@
-"""
+﻿"""
 FastAPI REST-Endpunkt für den Meeting-Protokoll-Workflow der Herbert Gruppe.
 
 Wird vom Cowork-Skill `meeting-protokoll` aufgerufen, sobald Sven ein Protokoll
@@ -1169,6 +1169,222 @@ def plaud_cancel(
         issue_ref,
     )
     return {"status": "ok", "recording_id": req.recording_id, "cancelled_as": issue_ref}
+
+
+# ── Plaud Recording Tracking (HBE-1527) ──────────────────────────────────────
+
+# Reuse _PLAUD_DB_PATH defined above — same env var, same default path
+PLAUD_STATE_DB = _PLAUD_DB_PATH
+
+
+class PlaudRecordingStatus(BaseModel):
+    recording_id: str
+    start_at: Optional[str]
+    processed_at: Optional[str]
+    issue_identifier: Optional[str]
+    poller_status: Optional[str]
+    tracking_status: Optional[str]
+    tracking_notes: Optional[str]
+    recording_title: Optional[str] = None
+
+
+class PlaudRecordingPatch(BaseModel):
+    tracking_status: Optional[str] = None
+    tracking_notes: Optional[str] = None
+
+
+class PlaudRecordingsResponse(BaseModel):
+    recordings: List[PlaudRecordingStatus]
+    total: int
+
+
+@app.get("/api/plaud/recordings", response_model=PlaudRecordingsResponse)
+def list_plaud_recordings(
+    tracking_status: Optional[str] = None,
+    limit: int = 100,
+    _key: str = Security(verify_api_key),
+):
+    """Liste aller Plaud-Aufnahmen mit aktuellem Tracking-Status (HBE-1527)."""
+    import sqlite3 as _sqlite3
+    if not Path(PLAUD_STATE_DB).exists():
+        return PlaudRecordingsResponse(recordings=[], total=0)
+    conn = _sqlite3.connect(PLAUD_STATE_DB)
+    conn.row_factory = _sqlite3.Row
+    try:
+        query = """
+            SELECT recording_id, start_at, processed_at, issue_identifier,
+                   status as poller_status, tracking_status, tracking_notes, recording_title
+            FROM plaud_processed_recordings
+        """
+        params = []
+        if tracking_status:
+            query += " WHERE tracking_status = ?"
+            params.append(tracking_status)
+        query += " ORDER BY start_at DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
+        recordings = [PlaudRecordingStatus(**dict(r)) for r in rows]
+        # Count reflects active filter so callers get consistent total vs. recordings length
+        count_query = "SELECT COUNT(*) FROM plaud_processed_recordings"
+        count_params: list = []
+        if tracking_status:
+            count_query += " WHERE tracking_status = ?"
+            count_params.append(tracking_status)
+        total = conn.execute(count_query, count_params).fetchone()[0]
+    finally:
+        conn.close()
+    return PlaudRecordingsResponse(recordings=recordings, total=total)
+
+
+@app.patch("/api/plaud/recordings/{recording_id}")
+def patch_plaud_recording(
+    recording_id: str,
+    req: PlaudRecordingPatch,
+    _key: str = Security(verify_api_key),
+):
+    """Tracking-Status oder Notiz einer Plaud-Aufnahme aktualisieren (HBE-1527)."""
+    import sqlite3 as _sqlite3
+    valid_statuses = {None, "new", "speakers_ok", "review_ready", "done", "abandoned"}
+    if req.tracking_status not in valid_statuses:
+        raise HTTPException(status_code=400, detail=f"Ungültiger Status: {req.tracking_status}")
+    if not Path(PLAUD_STATE_DB).exists():
+        raise HTTPException(status_code=503, detail="Plaud state DB nicht verfügbar.")
+    conn = _sqlite3.connect(PLAUD_STATE_DB)
+    try:
+        row = conn.execute(
+            "SELECT recording_id FROM plaud_processed_recordings WHERE recording_id = ?",
+            (recording_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Recording {recording_id} nicht gefunden.")
+        updates = []
+        params = []
+        if req.tracking_status is not None:
+            updates.append("tracking_status = ?")
+            params.append(req.tracking_status)
+        if req.tracking_notes is not None:
+            updates.append("tracking_notes = ?")
+            params.append(req.tracking_notes)
+        if updates:
+            params.append(recording_id)
+            conn.execute(
+                f"UPDATE plaud_processed_recordings SET {', '.join(updates)} WHERE recording_id = ?",
+                params
+            )
+            conn.commit()
+    finally:
+        conn.close()
+    return {"recording_id": recording_id, "updated": True}
+
+
+@app.post("/api/plaud/recordings/{recording_id}/process")
+def trigger_plaud_recording_process(
+    recording_id: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Verarbeitet eine spezifische Plaud-Aufnahme on-demand, unabhängig vom Alter (HBE-1527).
+    Wird genutzt wenn Sprecher-Bestätigung für ältere Aufnahmen vorliegt.
+
+    Side effects:
+    - Erstellt ein Paperclip-Issue für den Mara-Agenten (PAPERCLIP_PROTOKOLL_AGENT_ID)
+    - Setzt status = 'manual_trigger' und issue_identifier in plaud_processed_recordings
+
+    Idempotent: Wenn issue_identifier bereits gesetzt ist, wird kein neues Issue erstellt.
+    Rückgabe: {"status": "already_processed"} wenn bereits verarbeitet,
+              {"status": "triggered"} wenn ein neues Issue erstellt wurde.
+    """
+    import sqlite3 as _sqlite3
+
+    if not Path(PLAUD_STATE_DB).exists():
+        raise HTTPException(status_code=503, detail="Plaud state DB nicht verfügbar.")
+
+    # Single connection for all reads + write to avoid concurrency issues
+    conn = _sqlite3.connect(PLAUD_STATE_DB)
+    conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        row = conn.execute(
+            "SELECT recording_id, issue_identifier, status, recording_title, start_at FROM plaud_processed_recordings WHERE recording_id = ?",
+            (recording_id,)
+        ).fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Recording {recording_id} nicht in DB. Erst via GET /api/plaud/recordings prüfen.")
+
+        existing_issue = row[1]
+        if existing_issue:
+            return {"recording_id": recording_id, "status": "already_processed", "issue_identifier": existing_issue}
+
+        recording_title = row[3] or recording_id[:16]
+        start_at = row[4] or "?"
+    finally:
+        conn.close()
+
+    # Delegate to Mara via Paperclip issue with the recording_id
+    try:
+        mara_agent_id = os.getenv("PAPERCLIP_PROTOKOLL_AGENT_ID", "ed26f194-f0a9-4f70-a52d-6e39be9013e3")
+
+        import requests as _rq_proc
+        pc_url = os.getenv("PAPERCLIP_API_URL", "https://paperclip.herbertgruppe.com")
+        pc_key = os.getenv("PAPERCLIP_API_KEY_MA", "")
+        pc_company = os.getenv("PAPERCLIP_COMPANY_ID_MA", "9df4976b-9ac8-4e8f-a156-c06c7fa40cdc")
+
+        issue_payload = {
+            "title": f"Neue Plaud-Aufnahme (manuell): {recording_title}",
+            "description": (
+                f"Manuelle Verarbeitung angefordert via API.\n\n"
+                f"Plaud Recording-ID: `{recording_id}`\n"
+                f"Aufnahme-Zeitpunkt: {start_at}\n\n"
+                f"Bitte Transkript abrufen (`plaud summary {recording_id}`), "
+                f"Protokoll erstellen und Sven zur Überprüfung schicken."
+            ),
+            "assigneeAgentId": mara_agent_id,
+            "priority": "medium",
+        }
+
+        resp = _rq_proc.post(
+            f"{pc_url}/api/companies/{pc_company}/issues",
+            headers={"Authorization": f"Bearer {pc_key}", "Content-Type": "application/json"},
+            json=issue_payload,
+            timeout=15,
+        )
+
+        if resp.status_code not in (200, 201):
+            raise HTTPException(
+                status_code=502,
+                detail=f"Paperclip Issue konnte nicht erstellt werden: {resp.status_code} — {resp.text[:200]}"
+            )
+
+        new_issue = resp.json()
+        issue_id = new_issue.get("identifier", "?")
+        issue_uuid = new_issue.get("id", "")
+
+        # Update DB: mark as triggered (single connection, WAL already set above)
+        from datetime import datetime as _dt_proc, timezone as _tz_proc
+        now = _dt_proc.now(_tz_proc.utc).isoformat()
+        conn_upd = _sqlite3.connect(PLAUD_STATE_DB)
+        conn_upd.execute("PRAGMA journal_mode=WAL")
+        try:
+            conn_upd.execute(
+                "UPDATE plaud_processed_recordings SET issue_identifier = ?, processed_at = ?, status = 'manual_trigger' WHERE recording_id = ?",
+                (issue_id, now, recording_id)
+            )
+            conn_upd.commit()
+        finally:
+            conn_upd.close()
+
+        return {
+            "recording_id": recording_id,
+            "status": "triggered",
+            "issue_identifier": issue_id,
+            "issue_uuid": issue_uuid,
+            "recording_title": recording_title,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Fehler beim Triggern: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -5300,3 +5516,4 @@ def lena_vault_write(
 
     _vault_audit(req.path, req.mode, commit_sha, "OK")
     return VaultWriteResponse(status="ok", commit_sha=commit_sha, path=req.path)
+
