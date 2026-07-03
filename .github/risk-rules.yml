@@ -2,12 +2,13 @@
 # Risk classification rules for code-approval automation.
 # Code Reviewer Agent reads this file first; LLM classification is fallback only.
 # Sync HIGH patterns with .github/CODEOWNERS @svenherbert entries.
-# evaluation: first-match
+# evaluation: max-risk-across-files (changed from first-match — HBE-990)
 #
-# RULE ORDER MATTERS: with first-match semantics HIGH must precede LOW so a PR
-# touching both a HIGH-owned path and a LOW-path (e.g. *.md) is not silently
-# downgraded. See HBE-984.
+# Each file is evaluated independently (first-match per file); the PR risk is
+# the maximum across all files. Rule order within a section still matters for
+# per-file first-match (e.g. .env.example before **/.env*).
 version: 1
+evaluation: max-risk-across-files
 rules:
   # --- HIGH: CODEOWNERS @svenherbert (must be first for correct first-match) ---
   - if_paths_match:

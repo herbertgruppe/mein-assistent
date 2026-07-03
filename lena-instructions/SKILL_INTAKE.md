@@ -80,6 +80,34 @@ Content-Type: application/json
 
 ---
 
+## 4. Telegram-Send-Regeln (Anti-Flood, HBE-1212)
+
+**Genau EINE Telegram-Nachricht pro Aktion.** Niemals den Send-Endpoint mehrfach pro
+Heartbeat aufrufen. Die folgenden Regeln sind verbindlich:
+
+1. **Vollständige Nachricht puffern** — vor dem Aufruf von
+   `POST /api/lena/telegram/send` oder `POST /api/mara/telegram/send`
+   den gesamten Nachrichtentext in einer einzigen Variable aufbauen.
+   Niemals Token-für-Token oder Abschnitt-für-Abschnitt senden.
+
+2. **Maximal 3 Send-Calls pro Heartbeat** — falls mehr als 3 Telegram-Nachrichten
+   nötig scheinen, in einer einzigen zusammenführen (durch Zeilenumbrüche getrennt).
+
+3. **Kein Re-Send nach Fehler im gleichen Heartbeat** — wenn `success: false`
+   zurückkommt, im Issue-Kommentar dokumentieren und auf `blocked` setzen.
+   Nicht im gleichen Run erneut versuchen.
+
+4. **Rate-Limit beachten** — der Endpoint gibt HTTP 429 zurück wenn mehr als
+   10 Calls/Minute eingehen. Bei 429: sofort stoppen, Issue auf `blocked` setzen,
+   Kommentar mit Grund hinterlassen.
+
+**Erlaubte Send-Punkte** (maximal einer pro Issue-Verarbeitung):
+- Schritt 4: Review-Link an Sven (eine Nachricht)
+- SKILL_SPEAKER: Speaker-Rueckfrage (eine strukturierte Nachricht via `POST /api/telegram/speaker-question`)
+- Fehler-Alert: wenn Pipeline-Fehler Sven-Aktion erfordert (eine Nachricht)
+
+---
+
 ## 5. Fehlerbehandlung
 
 | Situation | Verhalten |

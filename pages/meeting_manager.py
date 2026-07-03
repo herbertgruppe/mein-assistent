@@ -1394,6 +1394,129 @@ def render_transcripts_tab():
 
     st.markdown("---")
 
+    # ── Protokoll-Übersicht (HBE-1527) ─────────────────────────────────────────
+    with st.expander("📋 Plaud-Aufnahmen Übersicht", expanded=True):
+        import requests as _req_track
+        import os as _os_track
+        _api_url = _os_track.getenv("MEIN_ASSISTENT_INTERNAL_URL", "http://api:8502")
+        _api_key = _os_track.getenv("API_SECRET_KEY", "")
+
+        # ── Plaud Auth Status ─────────────────────────────────────────────────
+        try:
+            _status_resp = _req_track.get(
+                f"{_api_url}/plaud/auth/status",
+                headers={"X-API-Key": _api_key},
+                timeout=5,
+            )
+            if _status_resp.status_code == 200:
+                _auth = _status_resp.json()
+                if not _auth.get("authenticated"):
+                    st.warning("⚠️ Plaud nicht authentifiziert")
+                elif _auth.get("access_token_expired"):
+                    _refresh_resp = _req_track.post(
+                        f"{_api_url}/plaud/auth/refresh",
+                        headers={"X-API-Key": _api_key},
+                        timeout=10,
+                    )
+                    if _refresh_resp.status_code == 200:
+                        st.success("🔄 Plaud Token automatisch erneuert")
+                    else:
+                        st.warning("⚠️ Plaud Token abgelaufen — automatischer Refresh fehlgeschlagen")
+                else:
+                    _exp_min = _auth.get("access_token_expires_in_minutes", 0)
+                    _rt_exp = (_auth.get("refresh_token_expires_at", "") or "")[:10] or "?"
+                    st.caption(f"🔑 Plaud: ✅ aktiv noch {_exp_min} Min · Refresh-Token bis {_rt_exp}")
+
+            # Re-auth: Token-Upload (plaud login lokal, dann JSON hier einfügen)
+            with st.expander("🔑 Plaud Tokens erneuern", expanded=False):
+                st.markdown("""
+    **So gehst du vor:**
+    1. Öffne **CMD oder PowerShell** auf deinem Windows-Rechner
+    2. Führe aus: `plaud login`
+    3. Autorisiere im Browser
+    4. Öffne `%USERPROFILE%\\.plaud\\tokens.json` und kopiere den gesamten Inhalt
+    5. Füge ihn unten ein und klicke **Speichern**
+    """)
+                _token_json = st.text_area("tokens.json Inhalt", height=120, key="plaud_token_upload", placeholder='{"access_token": "...", "refresh_token": "...", ...}')
+                if st.button("💾 Tokens speichern", key="plaud_token_save"):
+                    if _token_json.strip():
+                        try:
+                            import json as _json_mod
+                            _parsed = _json_mod.loads(_token_json)
+                            _up_resp = _req_track.post(
+                                f"{_api_url}/plaud/auth/upload-tokens",
+                                headers={"X-API-Key": _api_key, "Content-Type": "application/json"},
+                                json=_parsed,
+                                timeout=10,
+                            )
+                            if _up_resp.status_code == 200:
+                                st.success("✅ Tokens gespeichert — Plaud ist wieder authentifiziert.")
+                                st.rerun()
+                            else:
+                                st.error(f"Fehler: {_up_resp.status_code} {_up_resp.text[:200]}")
+                        except Exception as _ex:
+                            st.error(f"Ungültiges JSON: {_ex}")
+                    else:
+                        st.warning("Bitte tokens.json Inhalt einfügen.")
+        except Exception as _e_auth:
+            st.caption(f"Plaud Auth-Status nicht verfügbar: {_e_auth}")
+
+        # ── Aufnahmen-Übersicht ───────────────────────────────────────────────
+        try:
+            _resp = _req_track.get(
+                f"{_api_url}/api/plaud/recordings",
+                headers={"X-API-Key": _api_key},
+                timeout=5
+            )
+            if _resp.status_code == 200:
+                _data = _resp.json()
+                _recs = _data.get("recordings", [])
+                if _recs:
+                    import pandas as _pd
+                    _rows = []
+                    for r in _recs:
+                        _status_map = {
+                            None: "🆕 Neu",
+                            "new": "🆕 Neu",
+                            "speakers_ok": "✅ Sprecher OK",
+                            "review_ready": "👁 Review bereit",
+                            "done": "✅ Fertig",
+                            "abandoned": "❌ Nicht verfolgt",
+                        }
+                        _poller_map = {
+                            None: "📝 Issue erstellt",
+                            "skipped:too_short": "⏭ Zu kurz",
+                            "cancelled_by_user": "🚫 Abgebrochen",
+                        }
+                        _rows.append({
+                            "Datum": r.get("start_at", "")[:16].replace("T", " ") if r.get("start_at") else "?",
+                            "Titel": (r.get("recording_title") or r.get("issue_identifier") or r.get("recording_id", "")[:8])[:60],
+                            "Issue": r.get("issue_identifier") or "-",
+                            "Status": _status_map.get(r.get("tracking_status"), r.get("tracking_status") or "?"),
+                            "Poller": _poller_map.get(r.get("poller_status"), r.get("poller_status") or "OK"),
+                            "Notiz": r.get("tracking_notes") or "",
+                            "Review": r.get("review_link") or "",
+                        })
+                    st.dataframe(
+                        _pd.DataFrame(_rows),
+                        column_config={
+                            "Review": st.column_config.LinkColumn("Review", display_text="🔗 Öffnen"),
+                        },
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    _done = sum(1 for r in _recs if r.get("tracking_status") == "done")
+                    _open = sum(1 for r in _recs if r.get("tracking_status") not in ("done", "abandoned") and r.get("poller_status") not in ("skipped:too_short",))
+                    st.caption(f"Gesamt: {len(_recs)} · Fertig: {_done} · Offen: {_open}")
+                else:
+                    st.info("Keine Plaud-Aufnahmen gefunden.")
+            else:
+                st.warning(f"Tracking-API nicht erreichbar (HTTP {_resp.status_code})")
+        except Exception as _e:
+            st.warning(f"Protokoll-Übersicht nicht verfügbar: {_e}")
+
+    st.markdown("---")
+
     # -------------------------------------------------------------------------
     # 1. Upload-Bereich
     # -------------------------------------------------------------------------
@@ -1758,3 +1881,4 @@ def render_transcripts_tab():
         render_transcript_detail_view(selected_idx)
     else:
         st.info("💡 Wähle ein Transkript aus der Liste oben um zu beginnen")
+
