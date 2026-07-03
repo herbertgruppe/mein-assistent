@@ -1,4 +1,4 @@
-"""
+﻿"""
 FastAPI REST-Endpunkt für den Meeting-Protokoll-Workflow der Herbert Gruppe.
 
 Wird vom Cowork-Skill `meeting-protokoll` aufgerufen, sobald Sven ein Protokoll
@@ -1294,6 +1294,16 @@ def plaud_cancel(
 
 # Reuse _PLAUD_DB_PATH defined above — same env var, same default path
 PLAUD_STATE_DB = _PLAUD_DB_PATH
+# protocols.db path — used to resolve review_link for plaud recordings (HBE-1603)
+_PROTOCOLS_DB_PATH = str(_BASE_DIR / "data" / "protocols.db")
+# protocols.status → tracking_status mapping (module-level constant, not per-request)
+_PROTO_STATUS_MAP: dict = {
+    "draft":     "review_ready",
+    "in_review": "review_ready",
+    "approved":  "review_ready",   # BackgroundTask kann scheitern; nur finalized = done
+    "finalized": "done",
+    "rejected":  "review_ready",
+}
 
 
 class PlaudRecordingStatus(BaseModel):
@@ -1324,7 +1334,10 @@ def list_plaud_recordings(
     limit: int = 100,
     _key: str = Security(verify_api_key),
 ):
-    """Liste aller Plaud-Aufnahmen mit aktuellem Tracking-Status (HBE-1527)."""
+    """Liste aller Plaud-Aufnahmen mit aktuellem Tracking-Status (HBE-1527).
+
+    Ergaenzt review_link live aus protocols.db wenn in state.db noch nicht gesetzt (HBE-1603).
+    """
     import sqlite3 as _sqlite3
     if not Path(PLAUD_STATE_DB).exists():
         return PlaudRecordingsResponse(recordings=[], total=0)
@@ -1344,7 +1357,7 @@ def list_plaud_recordings(
         query += " ORDER BY start_at DESC LIMIT ?"
         params.append(limit)
         rows = conn.execute(query, params).fetchall()
-        recordings = [PlaudRecordingStatus(**dict(r)) for r in rows]
+        recordings_raw = [dict(r) for r in rows]
         # Count reflects active filter so callers get consistent total vs. recordings length
         count_query = "SELECT COUNT(*) FROM plaud_processed_recordings"
         count_params: list = []
@@ -1354,6 +1367,43 @@ def list_plaud_recordings(
         total = conn.execute(count_query, count_params).fetchone()[0]
     finally:
         conn.close()
+
+    # HBE-1603: Ergaenze review_link + tracking_status aus protocols.db (state.db ist :ro, kein Schreiben moeglich)
+    # Enrichment immer durchfuehren (auch ohne tracking_status-Filter), damit Caller konsistente Werte
+    # erhaelt. tracking_status-Filter betrifft SQL (inkl. COUNT), nicht das post-fetch Enrichment.
+    recordings_needing_proto = [
+        r["recording_id"] for r in recordings_raw
+        if not r.get("review_link") or r.get("tracking_status") in (None, "new", "")
+    ]
+    if recordings_needing_proto and Path(_PROTOCOLS_DB_PATH).exists():
+        try:
+            pconn = _sqlite3.connect(f"file:{_PROTOCOLS_DB_PATH}?mode=ro", uri=True)
+            try:
+                pconn.row_factory = _sqlite3.Row  # inside try so pconn.close() always runs
+                placeholders = ",".join("?" * len(recordings_needing_proto))
+                proto_rows = pconn.execute(
+                    f"SELECT recording_id, reviewer_token, status FROM protocols WHERE recording_id IN ({placeholders})",
+                    recordings_needing_proto,
+                ).fetchall()
+                proto_map = {
+                    row["recording_id"]: {"token": row["reviewer_token"], "status": row["status"]}
+                    for row in proto_rows
+                }
+            finally:
+                pconn.close()
+            for r in recordings_raw:
+                proto = proto_map.get(r["recording_id"])
+                if proto:
+                    # Fix: NULL-Guard fuer reviewer_token (kann NULL sein)
+                    if not r.get("review_link") and proto.get("token"):
+                        r["review_link"] = f"https://mein-assistent.herbertgruppe.com/review/{proto['token']}"
+                    # Fix: approved → review_ready (BackgroundTask kann scheitern, nur finalized = done)
+                    if r.get("tracking_status") in (None, "new", ""):
+                        r["tracking_status"] = _PROTO_STATUS_MAP.get(proto.get("status", ""), "review_ready")
+        except Exception as _exc:
+            logger.warning("[plaud/recordings] protocols.db join fehlgeschlagen: %s", _exc)
+
+    recordings = [PlaudRecordingStatus(**r) for r in recordings_raw]
     return PlaudRecordingsResponse(recordings=recordings, total=total)
 
 
@@ -3477,12 +3527,25 @@ def _check_target_folder(v: str) -> str:
 def _resolve_folder_id(target_folder: str, headers: dict) -> str:
     """Return the Graph folder ID for *target_folder*.
 
-    Checks well-known alias table first; falls back to GET /me/mailFolders query by displayName.
+    HBE-1618: Wenn target_folder auf 'archive'/'archiv' matcht und ENV
+    LENA_ARCHIVE_FOLDER_ID gesetzt ist, wird dieser Wert direkt zurueckgegeben.
+    Damit kann Sven den Archiv-Zielordner konfigurieren ohne Code-Aenderung
+    (Default well-known 'archive' zeigt auf 'Posteingang erledigt 2016').
+
+    Checks well-known alias table next; falls back to GET /me/mailFolders query by displayName.
     Raises HTTPException 404 when the folder cannot be found.
     """
     import requests as _rq
 
-    alias = _WELL_KNOWN_FOLDER_MAP.get(target_folder.strip().lower())
+    tf_lower = target_folder.strip().lower()
+
+    # HBE-1618: ENV override fuer Archive-Ordner
+    if tf_lower in ("archive", "archiv"):
+        override_id = os.getenv("LENA_ARCHIVE_FOLDER_ID", "").strip()
+        if override_id:
+            return override_id
+
+    alias = _WELL_KNOWN_FOLDER_MAP.get(tf_lower)
     if alias:
         # Verify it exists and fetch its real ID so the PATCH has a stable value.
         resp = _rq.get(
@@ -3841,18 +3904,21 @@ def lena_mail_move(
 
     folder_id = _resolve_folder_id(req.target_folder, headers)
 
-    resp = _rq.patch(
-        f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
+    # HBE-1616: POST /me/messages/{id}/move statt PATCH parentFolderId.
+    # PATCH parentFolderId gibt 200 zurueck aber verschiebt die Mail NICHT (Graph API No-Op).
+    # POST /move ist der offizielle Weg — gibt 201 + neues Message-Objekt mit neuer message_id.
+    resp = _rq.post(
+        f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}/move",
         headers=headers,
-        json={"parentFolderId": folder_id},
+        json={"destinationId": folder_id},
         timeout=30,
     )
     if resp.status_code == 401 and tool._refresh_access_token():
         headers["Authorization"] = f"Bearer {tool.access_token}"
-        resp = _rq.patch(
-            f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
+        resp = _rq.post(
+            f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}/move",
             headers=headers,
-            json={"parentFolderId": folder_id},
+            json={"destinationId": folder_id},
             timeout=30,
         )
     if resp.status_code not in (200, 201):
@@ -3861,32 +3927,22 @@ def lena_mail_move(
             detail=f"Graph API Fehler beim Verschieben: HTTP {resp.status_code} — {resp.text[:300]}",
         )
 
-    # Post-move verification: confirm parentFolderId actually changed (catches silent failures).
-    try:
-        verify_resp = _rq.get(
-            f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
-            headers=headers,
-            params={"$select": "id,parentFolderId"},
-            timeout=30,
+    # POST /move erzeugt ein neues Message-Objekt; parentFolderId in der Response bestaetigt den Move.
+    moved = resp.json()
+    new_message_id = moved.get("id", req.message_id)
+    actual_folder = moved.get("parentFolderId", "")
+    if actual_folder and actual_folder != folder_id:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Move nicht bestaetigt — parentFolderId nach POST /move ist {actual_folder!r}, "
+                f"erwartet {folder_id!r}. Mail wurde nicht verschoben."
+            ),
         )
-        if verify_resp.status_code == 200:
-            actual_folder = verify_resp.json().get("parentFolderId", "")
-            if actual_folder and actual_folder != folder_id:
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        f"Move nicht bestätigt — parentFolderId nach PATCH ist {actual_folder!r}, "
-                        f"erwartet {folder_id!r}. Mail wurde nicht verschoben."
-                    ),
-                )
-    except HTTPException:
-        raise
-    except Exception:
-        pass  # Verification GET failure is non-fatal; PATCH returned 200/201.
 
     return LenaMoveMailResponse(
         success=True,
-        message_id=req.message_id,
+        message_id=new_message_id,
         folder=req.target_folder,
     )
 
@@ -3951,37 +4007,27 @@ def lena_mail_archive_by_category(
         "Content-Type": "application/json",
     }
 
-    escaped = req.category.replace("'", "''")
-    params = {
-        "$select": "id,categories",
-        "$filter": f"categories/any(c:c eq '{escaped}')",
-        "$top": 100,
-    }
+    # Alle Seiten laden via _fetch_inbox_mails_by_lena_category (folgt @odata.nextLink, HBE-1614)
+    try:
+        raw = _fetch_inbox_mails_by_lena_category(headers, req.category)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Graph API Fehler beim Abrufen: {exc}") from exc
 
-    resp = _rq.get(
-        "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages",
-        headers=headers,
-        params=params,
-        timeout=30,
-    )
-    if resp.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Graph API Fehler beim Abrufen: HTTP {resp.status_code} — {resp.text[:300]}",
-        )
-
-    messages = resp.json().get("value", [])
+    messages = raw
     archive_folder_id = _resolve_folder_id("archive", headers)
 
+    # HBE-1616: POST /move statt PATCH parentFolderId (PATCH ist Graph-API-No-Op)
     archived_ids: List[str] = []
     for msg in messages:
         msg_id = msg.get("id", "")
         if not msg_id:
             continue
-        move_resp = _rq.patch(
-            f"https://graph.microsoft.com/v1.0/me/messages/{msg_id}",
+        move_resp = _rq.post(
+            f"https://graph.microsoft.com/v1.0/me/messages/{msg_id}/move",
             headers=headers,
-            json={"parentFolderId": archive_folder_id},
+            json={"destinationId": archive_folder_id},
             timeout=30,
         )
         if move_resp.status_code in (200, 201):
@@ -4334,10 +4380,11 @@ def lena_mail_categorize(
     if req.action == "ablegen":
         try:
             archive_folder_id = _resolve_folder_id("archive", headers)
-            archive_resp = _rq.patch(
-                f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
+            # HBE-1616: POST /move statt PATCH parentFolderId
+            archive_resp = _rq.post(
+                f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}/move",
                 headers=headers,
-                json={"parentFolderId": archive_folder_id},
+                json={"destinationId": archive_folder_id},
                 timeout=30,
             )
             moved_to_archive = archive_resp.status_code in (200, 201)
