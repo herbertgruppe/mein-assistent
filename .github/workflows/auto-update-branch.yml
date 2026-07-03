@@ -16,7 +16,7 @@ jobs:
     steps:
       - name: Update all open PRs to be up to date with base
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_BOT_TOKEN }}
           PAPERCLIP_API_URL: ${{ vars.PAPERCLIP_API_URL }}
           PAPERCLIP_API_KEY: ${{ secrets.PAPERCLIP_API_KEY }}
           PAPERCLIP_COMPANY_ID: 9df4976b-9ac8-4e8f-a156-c06c7fa40cdc
