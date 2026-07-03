@@ -14,3 +14,4 @@ newsletter_archiv/
 test_results/
 *.backup
 *.backup_*
+.deploy-token

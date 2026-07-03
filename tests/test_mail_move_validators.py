@@ -319,13 +319,14 @@ class TestResolveFolderId(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestLenaMailMove(unittest.TestCase):
-    """Smoke-test the lena_mail_move endpoint — verifies PATCH parentFolderId (HBE-1106 fix).
+    """Smoke-test the lena_mail_move endpoint — verifies POST /move (HBE-1616 fix).
 
-    HBE-1106: POST /move was introduced in HBE-1040 but caused two regressions:
-      1. Response message_id differs from sent ID (POST /move creates a new object).
-      2. Silent failures: moves returned success=True but mail stayed in inbox.
-    Fix: PATCH parentFolderId, matching the working archive-by-category batch endpoint.
-         message_id is preserved; post-move GET verifies parentFolderId changed.
+    HBE-1616: PATCH /messages/{id} with parentFolderId was found to be a Graph API
+    no-op — it returned 200 but did NOT actually move the mail. Root cause of
+    HBE-1035, HBE-1106 and the wiederkehrende "Lena archiviert nicht"-Beschwerden.
+    Fix: POST /me/messages/{id}/move with destinationId (offizieller Graph-Endpoint).
+    Gibt 201 zurueck + neues Message-Objekt mit neuer ID + korrekter parentFolderId.
+    Response.message_id reflects the moved (new) message id.
     """
 
     def _make_resp(self, status_code: int, body: dict = None):
@@ -348,75 +349,68 @@ class TestLenaMailMove(unittest.TestCase):
         tool._refresh_access_token.return_value = False
         return tool
 
-    def test_happy_path_uses_patch_with_parent_folder_id(self):
-        """lena_mail_move must use PATCH /messages/{id} with parentFolderId — not POST /move."""
+    def test_happy_path_uses_post_move_with_destination_id(self):
+        """lena_mail_move must use POST /messages/{id}/move with destinationId."""
         req = self._make_req()
         folder_resp = self._make_resp(200, {"id": "FOLDER_ID"})
-        patch_resp = self._make_resp(200, {"id": "AAMkABC123", "parentFolderId": "FOLDER_ID"})
-        verify_resp = self._make_resp(200, {"id": "AAMkABC123", "parentFolderId": "FOLDER_ID"})
-
-        get_responses = iter([folder_resp, verify_resp])
+        # POST /move returns 201 with NEW message-id and correct parentFolderId
+        move_resp = self._make_resp(201, {"id": "AAMkMovedNEW", "parentFolderId": "FOLDER_ID"})
 
         with mock.patch.object(_api, "_get_outlook_tool", return_value=self._make_tool()), \
-             mock.patch("requests.get", side_effect=get_responses), \
-             mock.patch("requests.patch", return_value=patch_resp) as mock_patch:
+             mock.patch("requests.get", return_value=folder_resp), \
+             mock.patch("requests.post", return_value=move_resp) as mock_post:
             result = _api.lena_mail_move(req)
 
         self.assertTrue(result.success)
-        # message_id must equal the SENT id (PATCH preserves the ID, unlike POST /move).
-        self.assertEqual(result.message_id, "AAMkABC123")
+        # message_id reflects the moved message (new id from POST /move response)
+        self.assertEqual(result.message_id, "AAMkMovedNEW")
         self.assertEqual(result.folder, "Archiv")
 
-        call_args = mock_patch.call_args
+        call_args = mock_post.call_args
         url = call_args[0][0] if call_args[0] else call_args.kwargs.get("url", "")
-        self.assertNotIn("/move", url)
+        self.assertIn("/move", url)
         body = call_args[1].get("json") or (call_args[0][1] if len(call_args[0]) > 1 else {})
-        self.assertIn("parentFolderId", body)
-        self.assertNotIn("destinationId", body)
+        self.assertIn("destinationId", body)
+        self.assertNotIn("parentFolderId", body)
 
-    def test_response_message_id_always_equals_sent_id(self):
-        """Response message_id must equal the sent id even when Graph returns something else."""
+    def test_response_message_id_reflects_moved_message(self):
+        """Response.message_id must be the NEW id from POST /move response."""
         req = self._make_req(message_id="AAMkABC123")
         folder_resp = self._make_resp(200, {"id": "FOLDER_ID"})
-        patch_resp = self._make_resp(200, {"id": "AAMkABC123", "parentFolderId": "FOLDER_ID"})
-        verify_resp = self._make_resp(200, {"id": "AAMkABC123", "parentFolderId": "FOLDER_ID"})
-
-        get_responses = iter([folder_resp, verify_resp])
+        move_resp = self._make_resp(201, {"id": "AAMkNewMovedId", "parentFolderId": "FOLDER_ID"})
 
         with mock.patch.object(_api, "_get_outlook_tool", return_value=self._make_tool()), \
-             mock.patch("requests.get", side_effect=get_responses), \
-             mock.patch("requests.patch", return_value=patch_resp):
+             mock.patch("requests.get", return_value=folder_resp), \
+             mock.patch("requests.post", return_value=move_resp):
             result = _api.lena_mail_move(req)
 
-        self.assertEqual(result.message_id, "AAMkABC123")
+        # POST /move creates a new mail object; response id is the moved mail id
+        self.assertEqual(result.message_id, "AAMkNewMovedId")
 
-    def test_verification_failure_raises_502(self):
-        """If post-move GET shows wrong parentFolderId, raise 502 instead of silent success."""
+    def test_verification_wrong_folder_raises_502(self):
+        """If POST /move response parentFolderId != expected folder_id, raise 502."""
         req = self._make_req()
         folder_resp = self._make_resp(200, {"id": "ARCHIVE_FOLDER_ID"})
-        patch_resp = self._make_resp(200, {})
-        # Verification GET returns the WRONG folder — move didn't take effect.
-        verify_resp = self._make_resp(200, {"id": "AAMkABC123", "parentFolderId": "INBOX_ID"})
-
-        get_responses = iter([folder_resp, verify_resp])
+        # POST /move returns 200 but with WRONG parentFolderId (defensive check)
+        move_resp = self._make_resp(200, {"id": "AAMkMovedNEW", "parentFolderId": "INBOX_ID"})
 
         with mock.patch.object(_api, "_get_outlook_tool", return_value=self._make_tool()), \
-             mock.patch("requests.get", side_effect=get_responses), \
-             mock.patch("requests.patch", return_value=patch_resp):
+             mock.patch("requests.get", return_value=folder_resp), \
+             mock.patch("requests.post", return_value=move_resp):
             with self.assertRaises(_HTTPException) as ctx:
                 _api.lena_mail_move(req)
 
         self.assertEqual(ctx.exception.status_code, 502)
 
-    def test_graph_502_on_patch_error(self):
-        """Graph returns 502 on PATCH → HTTPException 502 is raised."""
+    def test_graph_502_on_move_error(self):
+        """Graph returns 502 on POST /move → HTTPException 502 is raised."""
         req = self._make_req()
         folder_resp = self._make_resp(200, {"id": "FOLDER_ID"})
-        patch_resp = self._make_resp(502)
+        move_resp = self._make_resp(502)
 
         with mock.patch.object(_api, "_get_outlook_tool", return_value=self._make_tool()), \
              mock.patch("requests.get", return_value=folder_resp), \
-             mock.patch("requests.patch", return_value=patch_resp):
+             mock.patch("requests.post", return_value=move_resp):
             with self.assertRaises(_HTTPException) as ctx:
                 _api.lena_mail_move(req)
 
