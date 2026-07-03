@@ -22,7 +22,3 @@ Dockerfile               @svenherbert
 # Datenbank
 migrations/**            @svenherbert
 database/**              @svenherbert
-
-# CI/CD und CODEOWNERS selbst
-.github/workflows/**     @svenherbert
-.github/CODEOWNERS       @svenherbert
