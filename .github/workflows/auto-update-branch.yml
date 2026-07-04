@@ -26,6 +26,11 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::GITHUB_BOT_TOKEN secret not configured in this repo — skipping auto-update-branch. Set the secret to enable automatic PR branch updates."
+            exit 0
+          fi
+
           echo "Fetching open PRs for $REPO after push $PUSH_SHA..."
 
           # Collect all open PRs into a temp file before doing any git work
