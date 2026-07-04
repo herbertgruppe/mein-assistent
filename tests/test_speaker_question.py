@@ -176,13 +176,17 @@ class WebhookCallbackQueryRoutingTest(unittest.TestCase):
                     },
                 }
 
-        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "secret"), \
-             mock.patch.object(self.api, "_tg_answer_callback_query", mock_answer), \
+        lena_cfg = self.api._TgAgentCfg(
+            slug="lena", token="fake-lena-token", webhook_secret="secret",
+            admin_chat_id="", pc_agent_id="", db_path=Path("/tmp/test-spkr-lena.db"),
+        )
+        with mock.patch.dict(self.api._TELEGRAM_AGENTS, {"lena": lena_cfg}), \
+             mock.patch.object(self.api, "_tg_agent_ack_callback", mock_answer), \
              mock.patch.object(self.api, "_handle_speaker_callback", mock_handle):
             result = asyncio.run(self.api.telegram_lena_webhook(_MockRequest()))
 
         self.assertEqual(result, {"ok": True})
-        mock_answer.assert_called_once_with("cq-id-123")
+        mock_answer.assert_called_once_with("fake-lena-token", "cq-id-123")
         mock_handle.assert_called_once_with("spkr_cont:HBE-753", "999")
 
 
