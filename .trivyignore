@@ -1,4 +1,4 @@
-# False positives: node-tar CVEs reported against python:3.14-slim base image
+# False positives: node/npm CVEs reported against python:3.14-slim base image
 # mein-assistent has no Node.js runtime (no package.json, no npm, no node on PATH)
 # Trivy picks these up from the GitHub Actions runner, not the container image.
 # Verified false positive: HBE-1657 (2026-07-02)
@@ -8,3 +8,8 @@ CVE-2026-24842
 CVE-2026-26960
 CVE-2026-29786
 CVE-2026-31802
+# CVE-2024-21538: cross-spawn (npm) ReDoS
+# False positive: python:3.14-slim has no Node.js/npm runtime; no package.json in image
+# Trivy attributing npm CVE from GitHub Actions runner environment
+# Accepted: 2026-07-04, Owner: Jonas (Engineering), Ref: HBE-1768
+CVE-2024-21538
