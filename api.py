@@ -1,4 +1,4 @@
-"""
+﻿"""
 FastAPI REST-Endpunkt für den Meeting-Protokoll-Workflow der Herbert Gruppe.
 
 Wird vom Cowork-Skill `meeting-protokoll` aufgerufen, sobald Sven ein Protokoll
@@ -3565,12 +3565,25 @@ def _check_target_folder(v: str) -> str:
 def _resolve_folder_id(target_folder: str, headers: dict) -> str:
     """Return the Graph folder ID for *target_folder*.
 
-    Checks well-known alias table first; falls back to GET /me/mailFolders query by displayName.
+    HBE-1618: Wenn target_folder auf 'archive'/'archiv' matcht und ENV
+    LENA_ARCHIVE_FOLDER_ID gesetzt ist, wird dieser Wert direkt zurueckgegeben.
+    Damit kann Sven den Archiv-Zielordner konfigurieren ohne Code-Aenderung
+    (Default well-known 'archive' zeigt auf 'Posteingang erledigt 2016').
+
+    Checks well-known alias table next; falls back to GET /me/mailFolders query by displayName.
     Raises HTTPException 404 when the folder cannot be found.
     """
     import requests as _rq
 
-    alias = _WELL_KNOWN_FOLDER_MAP.get(target_folder.strip().lower())
+    tf_lower = target_folder.strip().lower()
+
+    # HBE-1618: ENV override fuer Archive-Ordner
+    if tf_lower in ("archive", "archiv"):
+        override_id = os.getenv("LENA_ARCHIVE_FOLDER_ID", "").strip()
+        if override_id:
+            return override_id
+
+    alias = _WELL_KNOWN_FOLDER_MAP.get(tf_lower)
     if alias:
         # Verify it exists and fetch its real ID so the PATCH has a stable value.
         resp = _rq.get(
@@ -3929,18 +3942,21 @@ def lena_mail_move(
 
     folder_id = _resolve_folder_id(req.target_folder, headers)
 
-    resp = _rq.patch(
-        f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
+    # HBE-1616: POST /me/messages/{id}/move statt PATCH parentFolderId.
+    # PATCH parentFolderId gibt 200 zurueck aber verschiebt die Mail NICHT (Graph API No-Op).
+    # POST /move ist der offizielle Weg — gibt 201 + neues Message-Objekt mit neuer message_id.
+    resp = _rq.post(
+        f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}/move",
         headers=headers,
-        json={"parentFolderId": folder_id},
+        json={"destinationId": folder_id},
         timeout=30,
     )
     if resp.status_code == 401 and tool._refresh_access_token():
         headers["Authorization"] = f"Bearer {tool.access_token}"
-        resp = _rq.patch(
-            f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
+        resp = _rq.post(
+            f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}/move",
             headers=headers,
-            json={"parentFolderId": folder_id},
+            json={"destinationId": folder_id},
             timeout=30,
         )
     if resp.status_code not in (200, 201):
@@ -3949,32 +3965,22 @@ def lena_mail_move(
             detail=f"Graph API Fehler beim Verschieben: HTTP {resp.status_code} — {resp.text[:300]}",
         )
 
-    # Post-move verification: confirm parentFolderId actually changed (catches silent failures).
-    try:
-        verify_resp = _rq.get(
-            f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
-            headers=headers,
-            params={"$select": "id,parentFolderId"},
-            timeout=30,
+    # POST /move erzeugt ein neues Message-Objekt; parentFolderId in der Response bestaetigt den Move.
+    moved = resp.json()
+    new_message_id = moved.get("id", req.message_id)
+    actual_folder = moved.get("parentFolderId", "")
+    if actual_folder and actual_folder != folder_id:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Move nicht bestaetigt — parentFolderId nach POST /move ist {actual_folder!r}, "
+                f"erwartet {folder_id!r}. Mail wurde nicht verschoben."
+            ),
         )
-        if verify_resp.status_code == 200:
-            actual_folder = verify_resp.json().get("parentFolderId", "")
-            if actual_folder and actual_folder != folder_id:
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        f"Move nicht bestätigt — parentFolderId nach PATCH ist {actual_folder!r}, "
-                        f"erwartet {folder_id!r}. Mail wurde nicht verschoben."
-                    ),
-                )
-    except HTTPException:
-        raise
-    except Exception:
-        pass  # Verification GET failure is non-fatal; PATCH returned 200/201.
 
     return LenaMoveMailResponse(
         success=True,
-        message_id=req.message_id,
+        message_id=new_message_id,
         folder=req.target_folder,
     )
 
@@ -4039,37 +4045,27 @@ def lena_mail_archive_by_category(
         "Content-Type": "application/json",
     }
 
-    escaped = req.category.replace("'", "''")
-    params = {
-        "$select": "id,categories",
-        "$filter": f"categories/any(c:c eq '{escaped}')",
-        "$top": 100,
-    }
+    # Alle Seiten laden via _fetch_inbox_mails_by_lena_category (folgt @odata.nextLink, HBE-1614)
+    try:
+        raw = _fetch_inbox_mails_by_lena_category(headers, req.category)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Graph API Fehler beim Abrufen: {exc}") from exc
 
-    resp = _rq.get(
-        "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages",
-        headers=headers,
-        params=params,
-        timeout=30,
-    )
-    if resp.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Graph API Fehler beim Abrufen: HTTP {resp.status_code} — {resp.text[:300]}",
-        )
-
-    messages = resp.json().get("value", [])
+    messages = raw
     archive_folder_id = _resolve_folder_id("archive", headers)
 
+    # HBE-1616: POST /move statt PATCH parentFolderId (PATCH ist Graph-API-No-Op)
     archived_ids: List[str] = []
     for msg in messages:
         msg_id = msg.get("id", "")
         if not msg_id:
             continue
-        move_resp = _rq.patch(
-            f"https://graph.microsoft.com/v1.0/me/messages/{msg_id}",
+        move_resp = _rq.post(
+            f"https://graph.microsoft.com/v1.0/me/messages/{msg_id}/move",
             headers=headers,
-            json={"parentFolderId": archive_folder_id},
+            json={"destinationId": archive_folder_id},
             timeout=30,
         )
         if move_resp.status_code in (200, 201):
@@ -4422,10 +4418,11 @@ def lena_mail_categorize(
     if req.action == "ablegen":
         try:
             archive_folder_id = _resolve_folder_id("archive", headers)
-            archive_resp = _rq.patch(
-                f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
+            # HBE-1616: POST /move statt PATCH parentFolderId
+            archive_resp = _rq.post(
+                f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}/move",
                 headers=headers,
-                json={"parentFolderId": archive_folder_id},
+                json={"destinationId": archive_folder_id},
                 timeout=30,
             )
             moved_to_archive = archive_resp.status_code in (200, 201)
