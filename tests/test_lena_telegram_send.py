@@ -21,8 +21,8 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 _BASE_ENV = {
-    "TELEGRAM_BOT_TOKEN": "",
-    "TELEGRAM_WEBHOOK_SECRET": "",
+    "TELEGRAM_BOT_TOKEN": "test-lena-token",
+    "TELEGRAM_WEBHOOK_SECRET": "test-lena-secret",
     "API_SECRET_KEY": "test-key",
 }
 
@@ -41,6 +41,9 @@ class LenaTelegramSendEndpointTest(unittest.TestCase):
     def setUpClass(cls):
         cls.api = _load_api("api_lena_tg_send_test")
 
+    def _lena_cfg(self):
+        return self.api._TELEGRAM_AGENTS["lena"]
+
     def _make_request(self, **kwargs):
         defaults = {"chat_id": "111222333", "text": "Hallo Sven"}
         defaults.update(kwargs)
@@ -48,22 +51,24 @@ class LenaTelegramSendEndpointTest(unittest.TestCase):
 
     def test_returns_success_and_msg_id_on_happy_path(self):
         req = self._make_request()
-        with mock.patch.object(self.api, "_TG_BOT_TOKEN", "fake-token"), \
-             mock.patch.object(self.api, "_tg_send_message", return_value=55) as m_send, \
-             mock.patch.object(self.api, "_telegram_db") as mock_db:
-            mock_db.return_value.__enter__ = mock.MagicMock(return_value=mock.MagicMock())
-            mock_db.return_value.__exit__ = mock.MagicMock(return_value=False)
+        mock_db = mock.MagicMock()
+        mock_db.__enter__ = mock.MagicMock(return_value=mock_db)
+        mock_db.__exit__ = mock.MagicMock(return_value=False)
+        with mock.patch.object(self.api, "_tg_agent_send", return_value=55) as m_send, \
+             mock.patch.object(self.api, "_tg_agent_db", return_value=mock_db):
             resp = self.api.lena_telegram_send(req, _key="test-key")
         self.assertTrue(resp.success)
         self.assertEqual(resp.telegram_msg_id, 55)
-        m_send.assert_called_once_with("111222333", "Hallo Sven", parse_mode="MarkdownV2")
+        # _tg_agent_send(token, chat_id, text, reply_markup=..., parse_mode=...)
+        call_args = m_send.call_args
+        self.assertEqual(call_args[0][1], "111222333")
+        self.assertEqual(call_args[0][2], "Hallo Sven")
 
     def test_stores_outbound_message_when_issue_id_set(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "telegram.db"
-            with mock.patch.object(self.api, "_TG_BOT_TOKEN", "fake-token"), \
-                 mock.patch.object(self.api, "_TELEGRAM_DB_PATH", db_path), \
-                 mock.patch.object(self.api, "_tg_send_message", return_value=77):
+            with mock.patch.object(self._lena_cfg(), "db_path", db_path), \
+                 mock.patch.object(self.api, "_tg_agent_send", return_value=77):
                 req = self._make_request(issue_id="HBE-999", comment_id="cmt-abc")
                 self.api.lena_telegram_send(req, _key="test-key")
 
@@ -82,9 +87,8 @@ class LenaTelegramSendEndpointTest(unittest.TestCase):
         """HBE-1212: every send is tracked in outbound_messages for retroactive flood analysis."""
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "telegram.db"
-            with mock.patch.object(self.api, "_TG_BOT_TOKEN", "fake-token"), \
-                 mock.patch.object(self.api, "_TELEGRAM_DB_PATH", db_path), \
-                 mock.patch.object(self.api, "_tg_send_message", return_value=88):
+            with mock.patch.object(self._lena_cfg(), "db_path", db_path), \
+                 mock.patch.object(self.api, "_tg_agent_send", return_value=88):
                 req = self._make_request()  # no issue_id
                 self.api.lena_telegram_send(req, _key="test-key")
 
@@ -98,9 +102,8 @@ class LenaTelegramSendEndpointTest(unittest.TestCase):
         """comment_id=None must be stored as '' to satisfy NOT NULL constraint."""
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "telegram.db"
-            with mock.patch.object(self.api, "_TG_BOT_TOKEN", "fake-token"), \
-                 mock.patch.object(self.api, "_TELEGRAM_DB_PATH", db_path), \
-                 mock.patch.object(self.api, "_tg_send_message", return_value=99):
+            with mock.patch.object(self._lena_cfg(), "db_path", db_path), \
+                 mock.patch.object(self.api, "_tg_agent_send", return_value=99):
                 req = self._make_request(issue_id="HBE-999")  # comment_id omitted
                 self.api.lena_telegram_send(req, _key="test-key")
 
@@ -112,8 +115,10 @@ class LenaTelegramSendEndpointTest(unittest.TestCase):
         self.assertEqual(row[0], "", "comment_id must be '' not None (NOT NULL constraint)")
 
     def test_returns_success_false_when_telegram_fails(self):
-        with mock.patch.object(self.api, "_TG_BOT_TOKEN", "fake-token"), \
-             mock.patch.object(self.api, "_tg_send_message", return_value=None):
+        with mock.patch.object(self.api, "_tg_agent_send", return_value=None), \
+             mock.patch.object(self.api, "_tg_agent_db") as mock_db_factory:
+            mock_db_factory.return_value.__enter__ = mock.MagicMock(return_value=mock.MagicMock())
+            mock_db_factory.return_value.__exit__ = mock.MagicMock(return_value=False)
             req = self._make_request(issue_id="HBE-999")
             resp = self.api.lena_telegram_send(req, _key="test-key")
         self.assertFalse(resp.success)
@@ -157,12 +162,16 @@ class TgRateLimiterTest(unittest.TestCase):
         # Clear the buckets
         self.api._TG_RATE_BUCKETS.clear()
 
+    def _lena_cfg(self):
+        return self.api._TELEGRAM_AGENTS["lena"]
+
     def _send(self, msg_id=1):
-        with mock.patch.object(self.api, "_TG_BOT_TOKEN", "fake-token"), \
-             mock.patch.object(self.api, "_TELEGRAM_DB_PATH", Path(tempfile.mkdtemp()) / "t.db"), \
-             mock.patch.object(self.api, "_tg_send_message", return_value=msg_id):
-            req = self.api.LenaTelegramSendRequest(chat_id="111", text="x")
-            return self.api.lena_telegram_send(req, _key="test-key")
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "t.db"
+            with mock.patch.object(self._lena_cfg(), "db_path", db_path), \
+                 mock.patch.object(self.api, "_tg_agent_send", return_value=msg_id):
+                req = self.api.LenaTelegramSendRequest(chat_id="111", text="x")
+                return self.api.lena_telegram_send(req, _key="test-key")
 
     def test_first_calls_succeed(self):
         for _ in range(3):
