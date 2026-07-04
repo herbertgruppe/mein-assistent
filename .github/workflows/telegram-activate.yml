@@ -74,9 +74,10 @@ jobs:
           TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
-          PAYLOAD=$(printf '{"url":"%s","secret_token":"%s","allowed_updates":["message","callback_query"]}' \
-            "https://mein-assistent.herbertgruppe.com/api/telegram/lena/webhook" \
-            "$TELEGRAM_WEBHOOK_SECRET")
+          PAYLOAD=$(jq -n \
+            --arg url "https://mein-assistent.herbertgruppe.com/api/telegram/lena/webhook" \
+            --arg token "$TELEGRAM_WEBHOOK_SECRET" \
+            '{"url":$url,"secret_token":$token,"allowed_updates":["message","callback_query"]}')
           RESPONSE=$(curl -s -X POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
             -H "Content-Type: application/json" \
@@ -98,9 +99,10 @@ jobs:
             echo "Kein TELEGRAM_MARA_BOT_TOKEN gesetzt — Mara-Webhook übersprungen."
             exit 0
           fi
-          PAYLOAD=$(printf '{"url":"%s","secret_token":"%s","allowed_updates":["message","callback_query"]}' \
-            "https://mein-assistent.herbertgruppe.com/api/telegram/mara/webhook" \
-            "$TELEGRAM_MARA_WEBHOOK_SECRET")
+          PAYLOAD=$(jq -n \
+            --arg url "https://mein-assistent.herbertgruppe.com/api/telegram/mara/webhook" \
+            --arg token "$TELEGRAM_MARA_WEBHOOK_SECRET" \
+            '{"url":$url,"secret_token":$token,"allowed_updates":["message","callback_query"]}')
           RESPONSE=$(curl -s -X POST \
             "https://api.telegram.org/bot${TELEGRAM_MARA_BOT_TOKEN}/setWebhook" \
             -H "Content-Type: application/json" \
