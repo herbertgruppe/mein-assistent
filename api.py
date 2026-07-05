@@ -5145,6 +5145,27 @@ async def telegram_agent_webhook(slug: str, req: Request):
 
     comment_text = quote_block + (msg.text or "")
 
+    # HBE-2011: If user replied to a known outbound message but no active_issue_id was
+    # found via pending_issues (e.g. original issue already done/stale), route to the
+    # originating issue via outbound_messages. Ensures Sven's Telegram reply is always
+    # threaded back into the correct context instead of spawning a new context-less issue.
+    if not active_issue_id and msg.reply_to_message:
+        _replied_id = msg.reply_to_message.message_id
+        with _tg_agent_db(cfg) as db:
+            _origin_row = db.execute(
+                "SELECT issue_id FROM outbound_messages WHERE telegram_msg_id = ? AND chat_id = ?",
+                (_replied_id, chat_id),
+            ).fetchone()
+        if _origin_row and _origin_row["issue_id"]:
+            _origin_status, _origin_assignee = _pc_get_issue_info(_origin_row["issue_id"])
+            _is_foreign = bool(cfg.pc_agent_id) and _origin_assignee != cfg.pc_agent_id
+            if not _is_foreign and _origin_status is not None:
+                active_issue_id = _origin_row["issue_id"]
+                active_issue_status = _origin_status
+                logger.info(
+                    "[telegram/%s] routed reply to originating issue %s (status=%s) via outbound_messages — HBE-2011",
+                    slug, active_issue_id, active_issue_status,
+                )
     if active_issue_id:
         # Reset in_review/blocked → in_progress so agent wakes up on user reply.
         # in_review blocks agent wake-up; Telegram reply must always restart (HBE-794).
