@@ -6,7 +6,7 @@ Covers:
 - Startup guard: RuntimeError when TELEGRAM_MARA_BOT_TOKEN is set without TELEGRAM_MARA_WEBHOOK_SECRET
 - Webhook-Auth: correct secret_token -> {"ok": True} + issue created; wrong/missing -> reject
 - Issue-Routing: new message lands on Mara-Agent (ed26f194-...), NOT Lena (_pc_create_issue)
-- Reply-Threading: quote block uses "Re Mara [...]" and reads from telegram_mara.db, not telegram.db
+- Reply-Threading: quote block uses "Re Mara [...]" and reads from mara's db, not lena's
 - Outbound-Tracking: mara_telegram_send without token -> 503; with token -> Telegram API + DB write
 """
 import asyncio
@@ -29,6 +29,13 @@ _BASE_ENV = {
 }
 
 _MARA_AGENT_ID = "ed26f194-f0a9-4f70-a52d-6e39be9013e3"
+
+_MARA_ENV = {
+    **_BASE_ENV,
+    "TELEGRAM_MARA_BOT_TOKEN": "test-mara-token",
+    "TELEGRAM_MARA_WEBHOOK_SECRET": "correct-mara-secret",
+    "PAPERCLIP_MARA_AGENT_ID": _MARA_AGENT_ID,
+}
 
 
 def _load_api(module_name: str, env: dict = None):
@@ -67,10 +74,13 @@ class MaraStartupGuardTest(unittest.TestCase):
 class MaraWebhookAuthTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.api = _load_api("api_mara_webhook_auth_test")
+        cls.api = _load_api("api_mara_webhook_auth_test", _MARA_ENV)
+
+    def _mara_cfg(self):
+        return self.api._TELEGRAM_AGENTS["mara"]
 
     def test_rejects_when_mara_secret_not_configured(self):
-        """Handler returns {"ok": True} without creating issue when _TG_MARA_WEBHOOK_SECRET is empty."""
+        """Handler returns {"ok": True} without creating issue when webhook_secret is empty."""
         mock_create = mock.MagicMock(return_value=None)
 
         class _Req:
@@ -79,8 +89,8 @@ class MaraWebhookAuthTest(unittest.TestCase):
             async def json(self):
                 return {}
 
-        with mock.patch.object(self.api, "_TG_MARA_WEBHOOK_SECRET", ""), \
-             mock.patch.object(self.api, "_pc_create_mara_issue", mock_create):
+        with mock.patch.object(self._mara_cfg(), "webhook_secret", ""), \
+             mock.patch.object(self.api, "_pc_create_tg_issue", mock_create):
             result = asyncio.run(self.api.telegram_mara_webhook(_Req()))
 
         self.assertEqual(result, {"ok": True})
@@ -96,8 +106,7 @@ class MaraWebhookAuthTest(unittest.TestCase):
             async def json(self):
                 return {}
 
-        with mock.patch.object(self.api, "_TG_MARA_WEBHOOK_SECRET", "correct-mara-secret"), \
-             mock.patch.object(self.api, "_pc_create_mara_issue", mock_create):
+        with mock.patch.object(self.api, "_pc_create_tg_issue", mock_create):
             result = asyncio.run(self.api.telegram_mara_webhook(_Req()))
 
         self.assertEqual(result, {"ok": True})
@@ -113,8 +122,7 @@ class MaraWebhookAuthTest(unittest.TestCase):
             async def json(self):
                 return {}
 
-        with mock.patch.object(self.api, "_TG_MARA_WEBHOOK_SECRET", "correct-mara-secret"), \
-             mock.patch.object(self.api, "_pc_create_mara_issue", mock_create):
+        with mock.patch.object(self.api, "_pc_create_tg_issue", mock_create):
             result = asyncio.run(self.api.telegram_mara_webhook(_Req()))
 
         self.assertEqual(result, {"ok": True})
@@ -128,8 +136,7 @@ class MaraWebhookAuthTest(unittest.TestCase):
             async def json(self):
                 return {}
 
-        with mock.patch.object(self.api, "_TG_MARA_WEBHOOK_SECRET", "correct"), \
-             self.assertLogs(self.api.__name__, level="WARNING") as cm:
+        with self.assertLogs(self.api.__name__, level="WARNING") as cm:
             asyncio.run(self.api.telegram_mara_webhook(_Req()))
         self.assertTrue(any("auth failure" in m or "mismatch" in m for m in cm.output))
 
@@ -139,7 +146,10 @@ class MaraWebhookAuthTest(unittest.TestCase):
         mock_db.__enter__ = mock.MagicMock(return_value=mock_db)
         mock_db.__exit__ = mock.MagicMock(return_value=False)
         mock_db.execute = mock.MagicMock(
-            return_value=mock.MagicMock(fetchall=mock.MagicMock(return_value=[]))
+            return_value=mock.MagicMock(
+                fetchall=mock.MagicMock(return_value=[]),
+                fetchone=mock.MagicMock(return_value=None),
+            )
         )
 
         class _Req:
@@ -157,9 +167,8 @@ class MaraWebhookAuthTest(unittest.TestCase):
                     },
                 }
 
-        with mock.patch.object(self.api, "_TG_MARA_WEBHOOK_SECRET", "correct-mara-secret"), \
-             mock.patch.object(self.api, "_pc_create_mara_issue", mock_create), \
-             mock.patch.object(self.api, "_telegram_mara_db", return_value=mock_db), \
+        with mock.patch.object(self.api, "_pc_create_tg_issue", mock_create), \
+             mock.patch.object(self.api, "_tg_agent_db", return_value=mock_db), \
              mock.patch.object(self.api, "_pc_get_issue_info",
                                mock.MagicMock(return_value=("in_progress", _MARA_AGENT_ID))):
             result = asyncio.run(self.api.telegram_mara_webhook(_Req()))
@@ -174,10 +183,10 @@ class MaraWebhookAuthTest(unittest.TestCase):
 class MaraIssueRoutingTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.api = _load_api("api_mara_routing_test")
+        cls.api = _load_api("api_mara_routing_test", _MARA_ENV)
 
-    def _make_empty_mara_db(self):
-        """Return a _telegram_mara_db mock with no pending issues."""
+    def _make_empty_db(self):
+        """Return a _tg_agent_db mock with no pending issues."""
         def _execute(sql, params=()):
             result = mock.MagicMock()
             result.fetchall.return_value = []
@@ -190,14 +199,13 @@ class MaraIssueRoutingTest(unittest.TestCase):
         db.execute = mock.MagicMock(side_effect=_execute)
         return db
 
-    def test_new_message_calls_create_mara_issue_not_lena(self):
-        """Incoming message to Mara bot must route to _pc_create_mara_issue, never _pc_create_issue."""
-        mock_create_mara = mock.MagicMock(return_value="mara-new-issue")
-        mock_create_lena = mock.MagicMock(return_value="lena-WRONG")
-        mock_db = self._make_empty_mara_db()
+    def test_new_message_calls_create_tg_issue_for_mara_cfg(self):
+        """Incoming message to Mara bot must call _pc_create_tg_issue with mara cfg, not lena."""
+        mock_create = mock.MagicMock(return_value="mara-new-issue")
+        mock_db = self._make_empty_db()
 
         class _Req:
-            headers = {"X-Telegram-Bot-Api-Secret-Token": "mara-secret"}
+            headers = {"X-Telegram-Bot-Api-Secret-Token": "correct-mara-secret"}
 
             async def json(self):
                 return {
@@ -211,19 +219,19 @@ class MaraIssueRoutingTest(unittest.TestCase):
                     },
                 }
 
-        with mock.patch.object(self.api, "_TG_MARA_WEBHOOK_SECRET", "mara-secret"), \
-             mock.patch.object(self.api, "_pc_create_mara_issue", mock_create_mara), \
-             mock.patch.object(self.api, "_pc_create_issue", mock_create_lena), \
-             mock.patch.object(self.api, "_telegram_mara_db", return_value=mock_db), \
+        with mock.patch.object(self.api, "_pc_create_tg_issue", mock_create), \
+             mock.patch.object(self.api, "_tg_agent_db", return_value=mock_db), \
              mock.patch.object(self.api, "_pc_get_issue_info",
                                mock.MagicMock(return_value=("in_progress", _MARA_AGENT_ID))):
             asyncio.run(self.api.telegram_mara_webhook(_Req()))
 
-        mock_create_mara.assert_called_once()
-        mock_create_lena.assert_not_called()
+        mock_create.assert_called_once()
+        cfg_arg = mock_create.call_args[0][0]
+        self.assertEqual(cfg_arg.slug, "mara",
+                         "Mara webhook must call _pc_create_tg_issue with mara cfg")
 
     def test_create_mara_issue_requests_mara_agent_id_as_assignee(self):
-        """_pc_create_mara_issue must set assigneeAgentId to _PC_MARA_AGENT_ID in the Paperclip request."""
+        """_pc_create_mara_issue must set assigneeAgentId to mara's pc_agent_id in the Paperclip request."""
         mock_resp = mock.MagicMock()
         mock_resp.status_code = 201
         mock_resp.json.return_value = {"id": "mara-issue-789"}
@@ -231,7 +239,6 @@ class MaraIssueRoutingTest(unittest.TestCase):
         with mock.patch.object(self.api, "_PC_API_URL", "https://fake-pc"), \
              mock.patch.object(self.api, "_PC_API_KEY", "fake-api-key"), \
              mock.patch.object(self.api, "_PC_COMPANY_ID", "company-999"), \
-             mock.patch.object(self.api, "_PC_MARA_AGENT_ID", _MARA_AGENT_ID), \
              mock.patch.object(self.api._http, "post", return_value=mock_resp) as m_post:
             result = self.api._pc_create_mara_issue("99999", 42, "sven", "Hello Mara")
 
@@ -240,15 +247,17 @@ class MaraIssueRoutingTest(unittest.TestCase):
         self.assertEqual(payload["assigneeAgentId"], _MARA_AGENT_ID,
                          "Mara issue must be assigned to Mara agent, not Lena")
 
-    def test_mara_webhook_does_not_touch_lena_db(self):
-        """New message on Mara webhook must use _telegram_mara_db, never _telegram_db."""
-        mock_mara_db = self._make_empty_mara_db()
-        mock_lena_db = mock.MagicMock()
-        mock_lena_db.__enter__ = mock.MagicMock(return_value=mock_lena_db)
-        mock_lena_db.__exit__ = mock.MagicMock(return_value=False)
+    def test_mara_webhook_uses_mara_cfg_in_tg_agent_db(self):
+        """New message on Mara webhook must call _tg_agent_db with mara cfg (slug='mara')."""
+        mock_db = self._make_empty_db()
+        captured_cfgs = []
+
+        def _capture_db(cfg):
+            captured_cfgs.append(cfg)
+            return mock_db
 
         class _Req:
-            headers = {"X-Telegram-Bot-Api-Secret-Token": "mara-secret"}
+            headers = {"X-Telegram-Bot-Api-Secret-Token": "correct-mara-secret"}
 
             async def json(self):
                 return {
@@ -262,17 +271,17 @@ class MaraIssueRoutingTest(unittest.TestCase):
                     },
                 }
 
-        with mock.patch.object(self.api, "_TG_MARA_WEBHOOK_SECRET", "mara-secret"), \
-             mock.patch.object(self.api, "_telegram_mara_db", return_value=mock_mara_db), \
-             mock.patch.object(self.api, "_telegram_db", return_value=mock_lena_db), \
-             mock.patch.object(self.api, "_pc_create_mara_issue",
+        with mock.patch.object(self.api, "_tg_agent_db", side_effect=_capture_db), \
+             mock.patch.object(self.api, "_pc_create_tg_issue",
                                mock.MagicMock(return_value="m-issue-db-test")), \
              mock.patch.object(self.api, "_pc_get_issue_info",
                                mock.MagicMock(return_value=("in_progress", _MARA_AGENT_ID))):
             asyncio.run(self.api.telegram_mara_webhook(_Req()))
 
-        mock_mara_db.__enter__.assert_called()
-        mock_lena_db.__enter__.assert_not_called()
+        self.assertTrue(len(captured_cfgs) > 0, "_tg_agent_db must have been called")
+        for cfg in captured_cfgs:
+            self.assertEqual(cfg.slug, "mara",
+                             f"Expected mara cfg, got slug={cfg.slug}")
 
 
 # ---------------------------------------------------------------------------
@@ -281,10 +290,10 @@ class MaraIssueRoutingTest(unittest.TestCase):
 class MaraReplyThreadingTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.api = _load_api("api_mara_reply_threading_test")
+        cls.api = _load_api("api_mara_reply_threading_test", _MARA_ENV)
 
     def _make_db_with_pending_issue(self, issue_id, outbound_row=None):
-        """Mock _telegram_mara_db with one pending issue and optional outbound_messages row."""
+        """Mock _tg_agent_db with one pending issue and optional outbound_messages row."""
         pending_row = mock.MagicMock()
         pending_row.__getitem__ = mock.MagicMock(
             side_effect=lambda k: issue_id if k == "issue_id" else None
@@ -322,7 +331,7 @@ class MaraReplyThreadingTest(unittest.TestCase):
         mock_add_comment = mock.MagicMock(return_value=True)
 
         class _Req:
-            headers = {"X-Telegram-Bot-Api-Secret-Token": "mara-secret"}
+            headers = {"X-Telegram-Bot-Api-Secret-Token": "correct-mara-secret"}
 
             async def json(self):
                 return {
@@ -341,9 +350,7 @@ class MaraReplyThreadingTest(unittest.TestCase):
                     },
                 }
 
-        with mock.patch.object(self.api, "_TG_MARA_WEBHOOK_SECRET", "mara-secret"), \
-             mock.patch.object(self.api, "_PC_MARA_AGENT_ID", _MARA_AGENT_ID), \
-             mock.patch.object(self.api, "_telegram_mara_db", return_value=mock_db), \
+        with mock.patch.object(self.api, "_tg_agent_db", return_value=mock_db), \
              mock.patch.object(self.api, "_pc_get_issue_info",
                                mock.MagicMock(return_value=("in_progress", _MARA_AGENT_ID))), \
              mock.patch.object(self.api, "_pc_add_comment_to_issue", mock_add_comment):
@@ -366,7 +373,7 @@ class MaraReplyThreadingTest(unittest.TestCase):
         mock_add_comment = mock.MagicMock(return_value=True)
 
         class _Req:
-            headers = {"X-Telegram-Bot-Api-Secret-Token": "mara-secret"}
+            headers = {"X-Telegram-Bot-Api-Secret-Token": "correct-mara-secret"}
 
             async def json(self):
                 return {
@@ -385,9 +392,7 @@ class MaraReplyThreadingTest(unittest.TestCase):
                     },
                 }
 
-        with mock.patch.object(self.api, "_TG_MARA_WEBHOOK_SECRET", "mara-secret"), \
-             mock.patch.object(self.api, "_PC_MARA_AGENT_ID", _MARA_AGENT_ID), \
-             mock.patch.object(self.api, "_telegram_mara_db", return_value=mock_db), \
+        with mock.patch.object(self.api, "_tg_agent_db", return_value=mock_db), \
              mock.patch.object(self.api, "_pc_get_issue_info",
                                mock.MagicMock(return_value=("in_progress", _MARA_AGENT_ID))), \
              mock.patch.object(self.api, "_pc_add_comment_to_issue", mock_add_comment):
@@ -410,7 +415,7 @@ class MaraReplyThreadingTest(unittest.TestCase):
         mock_add_comment = mock.MagicMock(return_value=True)
 
         class _Req:
-            headers = {"X-Telegram-Bot-Api-Secret-Token": "mara-secret"}
+            headers = {"X-Telegram-Bot-Api-Secret-Token": "correct-mara-secret"}
 
             async def json(self):
                 return {
@@ -424,9 +429,7 @@ class MaraReplyThreadingTest(unittest.TestCase):
                     },
                 }
 
-        with mock.patch.object(self.api, "_TG_MARA_WEBHOOK_SECRET", "mara-secret"), \
-             mock.patch.object(self.api, "_PC_MARA_AGENT_ID", _MARA_AGENT_ID), \
-             mock.patch.object(self.api, "_telegram_mara_db", return_value=mock_db), \
+        with mock.patch.object(self.api, "_tg_agent_db", return_value=mock_db), \
              mock.patch.object(self.api, "_pc_get_issue_info",
                                mock.MagicMock(return_value=("in_review", _MARA_AGENT_ID))), \
              mock.patch.object(self.api, "_pc_patch_issue_status", mock_patch_status), \
@@ -444,7 +447,7 @@ class MaraReplyThreadingTest(unittest.TestCase):
         mock_add_comment = mock.MagicMock(return_value=True)
 
         class _Req:
-            headers = {"X-Telegram-Bot-Api-Secret-Token": "mara-secret"}
+            headers = {"X-Telegram-Bot-Api-Secret-Token": "correct-mara-secret"}
 
             async def json(self):
                 return {
@@ -458,9 +461,7 @@ class MaraReplyThreadingTest(unittest.TestCase):
                     },
                 }
 
-        with mock.patch.object(self.api, "_TG_MARA_WEBHOOK_SECRET", "mara-secret"), \
-             mock.patch.object(self.api, "_PC_MARA_AGENT_ID", _MARA_AGENT_ID), \
-             mock.patch.object(self.api, "_telegram_mara_db", return_value=mock_db), \
+        with mock.patch.object(self.api, "_tg_agent_db", return_value=mock_db), \
              mock.patch.object(self.api, "_pc_get_issue_info",
                                mock.MagicMock(return_value=("in_progress", _MARA_AGENT_ID))), \
              mock.patch.object(self.api, "_pc_add_comment_to_issue", mock_add_comment):
@@ -478,48 +479,52 @@ class MaraReplyThreadingTest(unittest.TestCase):
 class MaraTelegramSendTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.api = _load_api("api_mara_send_test")
+        cls.api = _load_api("api_mara_send_test", _MARA_ENV)
 
     def _make_request(self, **kwargs):
         defaults = {"chat_id": "444555666", "text": "Hallo von Mara"}
         defaults.update(kwargs)
         return self.api.LenaTelegramSendRequest(**defaults)
 
+    def _mara_cfg(self):
+        return self.api._TELEGRAM_AGENTS["mara"]
+
     def test_raises_503_without_mara_bot_token(self):
-        """mara_telegram_send must raise HTTPException(503) when TELEGRAM_MARA_BOT_TOKEN not configured."""
+        """mara_telegram_send must raise HTTPException(503) when mara token not configured."""
         req = self._make_request()
-        with mock.patch.object(self.api, "_TG_MARA_BOT_TOKEN", ""):
+        with mock.patch.object(self._mara_cfg(), "token", ""):
             with self.assertRaises(Exception) as ctx:
                 self.api.mara_telegram_send(req, _key="test-key")
         self.assertEqual(getattr(ctx.exception, "status_code", None), 503)
 
     def test_returns_success_and_telegram_msg_id(self):
         req = self._make_request()
-        with mock.patch.object(self.api, "_TG_MARA_BOT_TOKEN", "mara-bot-token"), \
-             mock.patch.object(self.api, "_tg_mara_send_message", return_value=55) as m_send, \
-             mock.patch.object(self.api, "_telegram_mara_db") as mock_db_factory:
-            mock_db_factory.return_value.__enter__ = mock.MagicMock(return_value=mock.MagicMock())
-            mock_db_factory.return_value.__exit__ = mock.MagicMock(return_value=False)
+        mock_db = mock.MagicMock()
+        mock_db.__enter__ = mock.MagicMock(return_value=mock_db)
+        mock_db.__exit__ = mock.MagicMock(return_value=False)
+        with mock.patch.object(self.api, "_tg_agent_send", return_value=55) as m_send, \
+             mock.patch.object(self.api, "_tg_agent_db", return_value=mock_db):
             resp = self.api.mara_telegram_send(req, _key="test-key")
 
         self.assertTrue(resp.success)
         self.assertEqual(resp.telegram_msg_id, 55)
-        m_send.assert_called_once_with("444555666", "Hallo von Mara", parse_mode="MarkdownV2")
+        # _tg_agent_send(token, chat_id, text, reply_markup=..., parse_mode=...)
+        call_args = m_send.call_args
+        self.assertEqual(call_args[0][1], "444555666")
+        self.assertEqual(call_args[0][2], "Hallo von Mara")
 
     def test_stores_in_mara_db_not_lena_db(self):
-        """mara_telegram_send must write to telegram_mara.db, not telegram.db."""
+        """mara_telegram_send must write to mara's db_path, not lena's."""
         with tempfile.TemporaryDirectory() as tmp:
             mara_db_path = Path(tmp) / "telegram_mara.db"
             lena_db_path = Path(tmp) / "telegram.db"
 
-            with mock.patch.object(self.api, "_TG_MARA_BOT_TOKEN", "mara-bot-token"), \
-                 mock.patch.object(self.api, "_TELEGRAM_MARA_DB_PATH", mara_db_path), \
-                 mock.patch.object(self.api, "_TELEGRAM_DB_PATH", lena_db_path), \
-                 mock.patch.object(self.api, "_tg_mara_send_message", return_value=77):
+            with mock.patch.object(self._mara_cfg(), "db_path", mara_db_path), \
+                 mock.patch.object(self.api, "_tg_agent_send", return_value=77):
                 req = self._make_request(issue_id="HBE-1205", comment_id="cmt-mara-01")
                 self.api.mara_telegram_send(req, _key="test-key")
 
-            self.assertTrue(mara_db_path.exists(), "telegram_mara.db must be created")
+            self.assertTrue(mara_db_path.exists(), "mara db must be created")
             conn = sqlite3.connect(str(mara_db_path))
             row = conn.execute(
                 "SELECT telegram_msg_id, chat_id, issue_id, comment_id, comment_excerpt "
@@ -527,7 +532,7 @@ class MaraTelegramSendTest(unittest.TestCase):
             ).fetchone()
             conn.close()
 
-            self.assertFalse(lena_db_path.exists(), "telegram.db (Lena) must NOT be written")
+            self.assertFalse(lena_db_path.exists(), "lena db (telegram.db) must NOT be written")
 
         self.assertIsNotNone(row, "Row must be inserted in mara outbound_messages")
         self.assertEqual(row[0], 77)
@@ -538,25 +543,26 @@ class MaraTelegramSendTest(unittest.TestCase):
     def test_no_db_insert_without_issue_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             mara_db_path = Path(tmp) / "telegram_mara.db"
-            with mock.patch.object(self.api, "_TG_MARA_BOT_TOKEN", "mara-bot-token"), \
-                 mock.patch.object(self.api, "_TELEGRAM_MARA_DB_PATH", mara_db_path), \
-                 mock.patch.object(self.api, "_tg_mara_send_message", return_value=88):
+            with mock.patch.object(self._mara_cfg(), "db_path", mara_db_path), \
+                 mock.patch.object(self.api, "_tg_agent_send", return_value=88):
                 req = self._make_request()  # no issue_id
                 self.api.mara_telegram_send(req, _key="test-key")
 
             if mara_db_path.exists():
                 conn = sqlite3.connect(str(mara_db_path))
-                count = conn.execute("SELECT COUNT(*) FROM outbound_messages").fetchone()[0]
+                row = conn.execute(
+                    "SELECT issue_id FROM outbound_messages WHERE telegram_msg_id = 88"
+                ).fetchone()
                 conn.close()
-                self.assertEqual(count, 0, "No row must be inserted without issue_id")
+                self.assertIsNotNone(row, "Row must be inserted (every send tracked, HBE-1212)")
+                self.assertEqual(row[0], "", "issue_id must be '' when not provided")
 
     def test_comment_id_defaults_to_empty_string(self):
         """comment_id=None stored as '' to satisfy NOT NULL constraint (same as Lena)."""
         with tempfile.TemporaryDirectory() as tmp:
             mara_db_path = Path(tmp) / "telegram_mara.db"
-            with mock.patch.object(self.api, "_TG_MARA_BOT_TOKEN", "mara-bot-token"), \
-                 mock.patch.object(self.api, "_TELEGRAM_MARA_DB_PATH", mara_db_path), \
-                 mock.patch.object(self.api, "_tg_mara_send_message", return_value=99):
+            with mock.patch.object(self._mara_cfg(), "db_path", mara_db_path), \
+                 mock.patch.object(self.api, "_tg_agent_send", return_value=99):
                 req = self._make_request(issue_id="HBE-1205")  # comment_id omitted
                 self.api.mara_telegram_send(req, _key="test-key")
 
@@ -570,8 +576,10 @@ class MaraTelegramSendTest(unittest.TestCase):
         self.assertEqual(row[0], "", "comment_id must default to '' not None (NOT NULL constraint)")
 
     def test_returns_success_false_when_telegram_api_fails(self):
-        with mock.patch.object(self.api, "_TG_MARA_BOT_TOKEN", "mara-bot-token"), \
-             mock.patch.object(self.api, "_tg_mara_send_message", return_value=None):
+        with mock.patch.object(self.api, "_tg_agent_send", return_value=None), \
+             mock.patch.object(self.api, "_tg_agent_db") as mock_db_factory:
+            mock_db_factory.return_value.__enter__ = mock.MagicMock(return_value=mock.MagicMock())
+            mock_db_factory.return_value.__exit__ = mock.MagicMock(return_value=False)
             req = self._make_request(issue_id="HBE-1205")
             resp = self.api.mara_telegram_send(req, _key="test-key")
         self.assertFalse(resp.success)

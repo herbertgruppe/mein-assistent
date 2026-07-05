@@ -3,7 +3,7 @@ Tests for the Telegram webhook auth-bypass fix (HBE-417).
 
 Covers:
 - Startup guard: RuntimeError when TELEGRAM_BOT_TOKEN is set without TELEGRAM_WEBHOOK_SECRET
-- Webhook handler: rejects ({"ok": True}, no issue created) when _TG_WEBHOOK_SECRET is empty
+- Webhook handler: rejects ({"ok": True}, no issue created) when webhook_secret is empty
 """
 import asyncio
 import importlib.util
@@ -22,8 +22,6 @@ def _load_api_module(module_name: str, env_overrides: dict):
     api_path = REPO_ROOT / "api.py"
     spec = importlib.util.spec_from_file_location(module_name, api_path)
     module = importlib.util.module_from_spec(spec)
-    # Pre-set env vars before load_dotenv() runs inside the module so
-    # dotenv's non-override behavior leaves our values intact.
     with mock.patch.dict(os.environ, env_overrides, clear=False):
         spec.loader.exec_module(module)
     return module
@@ -47,15 +45,18 @@ class TelegramWebhookHandlerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         env = {
-            "TELEGRAM_BOT_TOKEN": "",
-            "TELEGRAM_WEBHOOK_SECRET": "",
+            "TELEGRAM_BOT_TOKEN": "test-bot-token",
+            "TELEGRAM_WEBHOOK_SECRET": "correct-secret",
             "API_SECRET_KEY": "test-key",
         }
         cls.api = _load_api_module("api_webhook_handler_test", env)
 
+    def _lena_cfg(self):
+        return self.api._TELEGRAM_AGENTS["lena"]
+
     def test_webhook_rejects_when_secret_not_configured(self):
         """Handler must return {"ok": True} without creating a Paperclip issue
-        when _TG_WEBHOOK_SECRET is empty — closing the auth-bypass window."""
+        when webhook_secret is empty — closing the auth-bypass window."""
         mock_create_issue = mock.MagicMock(return_value=None)
 
         class _MockRequest:
@@ -64,8 +65,8 @@ class TelegramWebhookHandlerTest(unittest.TestCase):
             async def json(self):
                 return {}
 
-        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", ""), \
-             mock.patch.object(self.api, "_pc_create_issue", mock_create_issue):
+        with mock.patch.object(self._lena_cfg(), "webhook_secret", ""), \
+             mock.patch.object(self.api, "_pc_create_tg_issue", mock_create_issue):
             result = asyncio.run(
                 self.api.telegram_lena_webhook(_MockRequest())
             )
@@ -83,8 +84,7 @@ class TelegramWebhookHandlerTest(unittest.TestCase):
             async def json(self):
                 return {}
 
-        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "correct-secret"), \
-             mock.patch.object(self.api, "_pc_create_issue", mock_create_issue):
+        with mock.patch.object(self.api, "_pc_create_tg_issue", mock_create_issue):
             result = asyncio.run(self.api.telegram_lena_webhook(_MockRequest()))
         self.assertEqual(result, {"ok": True})
         mock_create_issue.assert_not_called()
@@ -99,8 +99,7 @@ class TelegramWebhookHandlerTest(unittest.TestCase):
             async def json(self):
                 return {}
 
-        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "correct-secret"), \
-             mock.patch.object(self.api, "_pc_create_issue", mock_create_issue):
+        with mock.patch.object(self.api, "_pc_create_tg_issue", mock_create_issue):
             result = asyncio.run(self.api.telegram_lena_webhook(_MockRequest()))
         self.assertEqual(result, {"ok": True})
         mock_create_issue.assert_not_called()
@@ -113,8 +112,7 @@ class TelegramWebhookHandlerTest(unittest.TestCase):
             async def json(self):
                 return {}
 
-        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "correct"), \
-             self.assertLogs(self.api.__name__, level="WARNING") as cm:
+        with self.assertLogs(self.api.__name__, level="WARNING") as cm:
             asyncio.run(self.api.telegram_lena_webhook(_MockRequest()))
         self.assertTrue(any("auth failure" in m for m in cm.output))
 
@@ -123,7 +121,12 @@ class TelegramWebhookHandlerTest(unittest.TestCase):
         mock_tg_db = mock.MagicMock()
         mock_tg_db.__enter__ = mock.MagicMock(return_value=mock_tg_db)
         mock_tg_db.__exit__ = mock.MagicMock(return_value=False)
-        mock_tg_db.execute = mock.MagicMock()
+        mock_tg_db.execute = mock.MagicMock(
+            return_value=mock.MagicMock(
+                fetchall=mock.MagicMock(return_value=[]),
+                fetchone=mock.MagicMock(return_value=None),
+            )
+        )
 
         class _MockRequest:
             headers = {"X-Telegram-Bot-Api-Secret-Token": "correct-secret"}
@@ -140,9 +143,9 @@ class TelegramWebhookHandlerTest(unittest.TestCase):
                     },
                 }
 
-        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "correct-secret"), \
-             mock.patch.object(self.api, "_pc_create_issue", mock_create_issue), \
-             mock.patch.object(self.api, "_telegram_db", return_value=mock_tg_db):
+        with mock.patch.object(self.api, "_pc_create_tg_issue", mock_create_issue), \
+             mock.patch.object(self.api, "_tg_agent_db", return_value=mock_tg_db), \
+             mock.patch.object(self.api, "_pc_get_issue_info", return_value=(None, None)):
             result = asyncio.run(self.api.telegram_lena_webhook(_MockRequest()))
         self.assertEqual(result, {"ok": True})
         mock_create_issue.assert_called_once()
@@ -154,8 +157,8 @@ class TelegramInReviewResetTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         env = {
-            "TELEGRAM_BOT_TOKEN": "",
-            "TELEGRAM_WEBHOOK_SECRET": "",
+            "TELEGRAM_BOT_TOKEN": "test-bot-token",
+            "TELEGRAM_WEBHOOK_SECRET": "correct-secret",
             "API_SECRET_KEY": "test-key",
         }
         cls.api = _load_api_module("api_in_review_reset_test", env)
@@ -179,7 +182,7 @@ class TelegramInReviewResetTest(unittest.TestCase):
         return _Req()
 
     def _make_db(self, issue_id):
-        """Return a mock _telegram_db that has one pending issue."""
+        """Return a mock _tg_agent_db that has one pending issue."""
         row = mock.MagicMock()
         row.__getitem__ = mock.MagicMock(side_effect=lambda k: issue_id if k == "issue_id" else None)
 
@@ -196,9 +199,7 @@ class TelegramInReviewResetTest(unittest.TestCase):
         mock_set_status = mock.MagicMock(return_value=True)
         mock_add_comment = mock.MagicMock(return_value=True)
 
-        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "correct-secret"), \
-             mock.patch.object(self.api, "_PC_LENA_AGENT_ID", "lena-agent-id"), \
-             mock.patch.object(self.api, "_telegram_db", return_value=mock_db), \
+        with mock.patch.object(self.api, "_tg_agent_db", return_value=mock_db), \
              mock.patch.object(self.api, "_pc_get_issue_info", mock_get_info), \
              mock.patch.object(self.api, "_pc_patch_issue_status", mock_set_status), \
              mock.patch.object(self.api, "_pc_add_comment_to_issue", mock_add_comment):
@@ -215,9 +216,7 @@ class TelegramInReviewResetTest(unittest.TestCase):
         mock_set_status = mock.MagicMock(return_value=True)
         mock_add_comment = mock.MagicMock(return_value=True)
 
-        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "correct-secret"), \
-             mock.patch.object(self.api, "_PC_LENA_AGENT_ID", "lena-agent-id"), \
-             mock.patch.object(self.api, "_telegram_db", return_value=mock_db), \
+        with mock.patch.object(self.api, "_tg_agent_db", return_value=mock_db), \
              mock.patch.object(self.api, "_pc_get_issue_info", mock_get_info), \
              mock.patch.object(self.api, "_pc_patch_issue_status", mock_set_status), \
              mock.patch.object(self.api, "_pc_add_comment_to_issue", mock_add_comment):
@@ -234,14 +233,14 @@ class TelegramReplyThreadingTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         env = {
-            "TELEGRAM_BOT_TOKEN": "",
-            "TELEGRAM_WEBHOOK_SECRET": "",
+            "TELEGRAM_BOT_TOKEN": "test-bot-token",
+            "TELEGRAM_WEBHOOK_SECRET": "correct-secret",
             "API_SECRET_KEY": "test-key",
         }
         cls.api = _load_api_module("api_reply_threading_test", env)
 
     def _make_db_with_pending_issue(self, issue_id, outbound_row=None):
-        """Mock _telegram_db with one pending issue and optional outbound_messages row."""
+        """Mock _tg_agent_db with one pending issue and optional outbound_messages row."""
         pending_row = mock.MagicMock()
         pending_row.__getitem__ = mock.MagicMock(
             side_effect=lambda k: issue_id if k == "issue_id" else None
@@ -299,9 +298,7 @@ class TelegramReplyThreadingTest(unittest.TestCase):
                     },
                 }
 
-        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "correct-secret"), \
-             mock.patch.object(self.api, "_PC_LENA_AGENT_ID", "lena-agent-id"), \
-             mock.patch.object(self.api, "_telegram_db", return_value=mock_db), \
+        with mock.patch.object(self.api, "_tg_agent_db", return_value=mock_db), \
              mock.patch.object(self.api, "_pc_get_issue_info", mock_get_info), \
              mock.patch.object(self.api, "_pc_add_comment_to_issue", mock_add_comment):
             result = asyncio.run(self.api.telegram_lena_webhook(_Req()))
@@ -343,9 +340,7 @@ class TelegramReplyThreadingTest(unittest.TestCase):
                     },
                 }
 
-        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "correct-secret"), \
-             mock.patch.object(self.api, "_PC_LENA_AGENT_ID", "lena-agent-id"), \
-             mock.patch.object(self.api, "_telegram_db", return_value=mock_db), \
+        with mock.patch.object(self.api, "_tg_agent_db", return_value=mock_db), \
              mock.patch.object(self.api, "_pc_get_issue_info", mock_get_info), \
              mock.patch.object(self.api, "_pc_add_comment_to_issue", mock_add_comment):
             result = asyncio.run(self.api.telegram_lena_webhook(_Req()))
@@ -396,9 +391,7 @@ class TelegramReplyThreadingTest(unittest.TestCase):
                     },
                 }
 
-        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "correct-secret"), \
-             mock.patch.object(self.api, "_PC_LENA_AGENT_ID", "lena-agent-id"), \
-             mock.patch.object(self.api, "_telegram_db", return_value=mock_db), \
+        with mock.patch.object(self.api, "_tg_agent_db", return_value=mock_db), \
              mock.patch.object(self.api, "_pc_get_issue_info", mock_get_info), \
              mock.patch.object(self.api, "_pc_add_comment_to_issue", mock_add_comment):
             result = asyncio.run(self.api.telegram_lena_webhook(_Req()))
@@ -431,9 +424,7 @@ class TelegramReplyThreadingTest(unittest.TestCase):
                     },
                 }
 
-        with mock.patch.object(self.api, "_TG_WEBHOOK_SECRET", "correct-secret"), \
-             mock.patch.object(self.api, "_PC_LENA_AGENT_ID", "lena-agent-id"), \
-             mock.patch.object(self.api, "_telegram_db", return_value=mock_db), \
+        with mock.patch.object(self.api, "_tg_agent_db", return_value=mock_db), \
              mock.patch.object(self.api, "_pc_get_issue_info", mock_get_info), \
              mock.patch.object(self.api, "_pc_add_comment_to_issue", mock_add_comment):
             result = asyncio.run(self.api.telegram_lena_webhook(_Req()))
