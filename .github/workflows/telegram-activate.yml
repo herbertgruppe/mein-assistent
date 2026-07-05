@@ -4,10 +4,11 @@ name: Telegram-Bridge aktivieren (HBE-402)
 # Voraussetzungen:
 #   1. GitHub Secrets gesetzt: TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, PAPERCLIP_API_KEY_MA
 #   2. /opt/mein-assistent/.env auf Hetzner enthält alle Telegram-/Paperclip-Vars
-#   3. HETZNER_DEPLOY_KEY (paperclip-engineering) als Org-Secret vorhanden
+#   3. HETZNER_DEPLOY_KEY (paperclip-engineering) als Org-Secret — optional, SSH-Rebuild wird
+#      übersprungen wenn nicht gesetzt (Webhook-Registrierung läuft trotzdem durch)
 #
 # Was dieser Workflow tut:
-#   - Baut den API-Container neu (zieht neue .env-Werte)
+#   - Baut den API-Container neu (nur wenn HETZNER_DEPLOY_KEY gesetzt + skip_rebuild=false)
 #   - Registriert den Telegram-Webhook via Telegram Bot API
 #   - Verifiziert die Webhook-Registrierung
 #   - Ermittelt Svens Chat-ID (ersten /start-Update ausgeben)
@@ -30,7 +31,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Check SSH key availability
+        id: ssh_check
+        env:
+          SSH_KEY: ${{ secrets.HETZNER_DEPLOY_KEY }}
+        run: |
+          if [ -n "$SSH_KEY" ]; then
+            echo "available=true" >> $GITHUB_OUTPUT
+          else
+            echo "available=false" >> $GITHUB_OUTPUT
+            echo "::warning::HETZNER_DEPLOY_KEY nicht gesetzt — SSH-Rebuild übersprungen. Webhook-Registrierung läuft weiter."
+          fi
+
       - name: Prepare SSH (paperclip-engineering)
+        if: ${{ steps.ssh_check.outputs.available == 'true' }}
         env:
           SSH_KEY: ${{ secrets.HETZNER_DEPLOY_KEY }}
         run: |
@@ -42,14 +56,14 @@ jobs:
           ssh-keygen -lf ~/.ssh/id_ed25519
 
       - name: Rebuild API container
-        if: ${{ inputs.skip_rebuild != 'true' }}
+        if: ${{ steps.ssh_check.outputs.available == 'true' && inputs.skip_rebuild != 'true' }}
         run: |
           ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes \
             paperclip-engineering@46.225.132.135 \
             "docker-compose mein-assistent build"
 
       - name: Restart API container (up -d)
-        if: ${{ inputs.skip_rebuild != 'true' }}
+        if: ${{ steps.ssh_check.outputs.available == 'true' && inputs.skip_rebuild != 'true' }}
         run: |
           ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes \
             paperclip-engineering@46.225.132.135 \
@@ -155,5 +169,5 @@ jobs:
           " || true
 
       - name: Clean up SSH key
-        if: always()
+        if: ${{ always() && steps.ssh_check.outputs.available == 'true' }}
         run: shred -u ~/.ssh/id_ed25519 2>/dev/null || rm -f ~/.ssh/id_ed25519
