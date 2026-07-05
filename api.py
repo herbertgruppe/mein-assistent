@@ -5167,7 +5167,7 @@ async def telegram_agent_webhook(slug: str, req: Request):
                 category=action_cat,
             )
         else:
-            issue_id = _pc_create_tg_issue(cfg, chat_id, msg.message_id, username, msg.text or "")
+            issue_id = _pc_create_tg_issue(cfg, chat_id, msg.message_id, username, comment_text)
         if issue_id:
             # Variant-1 guard: only track issues actually assigned to the expected agent.
             _, created_assignee = _pc_get_issue_info(issue_id)
