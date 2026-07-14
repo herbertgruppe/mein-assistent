@@ -72,7 +72,13 @@ def _fetch_mails(days: int) -> List[Dict[str, Any]]:
     )
     if resp.status_code != 200:
         raise RuntimeError(f"inbox-for-triage HTTP {resp.status_code}: {resp.text[:300]}")
-    return resp.json().get("mails", [])
+    mails = resp.json().get("mails", [])
+    if len(mails) >= 200:
+        logger.warning(
+            "[bootstrap] Hit limit=200 cap — more uncategorized mails may exist. "
+            "Re-run after this batch to process remaining mails."
+        )
+    return mails
 
 
 def _categorize(message_id: str, action: str) -> bool:
@@ -93,12 +99,14 @@ _PRIORITY_TO_IMPORTANCE = {"hoch": "high", "mittel": "normal", "niedrig": "low"}
 
 def _set_importance(message_id: str, priority: str) -> None:
     importance = _PRIORITY_TO_IMPORTANCE.get(priority, "normal")
-    requests.post(
+    resp = requests.post(
         f"{API_URL.rstrip('/')}/api/lena/mail/set-importance",
         headers=_headers(),
         json={"message_id": message_id, "importance": importance},
         timeout=30,
     )
+    if resp.status_code != 200:
+        logger.warning("set-importance HTTP %d: %s", resp.status_code, resp.text[:200])
 
 
 def _load_state() -> Dict[str, Any]:
