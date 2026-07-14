@@ -22,7 +22,7 @@ watchdog
 
 # Web Interface
 # >= 1.42: bringt st.login() / st.logout() / st.experimental_user für OIDC
-streamlit>=1.58.0,<2.0
+streamlit>=1.59.1,<2.0
 
 # PDF-Generierung aus Markdown-Protokollen
 markdown
