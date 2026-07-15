@@ -365,6 +365,17 @@ die als `mein-assistent`-User laufen und per FastAPI-Endpoints mit der App kommu
 Alle Poller teilen dasselbe Muster: systemd-Service (User=mein-assistent, voll gehärtet) +
 FastAPI-Endpoints auf localhost:8502 für Graph/Outlook/Asana-Operationen.
 
+### Wann welches Muster? APScheduler vs. systemd-Daemon
+
+Die App hat zwei Muster für Hintergrundprozesse:
+
+| Muster | Wann verwenden | Beispiel |
+|---|---|---|
+| **APScheduler (in-process)** | Kurze Jobs (<30s), eng an Streamlit-Session gekoppelt, brauchen Session-State oder DB-Zugriff via ORM | Protokoll-Generierung (`utils/background.py`) |
+| **systemd-Daemon (standalone)** | Langläufer, brauchen eigenen User/Rechte, sollen bei App-Restart weiterlaufen, I/O-intensiv (Netzwerk, Files) | plaud_poller, lena_*_poller |
+
+Faustregel: Wenn der Job nach einem Container-Restart weiterlaufen soll oder eigene Credentials/Filesystem-Zugriffe braucht → systemd-Daemon. Wenn der Job direkt vom User-Event abhängt und nur während der Streamlit-Session läuft → APScheduler.
+
 Vollständige Doku:
 - [Mail-Triage (Outlook)](MAIL_TRIAGE.md)
 - [Plaud-Poller](PLAUD_POLLER_README.md)

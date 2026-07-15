@@ -30,3 +30,6 @@ jobs:
 
       - name: Run security smoke-tests (HBE-610 — mail-move validators)
         run: python -m pytest tests/test_mail_move_validators.py -v
+
+      - name: Run plaud_poller unit tests (HBE-853)
+        run: python -m pytest tests/test_plaud_poller.py -v
