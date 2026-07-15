@@ -112,6 +112,126 @@ class RegistryBuildTest(unittest.TestCase):
         self.assertIn("lena", api._TELEGRAM_AGENTS)
         self.assertIn("florian", api._TELEGRAM_AGENTS)
 
+    def test_empty_registry_when_no_tokens_set(self):
+        api = _load_api("api_reg_empty_tr", _BASE_ENV)
+        self.assertEqual(api._TELEGRAM_AGENTS, {})
+
+    def test_lena_registered_via_legacy_vars(self):
+        api = _load_api("api_reg_lena_tr", {
+            **_BASE_ENV,
+            "TELEGRAM_BOT_TOKEN": "lena-token",
+            "TELEGRAM_WEBHOOK_SECRET": "lena-secret",
+            "PAPERCLIP_LENA_AGENT_ID": "lena-agent-uuid",
+        })
+        self.assertIn("lena", api._TELEGRAM_AGENTS)
+        cfg = api._TELEGRAM_AGENTS["lena"]
+        self.assertEqual(cfg.token, "lena-token")
+        self.assertEqual(cfg.webhook_secret, "lena-secret")
+        self.assertEqual(cfg.pc_agent_id, "lena-agent-uuid")
+
+    def test_mara_registered_via_legacy_vars(self):
+        api = _load_api("api_reg_mara_tr", {
+            **_BASE_ENV,
+            "TELEGRAM_MARA_BOT_TOKEN": "mara-token",
+            "TELEGRAM_MARA_WEBHOOK_SECRET": "mara-secret",
+            "PAPERCLIP_MARA_AGENT_ID": "mara-agent-uuid",
+        })
+        self.assertIn("mara", api._TELEGRAM_AGENTS)
+        cfg = api._TELEGRAM_AGENTS["mara"]
+        self.assertEqual(cfg.token, "mara-token")
+
+    def test_new_style_slug_is_lowercased(self):
+        api = _load_api("api_reg_slug_case_tr", {
+            **_BASE_ENV,
+            "TELEGRAM_AGENT_BOB_TOKEN": "bob-token",
+            "TELEGRAM_AGENT_BOB_WEBHOOK_SECRET": "bob-secret",
+            "TELEGRAM_AGENT_BOB_PAPERCLIP_AGENT_ID": "bob-uuid",
+        })
+        self.assertIn("bob", api._TELEGRAM_AGENTS)
+        self.assertNotIn("BOB", api._TELEGRAM_AGENTS)
+
+    def test_lena_db_path_uses_legacy_filename(self):
+        api = _load_api("api_reg_lena_db_tr", {
+            **_BASE_ENV,
+            "TELEGRAM_BOT_TOKEN": "lena-token",
+            "TELEGRAM_WEBHOOK_SECRET": "lena-secret",
+        })
+        cfg = api._TELEGRAM_AGENTS["lena"]
+        self.assertEqual(cfg.db_path.name, "telegram.db")
+
+    def test_mara_db_path_uses_legacy_filename(self):
+        api = _load_api("api_reg_mara_db_tr", {
+            **_BASE_ENV,
+            "TELEGRAM_MARA_BOT_TOKEN": "mara-token",
+            "TELEGRAM_MARA_WEBHOOK_SECRET": "mara-secret",
+            "PAPERCLIP_MARA_AGENT_ID": "mara-uuid",
+        })
+        cfg = api._TELEGRAM_AGENTS["mara"]
+        self.assertEqual(cfg.db_path.name, "telegram_mara.db")
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat module-level globals
+# ---------------------------------------------------------------------------
+class BackwardCompatVarsTest(unittest.TestCase):
+    """Module-level backward-compat globals (_TG_BOT_TOKEN etc.) still reflect registry."""
+
+    def test_tg_bot_token_mirrors_lena(self):
+        api = _load_api("api_bc_lena_token_tr", {
+            **_BASE_ENV,
+            "TELEGRAM_BOT_TOKEN": "lena-token",
+            "TELEGRAM_WEBHOOK_SECRET": "lena-secret",
+        })
+        self.assertEqual(api._TG_BOT_TOKEN, "lena-token")
+
+    def test_tg_mara_bot_token_mirrors_mara(self):
+        api = _load_api("api_bc_mara_token_tr", {
+            **_BASE_ENV,
+            "TELEGRAM_MARA_BOT_TOKEN": "mara-token",
+            "TELEGRAM_MARA_WEBHOOK_SECRET": "mara-secret",
+            "PAPERCLIP_MARA_AGENT_ID": "mara-uuid",
+        })
+        self.assertEqual(api._TG_MARA_BOT_TOKEN, "mara-token")
+
+    def test_bc_globals_empty_when_no_lena(self):
+        api = _load_api("api_bc_no_lena_tr", _BASE_ENV)
+        self.assertEqual(api._TG_BOT_TOKEN, "")
+        self.assertEqual(api._TG_WEBHOOK_SECRET, "")
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat alias routes
+# ---------------------------------------------------------------------------
+class BackwardCompatAliasRoutesTest(unittest.TestCase):
+    """/api/lena/telegram/send and /api/mara/telegram/send delegate to generic handler."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.api = _load_api("api_alias_test_tr", {
+            **_BASE_ENV,
+            "TELEGRAM_BOT_TOKEN": "lena-token",
+            "TELEGRAM_WEBHOOK_SECRET": "lena-secret",
+            "TELEGRAM_MARA_BOT_TOKEN": "mara-token",
+            "TELEGRAM_MARA_WEBHOOK_SECRET": "mara-secret",
+            "PAPERCLIP_MARA_AGENT_ID": "mara-uuid",
+        })
+
+    def test_lena_alias_calls_generic_with_lena_slug(self):
+        req = self.api.LenaTelegramSendRequest(chat_id="111", text="hello")
+        with mock.patch.object(self.api, "telegram_agent_send",
+                               return_value=mock.MagicMock(success=True)) as m:
+            self.api.lena_telegram_send(req, _key="test-key")
+        m.assert_called_once()
+        self.assertEqual(m.call_args[0][0], "lena")
+
+    def test_mara_alias_calls_generic_with_mara_slug(self):
+        req = self.api.LenaTelegramSendRequest(chat_id="222", text="hello mara")
+        with mock.patch.object(self.api, "telegram_agent_send",
+                               return_value=mock.MagicMock(success=True)) as m:
+            self.api.mara_telegram_send(req, _key="test-key")
+        m.assert_called_once()
+        self.assertEqual(m.call_args[0][0], "mara")
+
 
 # ---------------------------------------------------------------------------
 # Generic send endpoint
@@ -190,6 +310,39 @@ class GenericSendEndpointTest(unittest.TestCase):
                 self.api.telegram_agent_send(_NEW_AGENT_SLUG, req, _key="test-key")
         m_send.assert_called_once_with("fake-token", "111222333", "Hallo Florian",
                                         reply_markup=keyboard, parse_mode="MarkdownV2")
+
+    def test_send_uses_correct_token_for_lena(self):
+        """telegram_agent_send('lena', ...) passes lena's bot token to _tg_agent_send."""
+        api = _load_api("api_gs_lena_token_tr", {
+            **_BASE_ENV,
+            "TELEGRAM_BOT_TOKEN": "lena-token",
+            "TELEGRAM_WEBHOOK_SECRET": "lena-secret",
+        })
+        req = api.LenaTelegramSendRequest(chat_id="123", text="hi")
+        with mock.patch.object(api, "_tg_agent_send", return_value=42) as m_send, \
+             mock.patch.object(api, "_tg_agent_db") as mock_db:
+            mock_db.return_value.__enter__ = mock.MagicMock(return_value=mock.MagicMock())
+            mock_db.return_value.__exit__ = mock.MagicMock(return_value=False)
+            resp = api.telegram_agent_send("lena", req, _key="")
+        self.assertTrue(resp.success)
+        self.assertEqual(m_send.call_args[0][0], "lena-token")
+
+    def test_send_uses_correct_token_for_mara(self):
+        """telegram_agent_send('mara', ...) passes mara's bot token to _tg_agent_send."""
+        api = _load_api("api_gs_mara_token_tr", {
+            **_BASE_ENV,
+            "TELEGRAM_MARA_BOT_TOKEN": "mara-token",
+            "TELEGRAM_MARA_WEBHOOK_SECRET": "mara-secret",
+            "PAPERCLIP_MARA_AGENT_ID": "mara-uuid",
+        })
+        req = api.LenaTelegramSendRequest(chat_id="123", text="hi")
+        with mock.patch.object(api, "_tg_agent_send", return_value=43) as m_send, \
+             mock.patch.object(api, "_tg_agent_db") as mock_db:
+            mock_db.return_value.__enter__ = mock.MagicMock(return_value=mock.MagicMock())
+            mock_db.return_value.__exit__ = mock.MagicMock(return_value=False)
+            resp = api.telegram_agent_send("mara", req, _key="")
+        self.assertTrue(resp.success)
+        self.assertEqual(m_send.call_args[0][0], "mara-token")
 
     def test_rate_limit_429_after_limit(self):
         from fastapi import HTTPException
