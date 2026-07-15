@@ -38,7 +38,7 @@ import subprocess
 import tempfile
 import threading
 import time as _time
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -1670,6 +1670,13 @@ class AttachmentResponse(BaseModel):
 class SimpleResult(BaseModel):
     success: bool
     message: str = ""
+
+
+class SpeakerInfo(BaseModel):
+    speaker_label: str
+    probable_names: List[str] = []
+    utterance_count: int
+    total_words: int
     error: Optional[str] = None
 
 
@@ -1947,6 +1954,129 @@ def get_transcript_attachment(
             status_code=400, detail=result.get("error", "Anhang konnte nicht geladen werden.")
         )
     return AttachmentResponse(**result)
+
+
+# ---------------------------------------------------------------------------
+# Speaker-Extraktion (HBE-276)
+# ---------------------------------------------------------------------------
+
+_SPEAKER_LABEL_RE = re.compile(
+    r"^(SPEAKER_\d+|[A-ZÜÖÄ][a-züöäß]+(?:\s+[A-ZÜÖÄ][a-züöäß]+)*)\s*:\s*(.+)",
+    re.MULTILINE,
+)
+# Matches capitalized German/Latin name tokens (2+ chars after first capital)
+_NAME_TOKEN_RE = re.compile(r"\b[A-ZÜÖÄ][a-züöäß]{2,}(?:\s+[A-ZÜÖÄ][a-züöäß]{2,})?\b")
+
+
+def _parse_transcript_speakers(text: str) -> List[SpeakerInfo]:
+    """Parse Plaud transcript text, aggregating utterances per speaker label.
+
+    Handles two Plaud formats:
+    - ``SPEAKER_N: utterance`` (unlabeled / auto-diarized)
+    - ``Name [Name]: utterance`` (labeled / named by user)
+
+    Returns speakers sorted by utterance_count desc. Returns empty list
+    when no speaker labels are found (no 500).
+    """
+    utterances: dict = defaultdict(list)
+    for m in _SPEAKER_LABEL_RE.finditer(text):
+        utterances[m.group(1)].append(m.group(2).strip())
+
+    result = []
+    for label, texts in utterances.items():
+        all_text = " ".join(texts)
+        utterance_count = len(texts)
+        total_words = sum(len(t.split()) for t in texts)
+
+        probable_names: List[str] = []
+        if label.startswith("SPEAKER_"):
+            freq = Counter(_NAME_TOKEN_RE.findall(all_text))
+            probable_names = [name for name, _ in freq.most_common(5)]
+
+        result.append(SpeakerInfo(
+            speaker_label=label,
+            probable_names=probable_names,
+            utterance_count=utterance_count,
+            total_words=total_words,
+        ))
+
+    return sorted(result, key=lambda s: s.utterance_count, reverse=True)
+
+
+@app.get("/api/transcripts/{message_id}/speakers", response_model=List[SpeakerInfo])
+def get_transcript_speakers(
+    message_id: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Aggregiert Speaker-Labels und Utterance-Statistiken aus einem Plaud-Transkript.
+
+    Lädt das .txt-Anhang der Mail (Fallback: body_text) und extrahiert pro
+    Speaker-Label: utterance_count, total_words, probable_names.
+
+    Sicherheitscheck: nur Mails im Transkripte-Ordner werden akzeptiert.
+    Edge-case: kein Speaker-Label erkannt → leere Liste (kein 500).
+
+    Unterstützte Formate:
+    - ``SPEAKER_N: text`` (Plaud-Auto-Diarization ohne Namenszuweisung)
+    - ``Name Name: text`` (Plaud mit gesetzten Sprecher-Namen)
+    """
+    import requests as _rq
+
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+
+    folder_id = _resolve_transcripts_folder_id(tool)
+    if not folder_id:
+        raise HTTPException(status_code=404, detail="Transkripte-Ordner nicht gefunden.")
+
+    if not tool.is_message_in_folder(message_id, folder_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Mail liegt nicht im Transkripte-Ordner.",
+        )
+
+    headers = {
+        "Authorization": f"Bearer {tool.access_token}",
+        "Prefer": 'outlook.body-content-type="text"',
+    }
+
+    # Try .txt attachment first
+    transcript_text = ""
+    att_url = (
+        f"https://graph.microsoft.com/v1.0/me/messages/{message_id}/attachments"
+        "?$select=id,name,contentType,contentBytes"
+    )
+    att_resp = _rq.get(att_url, headers=headers, timeout=30)
+    if att_resp.status_code == 401 and tool._refresh_access_token():
+        headers["Authorization"] = f"Bearer {tool.access_token}"
+        att_resp = _rq.get(att_url, headers=headers, timeout=30)
+
+    if att_resp.status_code == 200:
+        for att in att_resp.json().get("value", []):
+            if att.get("name", "").lower().endswith(".txt") and att.get("contentBytes"):
+                try:
+                    transcript_text = base64.b64decode(att["contentBytes"]).decode(
+                        "utf-8", errors="replace"
+                    )
+                    break
+                except Exception:
+                    pass
+
+    # Fallback: message body text
+    if not transcript_text:
+        msg_url = (
+            f"https://graph.microsoft.com/v1.0/me/messages/{message_id}?$select=body"
+        )
+        msg_resp = _rq.get(msg_url, headers=headers, timeout=30)
+        if msg_resp.status_code == 401 and tool._refresh_access_token():
+            headers["Authorization"] = f"Bearer {tool.access_token}"
+            msg_resp = _rq.get(msg_url, headers=headers, timeout=30)
+        if msg_resp.status_code == 200:
+            transcript_text = (msg_resp.json().get("body") or {}).get("content", "") or ""
+
+    return _parse_transcript_speakers(transcript_text)
 
 
 # ---------------------------------------------------------------------------
