@@ -23,7 +23,7 @@ jobs:
           python-version: '3.13'
 
       - name: Install dependencies
-        run: pip install pytest requests
+        run: pip install pytest requests python-dotenv
 
       - name: Run regression tests (HBE-273 / HBE-277 — Dragan-Halluzinations-Klasse)
         run: python -m pytest tests/regression -v
