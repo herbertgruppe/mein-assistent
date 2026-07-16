@@ -49,12 +49,8 @@ RECENT_DAYS          = int(os.getenv("PLAUD_RECENT_DAYS", "1"))
 
 PC_API_URL      = os.getenv("PAPERCLIP_API_URL",    "https://paperclip.herbertgruppe.com")
 PC_API_KEY      = os.getenv("PAPERCLIP_API_KEY_MA", "")
-PC_COMPANY_ID   = os.getenv("PAPERCLIP_COMPANY_ID_MA", "9df4976b-9ac8-4e8f-a156-c06c7fa40cdc")
-# Protokoll-Agent-ID — ersetzt durch echte ID sobald HBE-682 erledigt ist
-PC_PROTOKOLL_AGENT_ID = os.getenv(
-    "PAPERCLIP_PROTOKOLL_AGENT_ID",
-    "67d2dae0-30bd-4957-b64a-9b8926863b0b",  # Fallback: CEO Felix
-)
+PC_COMPANY_ID   = os.getenv("PAPERCLIP_COMPANY_ID_MA", "")
+PC_PROTOKOLL_AGENT_ID = os.getenv("PAPERCLIP_PROTOKOLL_AGENT_ID", "")
 
 TG_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN",    "")
 TG_ADMIN_CHAT = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
@@ -570,6 +566,15 @@ def _handle_signal(signum: int, _frame: Any) -> None:
 def main() -> None:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT,  _handle_signal)
+
+    _required = {
+        "PAPERCLIP_COMPANY_ID_MA": PC_COMPANY_ID,
+        "PAPERCLIP_PROTOKOLL_AGENT_ID": PC_PROTOKOLL_AGENT_ID,
+    }
+    missing = [k for k, v in _required.items() if not v]
+    if missing:
+        logger.error("Required env vars not set — aborting: %s", ", ".join(missing))
+        sys.exit(1)
 
     logger.info(
         "plaud_poller starting — interval=%ds min_duration=%ds db=%s",

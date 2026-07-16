@@ -23,10 +23,13 @@ jobs:
           python-version: '3.13'
 
       - name: Install dependencies
-        run: pip install pytest requests
+        run: pip install pytest requests python-dotenv
 
       - name: Run regression tests (HBE-273 / HBE-277 — Dragan-Halluzinations-Klasse)
         run: python -m pytest tests/regression -v
 
       - name: Run security smoke-tests (HBE-610 — mail-move validators)
         run: python -m pytest tests/test_mail_move_validators.py -v
+
+      - name: Run plaud_poller unit tests (HBE-853)
+        run: python -m pytest tests/test_plaud_poller.py -v
