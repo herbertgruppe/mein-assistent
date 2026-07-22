@@ -13,3 +13,9 @@ CVE-2026-31802
 # Trivy attributing npm CVE from GitHub Actions runner environment
 # Accepted: 2026-07-04, Owner: Jonas (Engineering), Ref: HBE-1768
 CVE-2024-21538
+# CVE-2026-59873/59874: tar (npm) DoS via gzip bomb / malformed tar header
+# False positive: same runner-attribution pattern as above — mein-assistent has no Node.js
+# runtime and no npm packages in the container image; tar npm package not present.
+# Accepted: 2026-07-22, Owner: Jonas (Engineering), Ref: HBE-2400
+CVE-2026-59873
+CVE-2026-59874
