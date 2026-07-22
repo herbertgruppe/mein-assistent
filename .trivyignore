@@ -19,3 +19,9 @@ CVE-2024-21538
 # Accepted: 2026-07-22, Owner: Jonas (Engineering), Ref: HBE-2400
 CVE-2026-59873
 CVE-2026-59874
+# CVE-2026-13149: brace-expansion (npm) DoS via exponential-time O(2^n) expansion
+# False positive: same runner-attribution pattern — mein-assistent is a pure Python/Streamlit app
+# with no Node.js runtime, no npm, no package.json in the container image. Trivy picks up
+# brace-expansion from the GitHub Actions runner environment, not from the container image.
+# Accepted: 2026-07-22, Owner: Jonas (Engineering), Ref: HBE-2404
+CVE-2026-13149
