@@ -53,3 +53,6 @@ python-multipart
 
 # Protokoll-Review-Editor (templates/review.html)
 jinja2
+
+# Security: fix GHSA-rwj8-pgh3-r573 (env-var exfiltration via git remote URLs)
+gitpython>=3.1.52
