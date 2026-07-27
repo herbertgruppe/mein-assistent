@@ -9,11 +9,14 @@ Covers:
 - lena_telegram_send returns success=False without raising when Telegram fails
 - _tg_send_message passes parse_mode to Telegram API payload
 - Rate limiter returns HTTP 429 after 10 calls/min (HBE-1212)
+- Alert-send outside lock: parallel rate-check calls are not blocked by slow Telegram I/O (HBE-1323)
 """
 import importlib.util
 import os
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -195,6 +198,67 @@ class TgRateLimiterTest(unittest.TestCase):
         # Mara bucket should still be empty — _tg_rate_check("mara") must return True
         result = self.api._tg_rate_check("mara")
         self.assertTrue(result)
+
+
+class TgRateLockNonBlockingTest(unittest.TestCase):
+    """HBE-1323: Alert-send must not block concurrent _tg_rate_check calls.
+
+    _tg_send_message fires OUTSIDE _TG_RATE_LOCK, so a slow Telegram API during
+    an alert must not serialise other rate-check callers.
+    """
+
+    ALERT_SLEEP = 0.3  # seconds the monkey-patched _tg_send_message sleeps
+
+    def setUp(self):
+        self.api = _load_api("api_nonblocking_test")
+        self.api._TG_RATE_LIMIT = 2
+        self.api._TG_RATE_BUCKETS.clear()
+        self.api._TG_RATE_LAST_ALERT.clear()
+        # Set admin chat ID so should_alert evaluates to True on first breach
+        self.api._TG_ADMIN_CHAT_ID = "999"
+
+    def test_concurrent_rate_check_not_blocked_by_slow_alert(self):
+        # Fill the bucket to exactly the limit so the next call triggers a breach + alert
+        for _ in range(self.api._TG_RATE_LIMIT):
+            self.api._TG_RATE_BUCKETS["lena"].append(self.api._time.monotonic())
+
+        alert_started = threading.Event()
+        second_check_done = threading.Event()
+        second_check_elapsed = []
+
+        def slow_send(chat_id, text, **kwargs):
+            alert_started.set()
+            time.sleep(self.ALERT_SLEEP)
+
+        def run_alerting_check():
+            with mock.patch.object(self.api, "_tg_send_message", side_effect=slow_send):
+                self.api._tg_rate_check("lena")
+
+        def run_second_check():
+            # Wait until the first check has started its slow I/O, then probe
+            alert_started.wait(timeout=1.0)
+            t0 = time.monotonic()
+            self.api._tg_rate_check("lena")
+            second_check_elapsed.append(time.monotonic() - t0)
+            second_check_done.set()
+
+        t1 = threading.Thread(target=run_alerting_check, daemon=True)
+        t2 = threading.Thread(target=run_second_check, daemon=True)
+        t1.start()
+        t2.start()
+
+        second_check_done.wait(timeout=2.0)
+        t1.join(timeout=self.ALERT_SLEEP + 0.5)
+
+        self.assertTrue(second_check_done.is_set(), "Second rate-check never completed")
+        elapsed = second_check_elapsed[0]
+        # The second check must complete well below the alert sleep duration —
+        # if it were blocked inside the lock it would take >= ALERT_SLEEP seconds
+        self.assertLess(
+            elapsed,
+            self.ALERT_SLEEP * 0.5,
+            f"Second _tg_rate_check took {elapsed:.3f}s — likely blocked by alert I/O inside lock",
+        )
 
 
 if __name__ == "__main__":
