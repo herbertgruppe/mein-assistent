@@ -25,3 +25,109 @@ CVE-2026-59874
 # brace-expansion from the GitHub Actions runner environment, not from the container image.
 # Accepted: 2026-07-22, Owner: Jonas (Engineering), Ref: HBE-2404
 CVE-2026-13149
+
+# KW32 No-Fix OS CVEs (2026-07-28, HBE-2561)
+# All entries below: Debian packaging issue, no upstream fix available as of 2026-07-28.
+# Will be re-evaluated in KW33 scan.
+
+# util-linux family: CVE-2026-53615 (no fix in Debian 13)
+CVE-2026-53615
+
+# gzip: heap buffer overflow (no fix in Debian 13)
+CVE-2026-41992
+
+# libacl: ACL bypass (no fix in Debian 13)
+CVE-2026-54369
+
+# ncurses: multiple vulnerabilities (no fix in Debian 13)
+CVE-2025-69720
+
+# perl CRITICAL+HIGH (4 CRIT + 4 HIGH, no fix in Debian 13 perl 5.40.1)
+CVE-2026-13221
+CVE-2026-42496
+CVE-2026-57433
+CVE-2026-8376
+CVE-2026-42497
+CVE-2026-48962
+CVE-2026-57432
+CVE-2026-9538
+
+# curl family (7 HIGH, no fix in Debian 13 curl 8.14.1)
+CVE-2026-12064
+CVE-2026-8286
+CVE-2026-8927
+CVE-2026-8932
+CVE-2026-9079
+CVE-2026-9080
+CVE-2026-9545
+
+# libexpat1 (6 HIGH, no fix in Debian 13 expat 2.7.1)
+CVE-2025-59375
+CVE-2026-25210
+CVE-2026-45186
+CVE-2026-56131
+CVE-2026-56407
+CVE-2026-56408
+
+# libglib2.0 (CRIT + 6 HIGH, no fix in Debian 13 glib2 2.84.4)
+CVE-2026-58010
+CVE-2026-58011
+CVE-2026-58012
+CVE-2026-58013
+CVE-2026-58014
+CVE-2026-58015
+CVE-2026-58016
+
+# libtiff6 (HIGH, no fix in Debian 13)
+CVE-2026-36849
+
+# libxml2 CRITICAL (no fix in Debian 13 libxml2 2.9.14)
+CVE-2026-6653
+
+# openssh-client (CRIT + 2 HIGH, no fix in Debian 13 openssh 10.0p1)
+CVE-2026-59999
+CVE-2026-60000
+CVE-2026-60002
+
+# linux-libc-dev: kernel header CVEs — not applicable to container workloads
+# (container does not run the host kernel). Classic container false-positive pattern.
+CVE-2013-7445
+CVE-2019-19449
+CVE-2019-19814
+CVE-2021-3847
+CVE-2021-3864
+CVE-2024-21803
+CVE-2024-58015
+CVE-2025-22104
+CVE-2025-38137
+CVE-2025-38187
+CVE-2025-38204
+CVE-2025-38206
+CVE-2025-38421
+CVE-2025-38636
+CVE-2025-39859
+CVE-2025-39862
+CVE-2025-39958
+CVE-2026-23102
+CVE-2026-23208
+CVE-2026-23327
+CVE-2026-31493
+CVE-2026-31536
+CVE-2026-31568
+CVE-2026-43185
+CVE-2026-43198
+CVE-2026-43263
+CVE-2026-46130
+CVE-2026-46181
+CVE-2026-46279
+CVE-2026-52991
+CVE-2026-53000
+CVE-2026-53010
+CVE-2026-53089
+CVE-2026-53091
+CVE-2026-53109
+CVE-2026-53118
+CVE-2026-53277
+CVE-2026-53330
+CVE-2026-63970
+CVE-2026-64017
