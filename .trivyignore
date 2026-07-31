@@ -131,3 +131,14 @@ CVE-2026-53277
 CVE-2026-53330
 CVE-2026-63970
 CVE-2026-64017
+
+# KW32 Trivy-Scan 2026-07-31 — Neue linux-libc-dev kernel CVEs — HBE-e94b15f9
+# linux-libc-dev 6.12.96-1 (Debian 13, python:3.14-slim)
+# Alle "affected", kein Fix verfuegbar — container-FP (kein Kernel laeuft im Container)
+CVE-2026-64287
+CVE-2026-64364
+CVE-2026-64375
+CVE-2026-64434
+CVE-2026-64534
+CVE-2026-64552
+CVE-2026-64558
