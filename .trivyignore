@@ -142,3 +142,22 @@ CVE-2026-64434
 CVE-2026-64534
 CVE-2026-64552
 CVE-2026-64558
+
+# KW34 Trivy-Scan 2026-08-17 — No-Fix OS CVEs — HBE-2773
+# Kein Debian-Fix verfuegbar zum Zeitpunkt des Scans
+
+# CVE-2026-8458: curl — Information disclosure vulnerability
+# No fix available in Debian 13. Affects mein-assistent, hindsight, docker-server.
+# Accepted: 2026-08-18, Owner: Jonas (Engineering), Ref: HBE-2773
+CVE-2026-8458
+
+# CVE-2026-58050: libssh2-1t64 — Use-after-free vulnerability
+# No fix available in Debian 13. Accepted: 2026-08-18, Owner: Jonas, Ref: HBE-2773
+CVE-2026-58050
+
+# CVE-2026-69152: brace-expansion (npm) — ReDoS bypasses CVE-2026-14257 fix
+# False positive: mein-assistent is a pure Python app with no Node.js runtime or npm in
+# the container image. Trivy attributes this from the GitHub Actions runner environment.
+# Same runner-attribution pattern as CVE-2026-13149 (already suppressed above).
+# Accepted: 2026-08-18, Owner: Jonas (Engineering), Ref: HBE-2773
+CVE-2026-69152
