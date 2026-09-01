@@ -56,7 +56,7 @@ jinja2
 
 # Security: fix GHSA-rwj8-pgh3-r573 (env-var exfiltration via git remote URLs)
 #           fix GHSA-4gmw-gg2m-w46p (unguarded git read-tree option forwarding)
-gitpython>=3.1.58
+gitpython>=3.1.61
 
 # Security: fix CVE-2026-69244 (aiohttp DoS via malformed HTTP — transitive dep)
 aiohttp>=3.14.3
