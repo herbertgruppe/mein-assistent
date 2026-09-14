@@ -3881,6 +3881,10 @@ def _check_lena_importance(v: str) -> str:
 class LenaCategorizeRequest(BaseModel):
     message_id: str
     action: str
+    # HBE-Mail-Konzept 2026-09: Bei action="ablegen" das automatische Archivieren
+    # unterdruecken. Die Mail bekommt die Kategorie, bleibt aber im Posteingang.
+    # Genutzt fuer "Ablegen (Vorschlag)" — Sven bestaetigt per Sammelmeldung.
+    skip_archive: bool = False
 
     @field_validator("message_id")
     @classmethod
@@ -4544,8 +4548,15 @@ def lena_mail_categorize(
         )
 
     # HBE-1603: Wenn action="ablegen", Mail sofort archivieren — keine zweite API-Call-Runde notwendig
+    # HBE-Mail-Konzept 2026-09: ausser skip_archive=True ("Ablegen (Vorschlag)").
     moved_to_archive: Optional[bool] = None
-    if req.action == "ablegen":
+    if req.action == "ablegen" and req.skip_archive:
+        logger.info(
+            "[categorize] action=ablegen mit skip_archive=True — Mail bleibt im Posteingang (%s)",
+            req.message_id[:24],
+        )
+        moved_to_archive = False
+    elif req.action == "ablegen":
         try:
             archive_folder_id = _resolve_folder_id("archive", headers)
             # HBE-1616: POST /move statt PATCH parentFolderId
