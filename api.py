@@ -3939,6 +3939,12 @@ class LenaTriageInboxMail(BaseModel):
     received_at: str
     body_preview: str
     has_attachments: bool
+    # HBE-3044: Fuer die mechanischen Pruefungen der Triage.
+    #   conversation_id -> Mails eines Vorgangs zusammen entscheiden
+    #   to/cc_emails    -> wer bereits im Verteiler steht, braucht keine Weiterleitung
+    conversation_id: str = ""
+    to_emails: List[str] = []
+    cc_emails: List[str] = []
 
 
 class LenaTriageInboxResponse(BaseModel):
@@ -4670,6 +4676,7 @@ def lena_mail_inbox_for_triage(
         f"?$filter=receivedDateTime ge {since}"
         f"&$top={over_fetch}"
         "&$select=id,subject,from,receivedDateTime,bodyPreview,hasAttachments,categories"
+        ",conversationId,toRecipients,ccRecipients"
         "&$orderby=receivedDateTime desc"
     )
 
@@ -4687,6 +4694,15 @@ def lena_mail_inbox_for_triage(
             if any(c.startswith("Lena: ") for c in cats):
                 continue
         sender = (m.get("from") or {}).get("emailAddress", {}) or {}
+
+        def _addrs(key: str) -> List[str]:
+            out: List[str] = []
+            for r in (m.get(key) or []):
+                a = ((r or {}).get("emailAddress") or {}).get("address") or ""
+                if a:
+                    out.append(a.lower())
+            return out
+
         mails.append(LenaTriageInboxMail(
             message_id=m.get("id", "") or "",
             subject=(m.get("subject") or ""),
@@ -4695,6 +4711,9 @@ def lena_mail_inbox_for_triage(
             received_at=(m.get("receivedDateTime") or ""),
             body_preview=(m.get("bodyPreview") or "")[:500],
             has_attachments=bool(m.get("hasAttachments")),
+            conversation_id=(m.get("conversationId") or ""),
+            to_emails=_addrs("toRecipients"),
+            cc_emails=_addrs("ccRecipients"),
         ))
         if len(mails) >= limit:
             break

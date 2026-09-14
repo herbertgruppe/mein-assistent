@@ -158,20 +158,21 @@ def _build_sven_persona(cfg: Dict[str, Any]) -> str:
     region = persona.get("region", "Rhein-Main-Neckar-Raum")
     n_dr = persona.get("direktberichte_count", 13)
 
+    # Fallback, falls die YAML fehlt. Adressen verifiziert 2026-09-14 aus dem Archiv.
     direktberichte = cfg.get("direktberichte", [
-        {"name": "Frank Herbert", "funktion": "Kfm. Leiter & Stellv."},
-        {"name": "Laura Ann Hernandez-Allmann", "funktion": "Persönliche Assistentin"},
-        {"name": "Walter Melcher", "funktion": "Marketing"},
-        {"name": "Sven Walter", "funktion": "IT"},
-        {"name": "Tim Kneusels", "funktion": "Personal"},
-        {"name": "Jan Herbert", "funktion": "Einkauf & Logistik"},
-        {"name": "Philipp Scheidlock", "funktion": "QM"},
-        {"name": "Dragan Mihaljevic", "funktion": "NL-Leiter HBO/Bornemann Frankfurt"},
-        {"name": "Thomas Winzer", "funktion": "NL-Leiter HRN/Rhein-Neckar"},
-        {"name": "Thorsten Vogel", "funktion": "NL-Leiter HS/Service"},
-        {"name": "René Turtschan", "funktion": "NL-Leiter HRE/Reibstein Nauheim"},
-        {"name": "Franjo Senk", "funktion": "Teamleiter TGM"},
-        {"name": "Lev Keimes", "funktion": "NL-Leiter Dimexcon Innovation & Digitalisierung"},
+        {"name": "Frank Herbert", "funktion": "Kfm. Leiter & Stellv.", "email": "f.herbert@herbert.de"},
+        {"name": "Laura Ann Hernandez-Allmann", "funktion": "Persönliche Assistentin", "email": "l.hernandez-allmann@herbert.de"},
+        {"name": "Walter Melcher", "funktion": "Marketing", "email": "w.melcher@herbert.de"},
+        {"name": "Sven Walter", "funktion": "IT", "email": "s.walter@herbert.de"},
+        {"name": "Tim Kneusels", "funktion": "Personal", "email": "t.kneusels@herbert.de"},
+        {"name": "Jan Herbert", "funktion": "Einkauf & Logistik", "email": "jan.herbert@herbert.de"},
+        {"name": "Philipp Scheidlock", "funktion": "QM", "email": "p.scheidlock@herbert.de"},
+        {"name": "Dragan Mihaljevic", "funktion": "NL-Leiter HBO/Bornemann Frankfurt", "email": "dmihaljevic@bornemann-haustechnik.de"},
+        {"name": "Thomas Winzer", "funktion": "NL-Leiter HRN/Rhein-Neckar", "email": "t.winzer@herbert.de"},
+        {"name": "Thorsten Vogel", "funktion": "NL-Leiter HS/Service", "email": "t.vogel@herbert.de"},
+        {"name": "René Turtschan", "funktion": "NL-Leiter HRE/Reibstein Nauheim", "email": "r.turtschan@reibstein.de"},
+        {"name": "Franjo Senk", "funktion": "Teamleiter TGM", "email": "f.senk@herbert.de"},
+        {"name": "Lev Keimes", "funktion": "NL-Leiter Dimexcon Innovation & Digitalisierung", "email": "l.keimes@dimexcon.de"},
     ])
     externe = cfg.get("externe_wichtige_kontakte", [
         {"name": "Caroline Flick", "context": "Volksbank Aufsichtsrat, künftige AR-Vorsitzende 2027", "default_prioritaet": "hoch"},
@@ -182,15 +183,22 @@ def _build_sven_persona(cfg: Dict[str, Any]) -> str:
         "it": "Sven Walter", "regional": "jeweiliger NL-Leiter",
     })
 
-    dr_lines = "\n".join(f"- {d['name']} ({d.get('funktion', '')})" for d in direktberichte)
+    # HBE-3044: Adressen mit ausgeben. Vorher stand im Prompt pauschal
+    # "alle @herbert.de" — das stimmt nicht (Dragan schreibt von
+    # @bornemann-haustechnik.de, Rene von @reibstein.de, Lev von @dimexcon.de).
+    dr_lines = "\n".join(
+        f"- {d['name']} ({d.get('funktion', '')})"
+        + (f" — {d['email']}" if d.get("email") else "")
+        for d in direktberichte
+    )
     ext_lines = "\n".join(
         f"- {e['name']} ({e.get('context', '')}) — {e.get('default_prioritaet', 'mittel').capitalize()}"
         for e in externe
     )
     routing_str = (
-        f"{routing.get('kfm','Frank')} für kfm. Themen, "
-        f"{routing.get('marketing','Walter')} für Marketing, "
-        f"{routing.get('personal','Tim')} für Personal, "
+        f"{routing.get('kfm','Frank Herbert')} für kaufmännische Themen, "
+        f"{routing.get('marketing','Walter Melcher')} für Marketing, "
+        f"{routing.get('personal','Tim Kneusels')} für Personal, "
         f"{routing.get('it','Sven Walter')} für IT, "
         f"{routing.get('regional','jeweiliger NL-Leiter')} für regionale Themen"
     )
@@ -200,37 +208,41 @@ def _build_sven_persona(cfg: Dict[str, Any]) -> str:
 Sven ist {titel} ({mitarbeiter} Mitarbeiter, {branche},
 {region}). Er hat {n_dr} direkte Berichte und führt die Gruppe operativ.
 
-WICHTIGE PERSONEN für E-Mail-Priorität (alle @herbert.de):
-
-DIREKTBERICHTE (Antwort/Aktion meist Hoch- oder Mittel-Prio):
+SVENS DIREKTBERICHTE — nur diese Personen kommen für eine Weiterleitung infrage:
 {dr_lines}
+
+Zuständigkeiten: {routing_str}
 
 EXTERNE WICHTIGE KONTAKTE:
 {ext_lines}
 - Kunden/Lieferanten — Mittel (kontextabhängig)
 
-AKTION-OPTIONEN:
-- antworten: Sven muss zurückschreiben (echte Frage, Bitte um Stellungnahme,
-  persönliche Anfrage, AW/Re-Faden mit Frage)
-- tun: Sven muss aktiv handeln, aber keine Mail-Antwort (z.B. Dokument
-  unterschreiben, Link prüfen, Vereinbarung umsetzen)
-- warten: Reine Info, Sven wartet auf Folge von anderen (FYI, Status-Update,
-  CC für Awareness)
-- recherchieren: Sven muss erst Vorbereitung machen (großer Anhang lesen,
-  Hintergrund klären, mit dritter Person abstimmen)
-- weiterleiten: Geht eigentlich an jemand anderen ({routing_str})
-- ablegen: Keine Aktion, nur archivieren (Marketing-Mails, externe Newsletter,
-  Werbung, automated Notifications, FYI ohne Erwartung)
+DIE 5-SCHRITTE-REGEL
+Prüfe die Schritte STRENG DER REIHE NACH und nimm den ERSTEN, der zutrifft.
+
+1. LÖSCHEN — Newsletter, Werbung, Kaltakquise, Veranstaltungseinladung ohne
+   konkreten Bezug zur Herbert Gruppe, automatische Systemmeldung, Massenmail.
+2. ABLEGEN — Information zur Kenntnis. Kein Handlungsbedarf für Sven, aber die
+   Mail soll aufbewahrt werden. Auch: Sven wartet auf die Aktion eines anderen,
+   oder die Sache ist bereits erledigt.
+3. WEITERLEITEN — Das Thema gehört fachlich einem der oben genannten
+   Direktberichte, und Sven selbst muss nichts beitragen. NUR wenn du die Person
+   konkret benennen kannst. Automatische Systemmails werden NIEMALS
+   weitergeleitet. Eine Mail, die an Sven persönlich gerichtet ist, ebenfalls nicht.
+4. TERMINIEREN — Sven muss selbst etwas tun, das länger als zwei Minuten dauert
+   oder einen Termin braucht. Wird eine Aufgabe.
+5. ERLEDIGEN — Sven muss kurz antworten oder etwas in unter zwei Minuten tun.
+
+Im Zweifel zwischen zwei Schritten: nimm den NIEDRIGEREN.
 
 PRIORITÄT:
-- hoch: Frist heute/diese Woche, oder von Direktbericht mit konkretem
-  Action-Bezug, oder Eskalation/Mahnung
-- mittel: Sollte diese Woche erledigt werden (Standard für Direktberichte,
-  laufende Themen)
-- niedrig: Kann auch mal liegenbleiben (FYI, optional, externe Info)
+- hoch: Frist heute oder diese Woche, Eskalation, Mahnung
+- mittel: sollte diese Woche erledigt werden
+- niedrig: kann liegenbleiben
 
-REGEL: Wenn unsicher → "antworten" + "mittel". Übersetze sparsam zu "weiterleiten"
-(nur wenn klar erkennbar dass jemand anderes zuständig).
+Antworte AUSSCHLIESSLICH mit JSON:
+{{"schritt": 1-5, "empfaenger": "Name oder null", "prioritaet": "hoch|mittel|niedrig",
+  "begruendung": "max 12 Wörter"}}
 """
 
 
@@ -245,7 +257,10 @@ Vorschau (erste 500 Zeichen):
 {body_preview}
 {hint_block}
 Antworte AUSSCHLIESSLICH mit einem JSON-Objekt der Form:
-{{"action": "...", "priority": "...", "reasoning": "kurzer deutscher Satz, max 80 Zeichen"}}
+{{"schritt": 1, "empfaenger": null, "prioritaet": "mittel", "begruendung": "kurzer deutscher Satz, max 80 Zeichen"}}
+
+"schritt" ist eine ZAHL von 1 bis 5 nach der 5-Schritte-Regel.
+"empfaenger" nur bei Schritt 3 setzen, sonst null.
 
 KEIN Markdown, KEIN ```json``` Block, KEIN Fließtext drumherum.
 """
@@ -448,17 +463,27 @@ def _fetch_categorized_overrides(since_iso: str) -> List[Dict[str, Any]]:
 
 # ── Triage-Regeln (v1, regelbasiert) ──────────────────────────────────────────
 # Newsletter/Automated-Sender — werden auf Ablegen + Niedrig gesetzt.
+# HBE-3044: Praefix statt exakter Uebereinstimmung. Vorher verlangte
+# `^noreply@` genau "noreply@" — `noreply-dmarc-support@google.com` rutschte
+# durch und wurde vom Sprachmodell zur Weiterleitung vorgeschlagen.
+# Zusaetzlich: die Maschinen-Kennung darf auch hinten stehen
+# (`newsletters-noreply@linkedin.com`, `messaging-digest-noreply@...`).
 NEWSLETTER_SENDER_PATTERNS = [
-    r'^noreply@',
-    r'^no-reply@',
-    r'^newsletter@',
-    r'^marketing@',
-    r'^mailings?@',
-    r'^donotreply@',
-    r'^do-not-reply@',
-    r'^updates?@',
-    r'^notifications?@',
-    r'^notify@',
+    r'^no-?_?reply',
+    r'^do-?not-?reply',
+    r'^newsletters?',
+    r'^marketing[@._-]',
+    r'^mailings?[@._-]',
+    r'^mailer[@._-]',
+    r'^updates?[@._-]',
+    r'^notifications?[@._-]',
+    r'^notify[@._-]',
+    r'^invitations?[@._-]',
+    r'^messaging[@._-]',
+    r'^bounce[@._-]',
+    r'-no-?reply@',
+    r'-noreply@',
+    r'_noreply@',
     r'@mailchimp\.',
     r'@sendgrid\.',
     r'@email\.linkedin\.com$',
@@ -590,7 +615,7 @@ def sender_verdict(sender_email: str) -> Optional[str]:
     return verdict
 
 
-def may_auto_archive(sender_email: str, rule_id: str) -> bool:
+def may_auto_archive(sender_email: str, rule_id: str, schritt: Optional[int] = None) -> bool:
     """
     Entscheidet, ob ein 'ablegen'-Urteil die Mail auch wirklich verschieben darf.
 
@@ -598,9 +623,15 @@ def may_auto_archive(sender_email: str, rule_id: str) -> bool:
       - deterministischer Regel (Systemabsender, Newsletter, Kalender)
       - Absendern mit Einstufung 'safe_archive' aus dem Archiv-Profil
 
+    Gesperrt bei Schritt 2 der 5-Schritte-Regel (HBE-3044): "zur Kenntnis,
+    aufbewahren" ist etwas anderes als "kann ungelesen weg". Nur Schritt 1
+    (Loeschen) darf still archivieren.
+
     Sonst bleibt die Mail als Vorschlag im Posteingang. Damit kann kein Urteil,
     das allein auf einer LLM-Einschaetzung beruht, still Post verschwinden lassen.
     """
+    if schritt is not None and schritt in SCHRITTE_OHNE_AUTOARCHIV:
+        return False
     if rule_id.startswith(("system_sender", "newsletter_sender", "calendar_subject")):
         return True
     return sender_verdict(sender_email) in AUTO_ARCHIVE_VERDICTS
@@ -850,6 +881,85 @@ def _try_parse_iso(ts: str) -> Optional[datetime]:
 _VALID_ACTIONS = {"antworten", "tun", "warten", "recherchieren", "weiterleiten", "ablegen"}
 _VALID_PRIORITIES = {"hoch", "mittel", "niedrig"}
 
+# ── 5-Schritte-Regel (HBE-3044) ───────────────────────────────────────────────
+# Sven arbeitet seine Mails nach der 5-Schritte-Regel ab. Sie ist eine geordnete
+# Entscheidungsfolge statt einer Sammlung gleichrangiger Etiketten — das nimmt
+# dem Modell die Freiheit, die vorher die Fehlklassifikationen erzeugt hat.
+# Gemessen am realen Posteingang sank der Anteil der Mails mit Handlungsbedarf
+# von 86 % auf 40 %.
+#
+# Die Outlook-Kategorien bleiben unveraendert; die Schritte werden auf die
+# bestehenden Aktionen abgebildet:
+SCHRITT_NAMEN = {
+    1: "Löschen",
+    2: "Ablegen",
+    3: "Weiterleiten",
+    4: "Terminieren",
+    5: "Erledigen",
+}
+SCHRITT_ZU_AKTION = {
+    1: "ablegen",       # darf archiviert werden, sofern gedeckt
+    2: "ablegen",       # bleibt immer Vorschlag — nie still archivieren
+    3: "weiterleiten",
+    4: "tun",           # wird spaeter eine Asana-Aufgabe
+    5: "antworten",
+}
+# Schritt 2 ist bewusst nie automatisch archivierbar: "zur Kenntnis, aufbewahren"
+# ist etwas anderes als "kann ungelesen weg".
+SCHRITTE_OHNE_AUTOARCHIV = {2}
+
+# Rueckwaerts-Abbildung fuer das alte Antwortformat. "warten" wird zu Ablegen,
+# "recherchieren" zu Terminieren — beide Kategorien entfallen mit der neuen Regel.
+AKTION_ZU_SCHRITT = {
+    "ablegen": 2,          # konservativ: nicht automatisch archivieren
+    "warten": 2,
+    "weiterleiten": 3,
+    "tun": 4,
+    "recherchieren": 4,
+    "antworten": 5,
+}
+
+# Das Modell liefert gelegentlich den Schrittnamen statt der Zahl — auf Deutsch
+# oder Englisch. Statt den Aufruf scheitern zu lassen (und in den Fallback
+# "antworten" zu fallen) wird der Name uebersetzt. Im ersten Praxistest betraf
+# das 26 von 145 Mails.
+NAME_ZU_SCHRITT = {
+    "löschen": 1, "loeschen": 1, "delete": 1, "1": 1,
+    "ablegen": 2, "file": 2, "archive": 2, "2": 2,
+    "weiterleiten": 3, "forward": 3, "3": 3,
+    "terminieren": 4, "terminate": 4, "schedule": 4, "task": 4, "4": 4,
+    "erledigen": 5, "do": 5, "reply": 5, "5": 5,
+}
+
+
+def _parse_schritt(wert: Any) -> Optional[int]:
+    """Nimmt 1-5, '3', 'terminieren' oder 'Schritt 4' und liefert die Zahl."""
+    if wert is None:
+        return None
+    if isinstance(wert, bool):
+        return None
+    if isinstance(wert, int):
+        return wert if wert in SCHRITT_ZU_AKTION else None
+    text = str(wert).strip().lower()
+    if text in NAME_ZU_SCHRITT:
+        return NAME_ZU_SCHRITT[text]
+    m = re.search(r'[1-5]', text)
+    if m:
+        return int(m.group())
+    for name, nr in NAME_ZU_SCHRITT.items():
+        if name in text:
+            return nr
+    return None
+
+# Mails ab diesem Alter sind praktisch immer von der Zeit ueberholt. Befund aus
+# der Posteingangs-Durchsicht vom 14.09.2026: drei Rueckrufbitten aus Juli
+# wurden noch zur Weiterleitung vorgeschlagen, eine Frist war laengst verstrichen.
+MAX_ALTER_TAGE = int(os.getenv("LENA_MAIL_TRIAGE_MAX_ALTER_TAGE", "28"))
+
+# Mails eines Vorgangs gemeinsam entscheiden. Abschaltbar, falls sich zeigt,
+# dass einzelne Mails eines Threads doch unterschiedlich behandelt werden muessen.
+THREAD_GROUPING = os.getenv("LENA_MAIL_TRIAGE_THREAD_GROUPING", "1").strip() == "1"
+
 _llm_client: Optional[Any] = None
 
 
@@ -904,6 +1014,22 @@ def _llm_triage(
     raw = _strip_json_fences(response.content[0].text)
     data = json.loads(raw)  # raises if malformed → caught by caller
 
+    # HBE-3044: Das Modell antwortet jetzt mit einem Schritt der 5-Schritte-Regel.
+    # Altes Format (action/priority/reasoning) wird weiter akzeptiert, damit ein
+    # Rollback des Prompts ohne Codeaenderung moeglich bleibt.
+    schritt = _parse_schritt(data.get("schritt"))
+    if schritt is None and "action" in data:
+        # Modell hat den Schrittnamen unter dem alten Schluessel geliefert
+        schritt = _parse_schritt(data.get("action"))
+    if schritt is not None:
+        priority = str(data.get("prioritaet") or data.get("priority") or "mittel").strip().lower()
+        reasoning = str(data.get("begruendung") or data.get("reasoning") or "").strip()[:120]
+        empfaenger = data.get("empfaenger")
+        empfaenger = str(empfaenger).strip() if empfaenger else None
+        if priority not in _VALID_PRIORITIES:
+            priority = "mittel"
+        return schritt, priority, f"llm:{reasoning}", empfaenger
+
     action = str(data.get("action", "")).strip().lower()
     priority = str(data.get("priority", "")).strip().lower()
     reasoning = str(data.get("reasoning", "")).strip()[:120]
@@ -913,7 +1039,128 @@ def _llm_triage(
     if priority not in _VALID_PRIORITIES:
         raise ValueError(f"LLM returned invalid priority: {priority!r}")
 
-    return action, priority, f"llm:{reasoning}"
+    schritt = AKTION_ZU_SCHRITT.get(action, 2)
+    return schritt, priority, f"llm:{reasoning}", None
+
+
+def _namens_tokens(text: str) -> set:
+    return {w for w in re.split(r'[\s,.;]+', (text or "").strip().lower()) if len(w) > 2}
+
+
+def empfaenger_zu_adresse(empfaenger: Optional[str]) -> Optional[str]:
+    """
+    Loest einen vorgeschlagenen Empfaengernamen zur E-Mail-Adresse auf.
+
+    Ausschliesslich ueber die Direktberichte-Liste aus der Konfiguration — es
+    wird NICHT unscharf im Adresstext gesucht. Grund: "Herbert" ist der
+    Firmenname und steckt in jeder @herbert.de-Adresse. Eine Teilstring-Suche
+    nach dem Nachnamen liefert deshalb massenhaft Falschtreffer (im ersten
+    Praxistest erschien "Frank Herbert" faelschlich als Empfaenger von Mails,
+    die nur irgendeinen @herbert.de-Adressaten hatten).
+    """
+    if not empfaenger:
+        return None
+    e = empfaenger.strip().lower()
+    if not e:
+        return None
+    if "@" in e:
+        return e
+
+    cfg = _PERSONA_CONFIG or _load_persona_config()
+    kandidaten = cfg.get("direktberichte") or []
+    gesucht = _namens_tokens(e)
+    if not gesucht:
+        return None
+
+    for d in kandidaten:
+        adr = (d.get("email") or "").strip().lower()
+        if not adr:
+            continue
+        vorhanden = _namens_tokens(d.get("name", ""))
+        if not vorhanden:
+            continue
+        # Voller Name oder eindeutige Teilmenge (z. B. nur der Nachname)
+        if gesucht == vorhanden or gesucht <= vorhanden or vorhanden <= gesucht:
+            return adr
+    return None
+
+
+def _self_forward(empfaenger: Optional[str], sender_email: str, sender_name: str) -> bool:
+    """Wuerde die Mail an ihren eigenen Absender weitergeleitet?"""
+    if not empfaenger:
+        return False
+    absender = (sender_email or "").strip().lower()
+    adr = empfaenger_zu_adresse(empfaenger)
+    if adr and absender and adr == absender:
+        return True
+    # Namensgleichheit als zweiter Weg — verlangt volle Uebereinstimmung der
+    # Namenstokens, damit "Frank Herbert" nicht auf "Sven Herbert" passt.
+    a, b = _namens_tokens(empfaenger), _namens_tokens(sender_name)
+    return bool(a) and bool(b) and a == b
+
+
+def _already_recipient(empfaenger: Optional[str], to_emails: List[str],
+                       cc_emails: List[str]) -> bool:
+    """
+    Steht der vorgeschlagene Empfaenger schon im Verteiler der Mail?
+
+    Vergleich ausschliesslich ueber die aufgeloeste Adresse, exakt. Laesst sich
+    der Name nicht aufloesen, wird NICHT blockiert — lieber eine ueberfluessige
+    Weiterleitung vorschlagen als eine noetige unterdruecken.
+    """
+    adr = empfaenger_zu_adresse(empfaenger)
+    if not adr:
+        return False
+    verteiler = {(a or "").strip().lower() for a in list(to_emails or []) + list(cc_emails or [])}
+    return adr in verteiler
+
+
+def _ist_veraltet(received_at: str) -> bool:
+    """Ist die Mail aelter als MAX_ALTER_TAGE?"""
+    if not received_at or MAX_ALTER_TAGE <= 0:
+        return False
+    dt = _try_parse_iso(received_at)
+    if dt is None:
+        return False
+    return (datetime.now(timezone.utc) - dt).days > MAX_ALTER_TAGE
+
+
+def apply_guards(
+    schritt: int,
+    reasoning: str,
+    empfaenger: Optional[str],
+    sender_email: str = "",
+    sender_name: str = "",
+    to_emails: Optional[List[str]] = None,
+    cc_emails: Optional[List[str]] = None,
+    received_at: str = "",
+) -> Tuple[int, str]:
+    """
+    Mechanische Pruefungen nach der LLM-Entscheidung (HBE-3044).
+
+    Alle drei Pruefungen stammen aus der Posteingangs-Durchsicht vom 14.09.2026
+    und brauchen kein Sprachmodell — sie sind rein logisch:
+
+      1. Der Empfaenger darf nie der Absender sein. Gefunden bei zwei Mails:
+         eine Mail von Walter Melcher sollte an Walter Melcher gehen.
+      2. Wer bereits im Verteiler steht, braucht keine Weiterleitung. Gefunden
+         bei einer Mail, die an Sven Walter adressiert war und Sven nur in Kopie
+         hatte — der Vorschlag lautete trotzdem "weiterleiten an Sven Walter".
+      3. Alte Mails sind von der Zeit ueberholt. Drei Rueckrufbitten aus Juli
+         wurden im September noch zur Weiterleitung vorgeschlagen.
+
+    Jede Pruefung stuft auf Schritt 2 (Ablegen) zurueck — nie hoeher.
+    """
+    if schritt == 3:
+        if _self_forward(empfaenger, sender_email, sender_name):
+            return 2, f"guard:empfaenger_ist_absender ({empfaenger}) | {reasoning}"
+        if _already_recipient(empfaenger, to_emails or [], cc_emails or []):
+            return 2, f"guard:empfaenger_bereits_im_verteiler ({empfaenger}) | {reasoning}"
+
+    if schritt >= 3 and _ist_veraltet(received_at):
+        return 2, f"guard:aelter_als_{MAX_ALTER_TAGE}_tage | {reasoning}"
+
+    return schritt, reasoning
 
 
 def triage_mail(
@@ -921,12 +1168,16 @@ def triage_mail(
     sender_email: str,
     body_preview: str,
     sender_name: str = "",
-) -> Tuple[str, str, str, Optional[int]]:
+    to_emails: Optional[List[str]] = None,
+    cc_emails: Optional[List[str]] = None,
+    received_at: str = "",
+) -> Tuple[str, str, str, Optional[int], int]:
     """
-    Hybrid-Triage: schnelle Regeln → Hindsight-Recall → LLM.
+    Hybrid-Triage: schnelle Regeln → Hindsight-Recall → LLM → mechanische Pruefungen.
 
-    Returns (action, priority, rule_id, learned_from).
+    Returns (action, priority, rule_id, learned_from, schritt).
     learned_from: count der Overrides die das angewendete Pattern erzeugt haben, sonst None.
+    schritt: 1-5 nach der 5-Schritte-Regel. Schritt 2 wird nie still archiviert.
 
     Reasoning-Prefixes als Audit-Trail:
       "calendar_subject"           → Regel: Kalender-Notification
@@ -942,15 +1193,18 @@ def triage_mail(
     sys_hit = match_system_sender(sender, subj)
     if sys_hit:
         action, priority, rule_id = sys_hit
-        return action, priority, rule_id, None
+        # Regelbasiertes "ablegen" ist Schritt 1 (Loeschen) — es darf archiviert
+        # werden. Die Personal-Ausnahme liefert "tun" und damit Schritt 4.
+        schritt = 1 if action == "ablegen" else AKTION_ZU_SCHRITT.get(action, 2)
+        return action, priority, rule_id, None, schritt
 
-    # Regel 1: Kalender-Notifications -> Ablegen + Niedrig (kein LLM-Aufruf)
+    # Regel 1: Kalender-Notifications -> Loeschen (kein LLM-Aufruf)
     if CALENDAR_SUBJECT_RE.search(subj):
-        return "ablegen", "niedrig", "calendar_subject", None
+        return "ablegen", "niedrig", "calendar_subject", None, 1
 
-    # Regel 2: Newsletter/Automated-Sender -> Ablegen + Niedrig (kein LLM-Aufruf)
+    # Regel 2: Newsletter/Automated-Sender -> Loeschen (kein LLM-Aufruf)
     if NEWSLETTER_SENDER_RE.search(sender):
-        return "ablegen", "niedrig", "newsletter_sender", None
+        return "ablegen", "niedrig", "newsletter_sender", None, 1
 
     # Hindsight-Recall: gelerntes Pattern als Hint an LLM übergeben
     sender_domain = sender_email.split("@")[-1].lower() if "@" in sender_email else ""
@@ -970,20 +1224,29 @@ def triage_mail(
 
     # LLM-Triage mit optionalem Hindsight-Hint
     try:
-        action, priority, reasoning = _llm_triage(subj, sender_email, sender_name, body_preview or "", hindsight_hint)
+        schritt, priority, reasoning, empfaenger = _llm_triage(
+            subj, sender_email, sender_name, body_preview or "", hindsight_hint
+        )
+        schritt, reasoning = apply_guards(
+            schritt, reasoning, empfaenger,
+            sender_email=sender_email, sender_name=sender_name,
+            to_emails=to_emails, cc_emails=cc_emails, received_at=received_at,
+        )
+        action = SCHRITT_ZU_AKTION[schritt]
         if hindsight_pattern and action == hindsight_pattern["action"] and priority == hindsight_pattern["priority"]:
             rule_id = f"llm+memory:{sender_domain}/{subject_prefix}"
-            return action, priority, rule_id, hindsight_pattern["count"]
-        return action, priority, reasoning, None
+            return action, priority, rule_id, hindsight_pattern["count"], schritt
+        return action, priority, reasoning, None, schritt
     except Exception as exc:
         logger.warning(
             "LLM triage failed for sender=%s subject=%s: %s",
             sender_email, subj[:60], exc,
         )
-        # Fallback: regelbasiert mit Urgency-Check
+        # Fallback: regelbasiert mit Urgency-Check. Bewusst Schritt 5 — ein
+        # fehlgeschlagener LLM-Aufruf darf niemals zu stillem Archivieren fuehren.
         if URGENCY_RE.search(subj) or URGENCY_RE.search(body_preview or ""):
-            return "antworten", "hoch", "llm_failed_urgency_fallback", None
-        return "antworten", "mittel", "llm_failed_default", None
+            return "antworten", "hoch", "llm_failed_urgency_fallback", None, 5
+        return "antworten", "mittel", "llm_failed_default", None, 5
 
 
 # ── API-Helpers ───────────────────────────────────────────────────────────────
@@ -1142,6 +1405,9 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
         # Mail-Konzept 2026-09
         "ablegen_vorschlag": 0,   # als Vorschlag markiert statt archiviert
         "dry_run": 0,             # im Trockenlauf nur protokolliert
+        # HBE-3044
+        "thread_uebernommen": 0,  # Entscheidung vom Vorgang uebernommen
+        "guard_korrigiert": 0,    # mechanische Pruefung hat zurueckgestuft
     }
 
     # Save before the pass — used as `since` for override detection below
@@ -1158,6 +1424,14 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
         processed = set(state.get("processed_message_ids", []))
         new_processed = list(state.get("processed_message_ids", []))
 
+    # HBE-3044: Vorgaenge zusammen entscheiden. Mails mit derselben
+    # conversationId gehoeren zu einem Thema — die neueste bestimmt den Stand.
+    # Befund aus der Durchsicht: ein Vorgang "Wareg Bensheim" lag als fuenf
+    # Einzelmails im Posteingang und bekam fuenf getrennte, vage Urteile.
+    thread_entscheidung: Dict[str, Tuple[str, str, str, int]] = {}
+    if THREAD_GROUPING:
+        mails = sorted(mails, key=lambda x: (x.get("received_at") or ""), reverse=True)
+
     for m in mails:
         mid = m.get("message_id", "")
         if not mid:
@@ -1166,18 +1440,33 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
             counters["skipped_processed"] += 1
             continue
 
-        action, priority, rule_id, learned_from = triage_mail(
-            m.get("subject", ""),
-            m.get("sender_email", ""),
-            m.get("body_preview", ""),
-            m.get("sender_name", ""),
-        )
+        conv = (m.get("conversation_id") or "") if THREAD_GROUPING else ""
+        if conv and conv in thread_entscheidung:
+            action, priority, base_rule, schritt = thread_entscheidung[conv]
+            rule_id = f"thread:{base_rule}"
+            learned_from = None
+            counters["thread_uebernommen"] += 1
+        else:
+            action, priority, rule_id, learned_from, schritt = triage_mail(
+                m.get("subject", ""),
+                m.get("sender_email", ""),
+                m.get("body_preview", ""),
+                m.get("sender_name", ""),
+                to_emails=m.get("to_emails") or [],
+                cc_emails=m.get("cc_emails") or [],
+                received_at=m.get("received_at", "") or "",
+            )
+            if conv:
+                thread_entscheidung[conv] = (action, priority, rule_id, schritt)
+
+        if rule_id.startswith("guard:") or ":guard:" in rule_id:
+            counters["guard_korrigiert"] += 1
 
         # Mail-Konzept 2026-09: 'ablegen' verschiebt die Mail nur, wenn die
         # Entscheidung durch eine deterministische Regel oder das Absender-Profil
         # gedeckt ist. Sonst bleibt sie als Vorschlag im Posteingang.
         sender_for_rule = m.get("sender_email", "") or ""
-        will_archive = action == "ablegen" and may_auto_archive(sender_for_rule, rule_id)
+        will_archive = action == "ablegen" and may_auto_archive(sender_for_rule, rule_id, schritt)
         skip_archive = action == "ablegen" and not will_archive
         if skip_archive:
             counters["ablegen_vorschlag"] += 1
