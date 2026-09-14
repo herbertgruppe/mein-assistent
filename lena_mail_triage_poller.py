@@ -125,6 +125,22 @@ LEARNING_DB         = os.getenv(
 )
 OVERRIDE_LOOKBACK_DAYS = int(os.getenv("LENA_MAIL_TRIAGE_OVERRIDE_LOOKBACK_DAYS", "30"))
 
+# ── Mail-Konzept 2026-09 ──────────────────────────────────────────────────────
+# Trockenlauf: alles rechnen und protokollieren, aber KEINE Kategorie setzen und
+# KEINE Mail verschieben. Zum Beobachten der neuen Regeln vor Scharfschaltung.
+DRY_RUN = os.getenv("LENA_MAIL_TRIAGE_DRY_RUN", "0").strip() == "1"
+
+# Absender-Profil aus der Archiv-Analyse (Antwortquote je Absender).
+# Erzeugt von scripts/build_sender_profile.py. Fehlt die Datei, laeuft die
+# Triage wie bisher weiter — das Profil ist eine Verbesserung, keine Bedingung.
+SENDER_PROFILE_DB = os.getenv(
+    "LENA_MAIL_TRIAGE_SENDER_PROFILE_DB",
+    "/var/lib/mail-triage-poller/sender_profile.db",
+)
+# Nur Absender mit dieser Einstufung duerfen automatisch archiviert werden.
+# Alle anderen "ablegen"-Urteile werden zum Vorschlag (Mail bleibt im Posteingang).
+AUTO_ARCHIVE_VERDICTS = {"safe_archive"}
+
 
 # ── LLM-Persona für Sven (aus config/lena-mail-triage.yaml) ──────────────────
 # Persona-Text wird beim Start aus YAML gebaut. Direktberichte und externe
@@ -478,6 +494,118 @@ CALENDAR_SUBJECT_RE  = re.compile('|'.join(CALENDAR_SUBJECT_PATTERNS), re.IGNORE
 URGENCY_RE           = re.compile('|'.join(URGENCY_PATTERNS), re.IGNORECASE)
 
 
+# ── Systemabsender-Regeln (Mail-Konzept 2026-09) ─────────────────────────────
+# Absender, deren Mails deterministisch behandelt werden — ohne LLM-Aufruf.
+# Hintergrund: jobrouter@intern.herbert.de stellt rund ein Drittel des
+# Postaufkommens und erzeugte 65 % aller Aktions-Markierungen, obwohl Sven die
+# Einzelmails nicht liest (er arbeitet direkt im JobRouter). Die Erinnerung an
+# offene Vorgaenge kommt stattdessen als Briefing-Zeile aus der Statistik-Mail.
+# Gepflegt in config/lena-mail-triage.yaml unter `system_absender`.
+
+def _load_system_senders(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Liest die Systemabsender-Regeln aus der Config und kompiliert die Ausnahmen."""
+    out: List[Dict[str, Any]] = []
+    for entry in (cfg.get("system_absender") or []):
+        email = (entry.get("email") or "").strip().lower()
+        if not email:
+            continue
+        keywords = [k.strip().lower() for k in (entry.get("ausnahmen_betreff") or []) if k.strip()]
+        out.append({
+            "email":              email,
+            "aktion":             (entry.get("aktion") or "ablegen").strip().lower(),
+            "prioritaet":         (entry.get("prioritaet") or "niedrig").strip().lower(),
+            "ausnahmen":          keywords,
+            "ausnahme_aktion":    (entry.get("ausnahme_aktion") or "tun").strip().lower(),
+            "ausnahme_prio":      (entry.get("ausnahme_prioritaet") or "mittel").strip().lower(),
+        })
+    return out
+
+
+_SYSTEM_SENDERS: Optional[List[Dict[str, Any]]] = None
+
+
+def _get_system_senders() -> List[Dict[str, Any]]:
+    global _SYSTEM_SENDERS
+    if _SYSTEM_SENDERS is None:
+        _SYSTEM_SENDERS = _load_system_senders(_PERSONA_CONFIG or _load_persona_config())
+    return _SYSTEM_SENDERS
+
+
+def match_system_sender(sender_email: str, subject: str) -> Optional[Tuple[str, str, str]]:
+    """
+    Prueft die Systemabsender-Regeln.
+
+    Returns (action, priority, rule_id) oder None wenn keine Regel greift.
+    Die Ausnahme-Stichworte gewinnen gegen die Grundregel — so bleiben z. B.
+    Mitarbeitereintritte sichtbar, waehrend der Rest abgelegt wird.
+    """
+    sender = (sender_email or "").strip().lower()
+    if not sender:
+        return None
+    subj = (subject or "").lower()
+    for rule in _get_system_senders():
+        if sender != rule["email"]:
+            continue
+        for kw in rule["ausnahmen"]:
+            if kw in subj:
+                return rule["ausnahme_aktion"], rule["ausnahme_prio"], f"system_sender_exception:{kw}"
+        return rule["aktion"], rule["prioritaet"], f"system_sender:{sender}"
+    return None
+
+
+# ── Absender-Profil (Mail-Konzept 2026-09) ────────────────────────────────────
+# Aus 59.580 archivierten Posteingangsmails berechnet: wie oft hat Sven einem
+# Absender je geantwortet? Nur Absender ohne jede Reaktion bei ausreichender
+# Historie duerfen automatisch archiviert werden.
+
+_PROFILE_CACHE: Dict[str, Optional[str]] = {}
+
+
+def sender_verdict(sender_email: str) -> Optional[str]:
+    """
+    Liefert die Einstufung eines Absenders: 'safe_archive', 'conversational',
+    'neutral' — oder None wenn kein Profil vorliegt (unbekannter Absender).
+    """
+    sender = (sender_email or "").strip().lower()
+    if not sender:
+        return None
+    if sender in _PROFILE_CACHE:
+        return _PROFILE_CACHE[sender]
+
+    verdict: Optional[str] = None
+    try:
+        if os.path.exists(SENDER_PROFILE_DB):
+            conn = sqlite3.connect(f"file:{SENDER_PROFILE_DB}?mode=ro", uri=True, timeout=5)
+            try:
+                row = conn.execute(
+                    "SELECT verdict FROM sender_profile WHERE sender_email = ?", (sender,)
+                ).fetchone()
+                verdict = row[0] if row else None
+            finally:
+                conn.close()
+    except Exception as exc:
+        logger.warning("Absender-Profil nicht lesbar (%s): %s", SENDER_PROFILE_DB, exc)
+
+    _PROFILE_CACHE[sender] = verdict
+    return verdict
+
+
+def may_auto_archive(sender_email: str, rule_id: str) -> bool:
+    """
+    Entscheidet, ob ein 'ablegen'-Urteil die Mail auch wirklich verschieben darf.
+
+    Erlaubt bei:
+      - deterministischer Regel (Systemabsender, Newsletter, Kalender)
+      - Absendern mit Einstufung 'safe_archive' aus dem Archiv-Profil
+
+    Sonst bleibt die Mail als Vorschlag im Posteingang. Damit kann kein Urteil,
+    das allein auf einer LLM-Einschaetzung beruht, still Post verschwinden lassen.
+    """
+    if rule_id.startswith(("system_sender", "newsletter_sender", "calendar_subject")):
+        return True
+    return sender_verdict(sender_email) in AUTO_ARCHIVE_VERDICTS
+
+
 def _normalize_subject_prefix(subject: str) -> str:
     # NFC + lowercase + strip whitespace, then first 30 chars.
     # Write-path (override recording) and read-path (recall) MUST use this exact function.
@@ -810,6 +938,12 @@ def triage_mail(
     subj = subject or ""
     sender = (sender_email or "").lower()
 
+    # Regel 0: Systemabsender -> deterministisch, kein LLM-Aufruf (Mail-Konzept 2026-09)
+    sys_hit = match_system_sender(sender, subj)
+    if sys_hit:
+        action, priority, rule_id = sys_hit
+        return action, priority, rule_id, None
+
     # Regel 1: Kalender-Notifications -> Ablegen + Niedrig (kein LLM-Aufruf)
     if CALENDAR_SUBJECT_RE.search(subj):
         return "ablegen", "niedrig", "calendar_subject", None
@@ -874,9 +1008,13 @@ def _fetch_inbox_for_triage() -> List[Dict[str, Any]]:
 _PRIORITY_TO_IMPORTANCE = {"hoch": "high", "mittel": "normal", "niedrig": "low"}
 
 
-def _categorize_mail(message_id: str, action: str) -> bool:
+def _categorize_mail(message_id: str, action: str, skip_archive: bool = False) -> bool:
+    """
+    Setzt die Kategorie. Bei action='ablegen' archiviert die API die Mail
+    automatisch — ausser skip_archive=True ("Ablegen (Vorschlag)").
+    """
     url = f"{API_URL.rstrip('/')}/api/lena/mail/categorize"
-    payload = {"message_id": message_id, "action": action}
+    payload = {"message_id": message_id, "action": action, "skip_archive": skip_archive}
     resp = requests.post(url, headers=_api_headers(), json=payload, timeout=30)
     if resp.status_code != 200:
         logger.warning("categorize HTTP %d: %s", resp.status_code, resp.text[:200])
@@ -1001,6 +1139,9 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
         "failed": 0,
         "high_priority": 0,
         "overrides_learned": 0,
+        # Mail-Konzept 2026-09
+        "ablegen_vorschlag": 0,   # als Vorschlag markiert statt archiviert
+        "dry_run": 0,             # im Trockenlauf nur protokolliert
     }
 
     # Save before the pass — used as `since` for override detection below
@@ -1032,11 +1173,41 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
             m.get("sender_name", ""),
         )
 
-        ok = _categorize_mail(mid, action)
+        # Mail-Konzept 2026-09: 'ablegen' verschiebt die Mail nur, wenn die
+        # Entscheidung durch eine deterministische Regel oder das Absender-Profil
+        # gedeckt ist. Sonst bleibt sie als Vorschlag im Posteingang.
+        sender_for_rule = m.get("sender_email", "") or ""
+        will_archive = action == "ablegen" and may_auto_archive(sender_for_rule, rule_id)
+        skip_archive = action == "ablegen" and not will_archive
+        if skip_archive:
+            counters["ablegen_vorschlag"] += 1
+
+        if DRY_RUN:
+            counters["dry_run"] += 1
+            logger.info(json.dumps({
+                "event":        "dry_run_decision",
+                "message_id":   mid,
+                "subject":      (m.get("subject", "") or "")[:120],
+                "sender":       sender_for_rule,
+                "action":       action,
+                "priority":     priority,
+                "rule":         rule_id,
+                "would_archive": will_archive,
+                "sender_verdict": sender_verdict(sender_for_rule),
+            }, ensure_ascii=False))
+            # Im Trockenlauf nichts schreiben — auch nicht in processed_message_ids,
+            # damit der Scharflauf dieselben Mails erneut sieht.
+            continue
+
+        ok = _categorize_mail(mid, action, skip_archive=skip_archive)
         if not ok:
             counters["failed"] += 1
             continue
-        _set_importance(mid, priority)  # best-effort; category is the primary categorization
+        # HBE-Mail-Konzept 2026-09: Nach dem Archivieren hat die Mail eine NEUE
+        # message_id (Graph POST /move). Ein set-importance auf die alte ID
+        # laeuft zwangslaeufig in HTTP 404 und flutete bisher das Log.
+        if not will_archive:
+            _set_importance(mid, priority)  # best-effort; Kategorie ist primaer
         counters["categorized"] += 1
         new_processed.append(mid)
 
@@ -1150,6 +1321,39 @@ def main() -> None:
         logger.warning(
             "Persona-Config nicht gefunden oder PyYAML fehlt — nutze Hardcoded-Fallback. "
             "Empfehlung: pip install pyyaml && config/lena-mail-triage.yaml prüfen."
+        )
+
+    # Mail-Konzept 2026-09: Systemabsender + Absender-Profil + Trockenlauf
+    sys_senders = _get_system_senders()
+    logger.info(
+        "Systemabsender-Regeln: %d (%s)",
+        len(sys_senders),
+        ", ".join(s["email"] for s in sys_senders) or "keine",
+    )
+    if os.path.exists(SENDER_PROFILE_DB):
+        try:
+            _c = sqlite3.connect(f"file:{SENDER_PROFILE_DB}?mode=ro", uri=True, timeout=5)
+            n_safe = _c.execute(
+                "SELECT COUNT(*) FROM sender_profile WHERE verdict='safe_archive'"
+            ).fetchone()[0]
+            n_all = _c.execute("SELECT COUNT(*) FROM sender_profile").fetchone()[0]
+            _c.close()
+            logger.info(
+                "Absender-Profil geladen: %d Absender, davon %d fuer Auto-Archivierung freigegeben (%s)",
+                n_all, n_safe, SENDER_PROFILE_DB,
+            )
+        except Exception as exc:
+            logger.warning("Absender-Profil vorhanden, aber nicht lesbar: %s", exc)
+    else:
+        logger.warning(
+            "Absender-Profil fehlt (%s) — 'ablegen' wird nur noch bei deterministischen "
+            "Regeln archiviert, alles andere bleibt Vorschlag im Posteingang.",
+            SENDER_PROFILE_DB,
+        )
+    if DRY_RUN:
+        logger.warning(
+            "TROCKENLAUF AKTIV (LENA_MAIL_TRIAGE_DRY_RUN=1) — es werden KEINE Kategorien "
+            "gesetzt und KEINE Mails verschoben. Entscheidungen nur im Log."
         )
 
     # Hindsight-Lernloop: SQLite-Schema initialisieren

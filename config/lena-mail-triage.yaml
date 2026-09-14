@@ -70,3 +70,30 @@ weiterleitung_routing:
   personal: "Tim"       # Personal
   it: "Sven Walter"     # IT
   regional: "jeweiliger NL-Leiter"  # regionale Themen
+
+# ── Systemabsender (Mail-Konzept 2026-09) ────────────────────────────────────
+# Absender, die deterministisch behandelt werden — ohne LLM-Aufruf und damit
+# ohne Streuung. Die Grundregel gilt für alle Mails des Absenders; Mails, deren
+# Betreff eines der Ausnahme-Stichworte enthält, bleiben sichtbar.
+#
+# Hintergrund JobRouter: 23.192 Mails im Archiv, davon 2 je beantwortet.
+# In 30 Tagen erzeugte dieser eine Absender 314 von 485 Aktions-Markierungen
+# (65 %) — obwohl Sven die Einzelmails nicht liest, weil er direkt im JobRouter
+# arbeitet. Die Erinnerung an offene Vorgänge kommt stattdessen als eine Zeile
+# im Morgenbriefing, gespeist aus der täglichen Mail "Ihre JobRouter Statistik".
+# Ausnahme sind Ein- und Austritte von Mitarbeitern — die liest Sven.
+# Bewusst NICHT in der Ausnahme: "PW - Personalentscheidung" (Entscheidung von
+# Sven 2026-09-14, wird mit abgelegt).
+system_absender:
+  - email: "jobrouter@intern.herbert.de"
+    aktion: "ablegen"
+    prioritaet: "niedrig"
+    ausnahmen_betreff:
+      - "Mitarbeitereintritt"
+      - "MA-Eintritt"
+      - "MA - Eintritt"
+      - "Mitarbeiteraustritt"
+      - "MA-Austritt"
+      - "MA - Austritt"
+    ausnahme_aktion: "tun"
+    ausnahme_prioritaet: "mittel"
