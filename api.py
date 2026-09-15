@@ -3442,6 +3442,20 @@ class LenaDraftRequest(BaseModel):
     body_html: str = ""
     body_text: str = ""
     reply_to_message_id: Optional[str] = None
+    # HBE-3048: "reply" (Standard) oder "forward" fuer Weiterleitungs-Entwuerfe.
+    # Nur wirksam zusammen mit reply_to_message_id.
+    mode: str = "reply"
+    # Outlook-Kategorie auf dem Entwurf, damit Svens eigene Entwuerfe und die
+    # von Lena vorbereiteten im selben Ordner unterscheidbar bleiben.
+    category: Optional[str] = None
+
+    @field_validator("mode")
+    @classmethod
+    def _vid_mode(cls, v: str) -> str:
+        v = (v or "reply").strip().lower()
+        if v not in ("reply", "forward"):
+            raise ValueError("mode muss 'reply' oder 'forward' sein.")
+        return v
 
 
 class LenaDraftResponse(BaseModel):
@@ -3562,7 +3576,20 @@ def lena_mail_draft(
     body_content = req.body_html if req.body_html else req.body_text
     body_type = "HTML" if req.body_html else "Text"
 
-    if req.reply_to_message_id:
+    if req.reply_to_message_id and req.mode == "forward":
+        # HBE-3048: Weiterleitungs-Entwurf. createForward uebernimmt den
+        # Originaltext und die Anhaenge — genau das, was beim Weiterleiten
+        # gebraucht wird. Der Entwurf wird NICHT gesendet.
+        url = f"https://graph.microsoft.com/v1.0/me/messages/{req.reply_to_message_id}/createForward"
+        payload = {
+            "message": {
+                "subject": req.subject,
+                "body": {"contentType": body_type, "content": body_content},
+                "toRecipients": _recipients(req.to),
+                "ccRecipients": _recipients(req.cc),
+            }
+        }
+    elif req.reply_to_message_id:
         # Create reply draft linked to original message for proper threading
         url = f"https://graph.microsoft.com/v1.0/me/messages/{req.reply_to_message_id}/createReply"
         payload = {
@@ -3590,8 +3617,29 @@ def lena_mail_draft(
         )
 
     draft = resp.json()
+    draft_id = draft.get("id", "")
+
+    # HBE-3048: Entwurf kennzeichnen, damit er im Entwuerfe-Ordner als von Lena
+    # vorbereitet erkennbar ist. Schlaegt das fehl, ist der Entwurf trotzdem da —
+    # deshalb nur eine Warnung, kein Fehler.
+    if req.category and draft_id:
+        try:
+            cat_resp = _rq.patch(
+                f"https://graph.microsoft.com/v1.0/me/messages/{draft_id}",
+                headers=headers,
+                json={"categories": [req.category]},
+                timeout=30,
+            )
+            if cat_resp.status_code not in (200, 201):
+                logger.warning(
+                    "[draft] Kategorie '%s' konnte nicht gesetzt werden: HTTP %s",
+                    req.category, cat_resp.status_code,
+                )
+        except Exception as _exc:
+            logger.warning("[draft] Kategorie setzen fehlgeschlagen: %s", _exc)
+
     return LenaDraftResponse(
-        draft_id=draft.get("id", ""),
+        draft_id=draft_id,
         subject=draft.get("subject", req.subject),
         created_at=draft.get("createdDateTime", "") or "",
     )
@@ -4719,6 +4767,72 @@ def lena_mail_inbox_for_triage(
             break
 
     return LenaTriageInboxResponse(mails=mails)
+
+
+class LenaMailBodyResponse(BaseModel):
+    message_id: str
+    subject: str
+    body_text: str
+    truncated: bool
+
+
+@app.get("/api/lena/mail/{message_id}/body", response_model=LenaMailBodyResponse)
+def lena_mail_body(
+    message_id: str,
+    max_chars: int = 6000,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Liefert den vollstaendigen Text einer Mail (HBE-3048).
+
+    Hintergrund: `bodyPreview` ist auf 500 Zeichen begrenzt und schneidet mitten
+    im Satz ab. Fuer die Erstellung von Antwortentwuerfen ist das zu wenig — im
+    ersten Test verweigerte das Modell mehrfach mit der Begruendung, die Mail
+    breche ab. Dieser Endpoint liefert den Fliesstext ohne HTML.
+
+    Svens Freigabe zum Lesen von Mailinhalten liegt vor (2026-09-14).
+    """
+    import re as _re
+    import requests as _rq
+
+    message_id = _check_message_id(message_id)
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+    if max_chars < 100 or max_chars > 50000:
+        raise HTTPException(status_code=400, detail="max_chars muss zwischen 100 und 50000 liegen.")
+
+    resp = _rq.get(
+        f"https://graph.microsoft.com/v1.0/me/messages/{message_id}",
+        headers={"Authorization": f"Bearer {tool.access_token}"},
+        params={"$select": "subject,body"},
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler: HTTP {resp.status_code} — {resp.text[:200]}",
+        )
+    data = resp.json()
+    body = (data.get("body") or {})
+    inhalt = body.get("content", "") or ""
+
+    if (body.get("contentType") or "").lower() == "html":
+        inhalt = _re.sub(r"(?is)<(script|style).*?</\1>", " ", inhalt)
+        inhalt = _re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>", "\n", inhalt)
+        inhalt = _re.sub(r"<[^>]+>", " ", inhalt)
+        inhalt = (inhalt.replace("&nbsp;", " ").replace("&amp;", "&")
+                        .replace("&lt;", "<").replace("&gt;", ">")
+                        .replace("&quot;", '"').replace("&#39;", "'"))
+    inhalt = _re.sub(r"[ \t\r\f\v]+", " ", inhalt)
+    inhalt = _re.sub(r"\n\s*\n\s*\n+", "\n\n", inhalt).strip()
+
+    return LenaMailBodyResponse(
+        message_id=message_id,
+        subject=data.get("subject", "") or "",
+        body_text=inhalt[:max_chars],
+        truncated=len(inhalt) > max_chars,
+    )
 
 
 @app.get("/api/lena/mail/triage-summary", response_model=LenaTriageSummaryResponse)
