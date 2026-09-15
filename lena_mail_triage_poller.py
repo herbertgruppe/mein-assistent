@@ -978,6 +978,11 @@ THREAD_GROUPING = os.getenv("LENA_MAIL_TRIAGE_THREAD_GROUPING", "1").strip() == 
 # Standardmaessig AUS. Erst nach einem beobachteten Lauf scharfschalten.
 AKTIONEN_AKTIV = os.getenv("LENA_MAIL_TRIAGE_AKTIONEN", "0").strip() == "1"
 
+# HBE-3052: Svens Kategorie-Aenderungen erkennen, darauf reagieren und daraus
+# lernen. Standardmaessig an — der Pass ist billig (ein Inbox-Abruf je Zyklus)
+# und ohne ihn bleibt eine Korrektur in Outlook folgenlos.
+KORREKTUREN_AKTIV = os.getenv("LENA_MAIL_TRIAGE_KORREKTUREN", "1").strip() == "1"
+
 # Kategorie auf den erzeugten Entwuerfen, damit sie im Entwuerfe-Ordner von
 # Svens eigenen unterscheidbar sind.
 ENTWURF_KATEGORIE = os.getenv("LENA_MAIL_TRIAGE_ENTWURF_KATEGORIE", "Lena: Entwurf")
@@ -1504,11 +1509,57 @@ def _entwurf_anlegen(message_id: str, betreff: str, text: str,
     return resp.json().get("draft_id")
 
 
+def _titel_normalisieren(text: str) -> str:
+    """Vereinheitlicht Betreffzeilen fuer den Dublettenvergleich."""
+    t = (text or "").lower()
+    t = re.sub(r'^\s*(aw|re|wg|fwd?|antw)\s*:\s*', '', t)
+    t = re.sub(r'[^a-zäöüß0-9]+', ' ', t)
+    return " ".join(t.split())[:80]
+
+
+_asana_cache: Dict[str, Any] = {"stand": None, "titel": set()}
+
+
+def _asana_offene_titel(max_alter_sek: int = 600) -> set:
+    """Titel der offenen Aufgaben im Board — fuer die Dublettenpruefung."""
+    jetzt = datetime.now(timezone.utc)
+    stand = _asana_cache.get("stand")
+    if stand and (jetzt - stand).total_seconds() < max_alter_sek:
+        return _asana_cache["titel"]
+    titel: set = set()
+    if ASANA_TOKEN:
+        try:
+            resp = requests.get(
+                f"{ASANA_API}/tasks",
+                headers={"Authorization": f"Bearer {ASANA_TOKEN}"},
+                params={"project": ASANA_BOARD_GID,
+                        "opt_fields": "name,completed", "limit": 100},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                for t in resp.json().get("data", []):
+                    if not t.get("completed"):
+                        titel.add(_titel_normalisieren(t.get("name", "")))
+            else:
+                logger.warning("Asana-Liste HTTP %d", resp.status_code)
+        except Exception as exc:
+            logger.warning("Asana-Liste nicht abrufbar: %s", exc)
+    _asana_cache.update(stand=jetzt, titel=titel)
+    return titel
+
+
 def _asana_aufgabe(betreff: str, sender_name: str, sender_email: str,
                    body_preview: str, empfangen: str) -> Optional[str]:
-    """Legt eine Aufgabe im Board 'Meine Aufgaben SH' an."""
+    """Legt eine Aufgabe im Board 'Meine Aufgaben SH' an — falls es sie nicht gibt."""
     if not ASANA_TOKEN:
         logger.warning("ASANA_ACCESS_TOKEN fehlt — keine Aufgabe angelegt.")
+        return None
+
+    # HBE-3052: Dublettenpruefung. Am 15.09. entstanden drei Aufgaben fuer zwei
+    # Vorgaenge, davon zwei Dubletten einer bereits vorhandenen Aufgabe.
+    norm = _titel_normalisieren(betreff)
+    if norm and norm in _asana_offene_titel():
+        logger.info("Asana: Aufgabe '%s' existiert bereits — uebersprungen.", betreff[:60])
         return None
     notes = (f"Aus einer E-Mail vom {empfangen[:10]}.\n\n"
              f"Von: {sender_name} <{sender_email}>\n"
@@ -1527,23 +1578,60 @@ def _asana_aufgabe(betreff: str, sender_name: str, sender_email: str,
         if resp.status_code not in (200, 201):
             logger.warning("Asana HTTP %d: %s", resp.status_code, resp.text[:200])
             return None
-        return resp.json().get("data", {}).get("gid")
+        gid = resp.json().get("data", {}).get("gid")
+        if gid and norm:
+            _asana_cache["titel"].add(norm)  # sofort merken, gegen Dubletten im selben Lauf
+        return gid
     except Exception as exc:
         logger.warning("Asana-Aufgabe fehlgeschlagen: %s", exc)
         return None
 
 
+MAX_VORGANGS_MERKER = 400
+
+
+def vorgang_schon_erledigt(state: Dict[str, Any], conv_id: str) -> Optional[Dict[str, Any]]:
+    """Hat dieser Vorgang bereits eine Konsequenz bekommen?"""
+    if not conv_id:
+        return None
+    return (state.get("konsequenz_vorgaenge") or {}).get(conv_id)
+
+
+def vorgang_merken(state: Dict[str, Any], conv_id: str, ergebnis: Dict[str, Any]) -> None:
+    if not conv_id or not ergebnis.get("art"):
+        return
+    merker = state.setdefault("konsequenz_vorgaenge", {})
+    merker[conv_id] = {"art": ergebnis["art"], "id": ergebnis.get("id"),
+                       "ts": datetime.now(timezone.utc).isoformat()}
+    if len(merker) > MAX_VORGANGS_MERKER:
+        for alt in list(merker.keys())[:len(merker) - MAX_VORGANGS_MERKER]:
+            del merker[alt]
+
+
 def konsequenz_ausfuehren(mail: Dict[str, Any], schritt: int,
-                          empfaenger: Optional[str] = None) -> Dict[str, Any]:
+                          empfaenger: Optional[str] = None,
+                          state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Fuehrt die Konsequenz des Schritts aus. Gibt ein Protokoll-Dict zurueck.
 
     Nichts hiervon wird gesendet oder zugewiesen — es entstehen ausschliesslich
     Entwuerfe und Aufgaben, die Sven prueft.
+
+    HBE-3052: Die Konsequenz gilt pro VORGANG, nicht pro Mail. Am 15.09.
+    erzeugten zwei Mails desselben Themas zwei Asana-Aufgaben; ein Vorgang mit
+    fuenf Mails haette fuenf erzeugt.
     """
     ergebnis: Dict[str, Any] = {"art": None, "id": None, "stufe": None, "hinweis": None}
     if not AKTIONEN_AKTIV or schritt not in (3, 4, 5):
         return ergebnis
+
+    conv = (mail.get("conversation_id") or "") if state is not None else ""
+    if conv:
+        schon = vorgang_schon_erledigt(state, conv)
+        if schon:
+            ergebnis["hinweis"] = (f"Vorgang hat bereits eine Konsequenz "
+                                   f"({schon.get('art')} vom {str(schon.get('ts'))[:16]})")
+            return ergebnis
 
     betreff = mail.get("subject", "") or ""
     s_name = mail.get("sender_name", "") or ""
@@ -1555,7 +1643,11 @@ def konsequenz_ausfuehren(mail: Dict[str, Any], schritt: int,
         if schritt == 4:
             gid = _asana_aufgabe(betreff, s_name, s_mail, vorschau,
                                  mail.get("received_at", "") or "")
-            ergebnis.update(art="asana", id=gid)
+            ergebnis.update(art="asana" if gid else None, id=gid)
+            if not gid:
+                ergebnis["hinweis"] = "Aufgabe existiert bereits oder Asana nicht erreichbar"
+            elif state is not None:
+                vorgang_merken(state, conv, ergebnis)
             return ergebnis
 
         if schritt == 3:
@@ -1567,7 +1659,10 @@ def konsequenz_ausfuehren(mail: Dict[str, Any], schritt: int,
                     f"Viele Gruesse\nSven")
             did = _entwurf_anlegen(mid, f"WG: {betreff}", text, modus="forward",
                                    to=[{"name": empfaenger or "", "email": adr}])
-            ergebnis.update(art="weiterleitung", id=did, hinweis=f"an {adr}")
+            ergebnis.update(art="weiterleitung" if did else None, id=did,
+                            hinweis=f"an {adr}" if did else "Entwurf fehlgeschlagen")
+            if did and state is not None:
+                vorgang_merken(state, conv, ergebnis)
             return ergebnis
 
         # Schritt 5 — Antwortentwurf
@@ -1582,13 +1677,154 @@ def konsequenz_ausfuehren(mail: Dict[str, Any], schritt: int,
             text += ("\n\n---\nHinweis von Lena: Die mit [[...]] markierten Stellen "
                      "brauchen deine Angabe.")
         did = _entwurf_anlegen(mid, f"AW: {betreff}", text, modus="reply")
-        ergebnis.update(art="antwort", id=did)
+        ergebnis.update(art="antwort" if did else None, id=did)
+        if did and state is not None:
+            vorgang_merken(state, conv, ergebnis)
+        elif not did:
+            ergebnis["hinweis"] = "Entwurf konnte nicht angelegt werden"
         return ergebnis
 
     except Exception as exc:
         logger.warning("Konsequenz fuer Schritt %s fehlgeschlagen: %s", schritt, exc)
         ergebnis["hinweis"] = f"Fehler: {exc}"[:120]
         return ergebnis
+
+
+# ── Svens Korrekturen erkennen (HBE-3052) ────────────────────────────────────
+# Der bisherige Lern-Loop war seit drei Monaten tot: er versuchte, Svens
+# Korrekturen aus Outlook-Metadaten zu erraten, und hielt dabei Lenas eigene
+# Kategorisierung fuer eine Korrektur. Beide Lerntabellen hatten null Zeilen.
+#
+# Der neue Weg ist direkt: Der Poller merkt sich seine eigene Entscheidung.
+# Findet er die Mail spaeter mit einer ANDEREN Lena-Kategorie vor, war das Sven.
+# Dann passiert zweierlei — die Konsequenz der neuen Kategorie wird ausgefuehrt,
+# und die Korrektur wird gelernt. Damit ist das Setzen einer Kategorie in
+# Outlook gleichzeitig Anweisung und Lernsignal, ohne Zusatzaufwand fuer Sven.
+
+AKTION_ZU_KATEGORIE = {
+    "ablegen": "Lena: Ablegen",
+    "antworten": "Lena: Antworten",
+    "tun": "Lena: Tun",
+    "warten": "Lena: Warten",
+    "recherchieren": "Lena: Recherchieren",
+    "weiterleiten": "Lena: Weiterleiten",
+}
+KATEGORIE_ZU_AKTION = {v: k for k, v in AKTION_ZU_KATEGORIE.items()}
+MAX_KORREKTUR_MERKER = 300
+
+
+def _lena_kategorie(categories: List[str]) -> Optional[str]:
+    for c in (categories or []):
+        if c in KATEGORIE_ZU_AKTION:
+            return c
+    return None
+
+
+def korrekturen_verarbeiten(state: Dict[str, Any]) -> Dict[str, int]:
+    """
+    Sucht Mails, deren Lena-Kategorie Sven geaendert hat, und reagiert darauf.
+
+    Returns Zaehler-Dict.
+    """
+    z = {"geprueft": 0, "korrekturen": 0, "konsequenzen": 0, "gelernt": 0}
+    if not KORREKTUREN_AKTIV:
+        return z
+
+    try:
+        resp = requests.get(f"{API_URL.rstrip('/')}/api/lena/mail/inbox",
+                            headers={"X-API-Key": API_KEY},
+                            params={"limit": 80, "unread_only": "false"}, timeout=60)
+        if resp.status_code != 200:
+            logger.warning("Korrektur-Pass: inbox HTTP %d", resp.status_code)
+            return z
+        msgs = resp.json().get("messages", [])
+    except Exception as exc:
+        logger.warning("Korrektur-Pass fehlgeschlagen: %s", exc)
+        return z
+
+    eigene = state.get("triage_results", {}) or {}
+    erledigt = state.setdefault("korrekturen_erledigt", {})
+    db = _get_learning_db()
+
+    for m in msgs:
+        mid = m.get("message_id") or ""
+        if not mid:
+            continue
+        aktuell_kat = _lena_kategorie(m.get("categories") or [])
+        if not aktuell_kat:
+            continue
+        meine = (eigene.get(mid) or {}).get("action")
+        if not meine:
+            continue          # nie von uns kategorisiert — nichts zu vergleichen
+        z["geprueft"] += 1
+
+        aktuell_aktion = KATEGORIE_ZU_AKTION[aktuell_kat]
+        if aktuell_aktion == meine:
+            continue          # unveraendert
+        if erledigt.get(mid) == aktuell_aktion:
+            continue          # diese Korrektur schon verarbeitet
+
+        z["korrekturen"] += 1
+        betreff = m.get("subject", "") or ""
+        absender = m.get("from_email", "") or ""
+        logger.info(json.dumps({
+            "event": "korrektur_erkannt",
+            "message_id": mid,
+            "subject": betreff[:100],
+            "sender": absender,
+            "lena": meine,
+            "sven": aktuell_aktion,
+        }, ensure_ascii=False))
+
+        # 1) Lernen — jetzt mit einem echten Signal statt einer Vermutung
+        if db:
+            try:
+                domain = absender.lower().split("@")[-1] if "@" in absender else absender.lower()
+                db.record_override(
+                    message_id=mid,
+                    sender_domain=domain,
+                    subject_prefix=_normalize_subject_prefix(betreff),
+                    original_action=meine,
+                    original_priority=(eigene.get(mid) or {}).get("priority", "mittel"),
+                    override_action=aktuell_aktion,
+                    override_priority=(eigene.get(mid) or {}).get("priority", "mittel"),
+                )
+                z["gelernt"] += 1
+            except Exception as exc:
+                logger.warning("Override konnte nicht gespeichert werden: %s", exc)
+
+        # 2) Konsequenz der NEUEN Kategorie ausfuehren
+        schritt = AKTION_ZU_SCHRITT.get(aktuell_aktion, 2)
+        empf = None
+        mail = {
+            "message_id": mid,
+            "subject": betreff,
+            "sender_name": m.get("from_name", "") or "",
+            "sender_email": absender,
+            "body_preview": m.get("body_preview", "") or "",
+            "received_at": m.get("received_at", "") or "",
+            "conversation_id": "",   # Korrekturen gelten der einzelnen Mail
+        }
+        if schritt == 3:
+            try:
+                *_r, empf = triage_mail(betreff, absender, mail["body_preview"],
+                                        mail["sender_name"],
+                                        received_at=mail["received_at"])
+            except Exception as exc:
+                logger.warning("Empfaenger fuer Korrektur nicht bestimmbar: %s", exc)
+        erg = konsequenz_ausfuehren(mail, schritt, empf, state=state)
+        if erg.get("art"):
+            z["konsequenzen"] += 1
+            logger.info("Korrektur-Konsequenz: %s fuer '%s'", erg["art"], betreff[:60])
+
+        erledigt[mid] = aktuell_aktion
+        eigene[mid] = {"action": aktuell_aktion,
+                       "priority": (eigene.get(mid) or {}).get("priority", "mittel")}
+
+    if len(erledigt) > MAX_KORREKTUR_MERKER:
+        for alt in list(erledigt.keys())[:len(erledigt) - MAX_KORREKTUR_MERKER]:
+            del erledigt[alt]
+    return z
 
 
 # ── API-Helpers ───────────────────────────────────────────────────────────────
@@ -1755,6 +1991,10 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
         "entwurf_weiterleitung": 0,  # Weiterleitungs-Entwurf angelegt
         "entwurf_verzichtet": 0,     # bewusst kein Entwurf (Antwort braucht Sven)
         "asana_aufgabe": 0,          # Aufgabe im Board angelegt
+        # HBE-3052 — Svens Korrekturen
+        "korrekturen": 0,             # Kategorie von Sven geaendert
+        "korrektur_konsequenzen": 0,  # daraufhin ausgeloeste Konsequenz
+        "korrektur_gelernt": 0,       # als Lernsignal gespeichert
     }
 
     # Save before the pass — used as `since` for override detection below
@@ -1850,7 +2090,7 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
         # HBE-3048: Konsequenz des Schritts ausfuehren — Entwurf oder Aufgabe.
         # Laeuft NACH dem Kategorisieren, damit ein Fehler hier die Kategorie
         # nicht verliert. Nichts wird gesendet oder zugewiesen.
-        konsequenz = konsequenz_ausfuehren(m, schritt, empfaenger)
+        konsequenz = konsequenz_ausfuehren(m, schritt, empfaenger, state=state)
         if konsequenz.get("art") == "antwort":
             counters["entwurf_antwort"] += 1
         elif konsequenz.get("art") == "weiterleitung":
@@ -1908,6 +2148,15 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
                 f"_Regel:_ `{rule_id}`",
                 state,
             )
+
+    # HBE-3052: Hat Sven eine Kategorie geaendert? Dann Konsequenz ausfuehren
+    # und daraus lernen. Laeuft nach der Kategorisierung, damit die eigenen
+    # Entscheidungen dieses Laufs bereits im State stehen.
+    if not DRY_RUN:
+        k = korrekturen_verarbeiten(state)
+        counters["korrekturen"] = k["korrekturen"]
+        counters["korrektur_konsequenzen"] = k["konsequenzen"]
+        counters["korrektur_gelernt"] = k["gelernt"]
 
     state["processed_message_ids"] = new_processed
     last_triage_at = state.get("last_triage_at", "")
@@ -2024,6 +2273,14 @@ def main() -> None:
             "Konsequenzen inaktiv (LENA_MAIL_TRIAGE_AKTIONEN=0) — es entstehen "
             "keine Entwuerfe und keine Aufgaben."
         )
+
+    if KORREKTUREN_AKTIV:
+        logger.info(
+            "Korrektur-Erkennung aktiv: eine geaenderte Outlook-Kategorie loest "
+            "die Konsequenz aus und wird als Lernsignal gespeichert."
+        )
+    else:
+        logger.warning("Korrektur-Erkennung abgeschaltet (LENA_MAIL_TRIAGE_KORREKTUREN=0).")
 
     # Hindsight-Lernloop: SQLite-Schema initialisieren
     try:
