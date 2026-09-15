@@ -4835,6 +4835,98 @@ def lena_mail_body(
     )
 
 
+class LenaRegelRequest(BaseModel):
+    name: str = ""
+    absender: str = ""
+    betreff_enthaelt: str = ""
+    aktion: str
+    empfaenger: str = ""
+
+    @field_validator("aktion")
+    @classmethod
+    def _vid_aktion(cls, v: str) -> str:
+        return _check_lena_action(v)
+
+
+class LenaRegelResponse(BaseModel):
+    success: bool
+    anzahl: int
+    regel: dict
+
+
+@app.post("/api/lena/mail/rules", response_model=LenaRegelResponse)
+def lena_mail_regel_anlegen(
+    req: LenaRegelRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Legt eine von Sven bestaetigte Triage-Regel an (HBE-3056).
+
+    Geschrieben wird nach /var/lib/mail-triage-poller/regeln.json — bewusst
+    ausserhalb des Repos, damit der naechste Deploy sie nicht ueberschreibt.
+    Feste Regeln stehen weiterhin in config/lena-mail-triage.yaml.
+
+    Mindestens einer der beiden Schluessel muss gesetzt sein:
+      absender          fuer stabile Absender mit wechselndem Betreff
+      betreff_enthaelt  fuer wechselnde Absender mit stabilem Betreff
+    """
+    import json as _json
+    import os as _os
+
+    absender = (req.absender or "").strip().lower()
+    betreff = (req.betreff_enthaelt or "").strip().lower()
+    if not absender and not betreff:
+        raise HTTPException(
+            status_code=400,
+            detail="Mindestens 'absender' oder 'betreff_enthaelt' muss gesetzt sein.",
+        )
+
+    pfad = _os.getenv("LENA_MAIL_TRIAGE_REGELN", "/var/lib/mail-triage-poller/regeln.json")
+    try:
+        _os.makedirs(_os.path.dirname(pfad), exist_ok=True)
+        bestand = []
+        if _os.path.exists(pfad):
+            with open(pfad, encoding="utf-8") as fh:
+                daten = _json.load(fh)
+            bestand = daten.get("regeln", []) if isinstance(daten, dict) else list(daten)
+
+        neu = {
+            "name": (req.name or "").strip() or (absender or betreff)[:40],
+            "absender": absender,
+            "betreff_enthaelt": betreff,
+            "aktion": req.aktion,
+            "empfaenger": (req.empfaenger or "").strip(),
+            "angelegt_am": datetime.now(timezone.utc).isoformat(),
+        }
+        # Dublette? Gleicher Schluessel und gleiche Aktion -> ersetzen statt anhaengen
+        bestand = [r for r in bestand
+                   if not (r.get("absender", "") == absender
+                           and r.get("betreff_enthaelt", "") == betreff)]
+        bestand.append(neu)
+
+        with open(pfad, "w", encoding="utf-8") as fh:
+            _json.dump({"regeln": bestand}, fh, ensure_ascii=False, indent=1)
+        logger.info("[rules] Regel angelegt: %s -> %s", neu["name"], neu["aktion"])
+        return LenaRegelResponse(success=True, anzahl=len(bestand), regel=neu)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Regel konnte nicht gespeichert werden: {exc}")
+
+
+@app.get("/api/lena/mail/rules", response_model=dict)
+def lena_mail_regeln_lesen(_key: str = Security(verify_api_key)):
+    """Listet die zur Laufzeit angelegten Regeln."""
+    import json as _json
+    import os as _os
+    pfad = _os.getenv("LENA_MAIL_TRIAGE_REGELN", "/var/lib/mail-triage-poller/regeln.json")
+    if not _os.path.exists(pfad):
+        return {"regeln": []}
+    with open(pfad, encoding="utf-8") as fh:
+        daten = _json.load(fh)
+    return daten if isinstance(daten, dict) else {"regeln": daten}
+
+
 @app.get("/api/lena/mail/triage-summary", response_model=LenaTriageSummaryResponse)
 def lena_mail_triage_summary(
     since: str,
