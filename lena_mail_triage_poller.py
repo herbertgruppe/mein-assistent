@@ -229,9 +229,16 @@ Prüfe die Schritte STRENG DER REIHE NACH und nimm den ERSTEN, der zutrifft.
    Direktberichte, und Sven selbst muss nichts beitragen. NUR wenn du die Person
    konkret benennen kannst. Automatische Systemmails werden NIEMALS
    weitergeleitet. Eine Mail, die an Sven persönlich gerichtet ist, ebenfalls nicht.
-4. TERMINIEREN — Sven muss selbst etwas tun, das länger als zwei Minuten dauert
-   oder einen Termin braucht. Wird eine Aufgabe.
-5. ERLEDIGEN — Sven muss kurz antworten oder etwas in unter zwei Minuten tun.
+4. TERMINIEREN — Sven muss selbst HANDELN, und die Handlung findet NICHT per
+   E-Mail statt: etwas im JobRouter freigeben, ein Formular oder eine Umfrage
+   ausfüllen, ein Dokument unterschreiben, etwas vorbereiten, jemanden anrufen.
+   Auch wenn es länger als zwei Minuten dauert oder einen Termin braucht.
+5. ERLEDIGEN — Eine ANTWORTMAIL ist die richtige Reaktion, und sie ist kurz.
+   Zusage, Absage, Terminbestätigung, knappe Rückfrage beantworten.
+
+Unterscheidung 4 gegen 5: Frage dich, ob Sven ZURÜCKSCHREIBEN muss. Wenn die
+eigentliche Handlung woanders passiert — in einem System, auf Papier, am
+Telefon — dann ist es Schritt 4, auch wenn die Mail höflich um etwas bittet.
 
 Im Zweifel zwischen zwei Schritten: nimm den NIEDRIGEREN.
 
@@ -960,6 +967,51 @@ MAX_ALTER_TAGE = int(os.getenv("LENA_MAIL_TRIAGE_MAX_ALTER_TAGE", "28"))
 # dass einzelne Mails eines Threads doch unterschiedlich behandelt werden muessen.
 THREAD_GROUPING = os.getenv("LENA_MAIL_TRIAGE_THREAD_GROUPING", "1").strip() == "1"
 
+# ── Konsequenzen je Schritt (HBE-3048) ────────────────────────────────────────
+# Eine Kategorie ohne Konsequenz ist farbig markierter Posteingang. Ab hier
+# loest jeder Handlungs-Schritt etwas aus:
+#   Schritt 3 Weiterleiten -> Weiterleitungs-Entwurf an den Zustaendigen
+#   Schritt 4 Terminieren  -> Asana-Aufgabe
+#   Schritt 5 Erledigen    -> Antwort-Entwurf
+# Nichts davon wird gesendet oder zugewiesen — alles bleibt Entwurf.
+#
+# Standardmaessig AUS. Erst nach einem beobachteten Lauf scharfschalten.
+AKTIONEN_AKTIV = os.getenv("LENA_MAIL_TRIAGE_AKTIONEN", "0").strip() == "1"
+
+# Kategorie auf den erzeugten Entwuerfen, damit sie im Entwuerfe-Ordner von
+# Svens eigenen unterscheidbar sind.
+ENTWURF_KATEGORIE = os.getenv("LENA_MAIL_TRIAGE_ENTWURF_KATEGORIE", "Lena: Entwurf")
+
+# Asana-Board fuer Aufgaben aus Schritt 4 ("Meine Aufgaben SH")
+ASANA_TOKEN = os.getenv("ASANA_ACCESS_TOKEN", "")
+ASANA_BOARD_GID = os.getenv("LENA_MAIL_TRIAGE_ASANA_BOARD", "1216277431582688")
+ASANA_API = "https://app.asana.com/api/1.0"
+
+# Svens Schreibstil — Grundlage jedes Entwurfs.
+SCHREIBSTIL_DATEI = os.getenv(
+    "LENA_MAIL_TRIAGE_SCHREIBSTIL",
+    "/opt/vault-mirror/00 Kontext/Schreibstil.md",
+)
+_SCHREIBSTIL_FALLBACK = """Klar, direkt und verstaendlich. Keine unnoetigen Fremdwoerter,
+kein Managerjargon. Mitarbeiter intern: Du. Kunden und externe Kontakte: Sie.
+Ehrlich und offen, keine Schoenfaerberei. Kurze, klare Saetze."""
+
+
+def _schreibstil() -> str:
+    try:
+        p = Path(SCHREIBSTIL_DATEI)
+        if p.exists():
+            text = p.read_text(encoding="utf-8")
+            # YAML-Frontmatter entfernen
+            if text.startswith("---"):
+                teile = text.split("---", 2)
+                if len(teile) >= 3:
+                    text = teile[2]
+            return text.strip()[:2000]
+    except Exception as exc:
+        logger.warning("Schreibstil nicht lesbar (%s): %s", SCHREIBSTIL_DATEI, exc)
+    return _SCHREIBSTIL_FALLBACK
+
 _llm_client: Optional[Any] = None
 
 
@@ -978,6 +1030,47 @@ def _strip_json_fences(raw: str) -> str:
         raw = re.sub(r'^```(?:json)?\s*', '', raw)
         raw = re.sub(r'\s*```\s*$', '', raw)
     return raw.strip()
+
+
+def _erstes_json_objekt(raw: str) -> Dict[str, Any]:
+    """
+    Nimmt das erste vollstaendige JSON-Objekt aus der Antwort.
+
+    Bei laengeren Eingaben haengt das Modell gelegentlich noch Fliesstext hinter
+    das JSON — json.loads scheitert dann mit "Extra data". Statt den ganzen
+    Aufruf zu verlieren, wird bis zur passenden schliessenden Klammer gelesen.
+    """
+    text = _strip_json_fences(raw)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    start = text.find("{")
+    if start < 0:
+        raise ValueError("Keine JSON-Struktur in der Antwort gefunden.")
+    tiefe = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        z = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif z == "\\":
+                escaped = True
+            elif z == '"':
+                in_string = False
+            continue
+        if z == '"':
+            in_string = True
+        elif z == "{":
+            tiefe += 1
+        elif z == "}":
+            tiefe -= 1
+            if tiefe == 0:
+                return json.loads(text[start:i + 1])
+    raise ValueError("JSON-Objekt in der Antwort ist unvollstaendig.")
 
 
 def _llm_triage(
@@ -1011,8 +1104,7 @@ def _llm_triage(
         messages=[{"role": "user", "content": prompt}],
         timeout=LLM_TIMEOUT_SEC,
     )
-    raw = _strip_json_fences(response.content[0].text)
-    data = json.loads(raw)  # raises if malformed → caught by caller
+    data = _erstes_json_objekt(response.content[0].text)  # raises if malformed → caught by caller
 
     # HBE-3044: Das Modell antwortet jetzt mit einem Schritt der 5-Schritte-Regel.
     # Altes Format (action/priority/reasoning) wird weiter akzeptiert, damit ein
@@ -1171,11 +1263,11 @@ def triage_mail(
     to_emails: Optional[List[str]] = None,
     cc_emails: Optional[List[str]] = None,
     received_at: str = "",
-) -> Tuple[str, str, str, Optional[int], int]:
+) -> Tuple[str, str, str, Optional[int], int, Optional[str]]:
     """
     Hybrid-Triage: schnelle Regeln → Hindsight-Recall → LLM → mechanische Pruefungen.
 
-    Returns (action, priority, rule_id, learned_from, schritt).
+    Returns (action, priority, rule_id, learned_from, schritt, empfaenger).
     learned_from: count der Overrides die das angewendete Pattern erzeugt haben, sonst None.
     schritt: 1-5 nach der 5-Schritte-Regel. Schritt 2 wird nie still archiviert.
 
@@ -1196,15 +1288,15 @@ def triage_mail(
         # Regelbasiertes "ablegen" ist Schritt 1 (Loeschen) — es darf archiviert
         # werden. Die Personal-Ausnahme liefert "tun" und damit Schritt 4.
         schritt = 1 if action == "ablegen" else AKTION_ZU_SCHRITT.get(action, 2)
-        return action, priority, rule_id, None, schritt
+        return action, priority, rule_id, None, schritt, None
 
     # Regel 1: Kalender-Notifications -> Loeschen (kein LLM-Aufruf)
     if CALENDAR_SUBJECT_RE.search(subj):
-        return "ablegen", "niedrig", "calendar_subject", None, 1
+        return "ablegen", "niedrig", "calendar_subject", None, 1, None
 
     # Regel 2: Newsletter/Automated-Sender -> Loeschen (kein LLM-Aufruf)
     if NEWSLETTER_SENDER_RE.search(sender):
-        return "ablegen", "niedrig", "newsletter_sender", None, 1
+        return "ablegen", "niedrig", "newsletter_sender", None, 1, None
 
     # Hindsight-Recall: gelerntes Pattern als Hint an LLM übergeben
     sender_domain = sender_email.split("@")[-1].lower() if "@" in sender_email else ""
@@ -1235,8 +1327,8 @@ def triage_mail(
         action = SCHRITT_ZU_AKTION[schritt]
         if hindsight_pattern and action == hindsight_pattern["action"] and priority == hindsight_pattern["priority"]:
             rule_id = f"llm+memory:{sender_domain}/{subject_prefix}"
-            return action, priority, rule_id, hindsight_pattern["count"], schritt
-        return action, priority, reasoning, None, schritt
+            return action, priority, rule_id, hindsight_pattern["count"], schritt, empfaenger
+        return action, priority, reasoning, None, schritt, empfaenger
     except Exception as exc:
         logger.warning(
             "LLM triage failed for sender=%s subject=%s: %s",
@@ -1245,8 +1337,258 @@ def triage_mail(
         # Fallback: regelbasiert mit Urgency-Check. Bewusst Schritt 5 — ein
         # fehlgeschlagener LLM-Aufruf darf niemals zu stillem Archivieren fuehren.
         if URGENCY_RE.search(subj) or URGENCY_RE.search(body_preview or ""):
-            return "antworten", "hoch", "llm_failed_urgency_fallback", None, 5
-        return "antworten", "mittel", "llm_failed_default", None, 5
+            return "antworten", "hoch", "llm_failed_urgency_fallback", None, 5, None
+        return "antworten", "mittel", "llm_failed_default", None, 5, None
+
+
+# ── Konsequenzen: Entwuerfe und Aufgaben (HBE-3048) ──────────────────────────
+
+# Svens Termine der naechsten Tage. Ohne sie kann kein Entwurf auf die
+# haeufigste Frage ueberhaupt antworten — "passt Ihnen Mittwoch 14 Uhr?".
+# Im ersten Test scheiterten daran 2 von 8 Entwuerfen.
+KALENDER_TAGE = int(os.getenv("LENA_MAIL_TRIAGE_KALENDER_TAGE", "14"))
+_kalender_cache: Dict[str, Any] = {"stand": None, "text": ""}
+
+
+def _kalender_kontext(max_alter_sek: int = 900) -> str:
+    """Svens Termine der naechsten Tage als kompakte Liste (Ortszeit)."""
+    jetzt = datetime.now(timezone.utc)
+    stand = _kalender_cache.get("stand")
+    if stand and (jetzt - stand).total_seconds() < max_alter_sek:
+        return _kalender_cache["text"]
+
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Berlin")
+    except Exception:
+        tz = timezone.utc
+
+    try:
+        start = jetzt.strftime("%Y-%m-%dT00:00:00")
+        ende = (jetzt + timedelta(days=KALENDER_TAGE)).strftime("%Y-%m-%dT23:59:59")
+        resp = requests.get(
+            f"{API_URL.rstrip('/')}/api/calendar/events",
+            headers={"X-API-Key": API_KEY},
+            params={"start": start, "end": ende}, timeout=30,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"HTTP {resp.status_code}")
+        events = resp.json().get("events", [])
+    except Exception as exc:
+        logger.warning("Kalender fuer Entwuerfe nicht abrufbar: %s", exc)
+        _kalender_cache.update(stand=jetzt, text="")
+        return ""
+
+    WT = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+    zeilen: List[str] = []
+    for e in events[:80]:
+        dt = _try_parse_iso((e.get("start") or "")[:19] + "+00:00")
+        if dt is None:
+            continue
+        lokal = dt.astimezone(tz)
+        bis = _try_parse_iso((e.get("end") or "")[:19] + "+00:00")
+        bis_txt = bis.astimezone(tz).strftime("%H:%M") if bis else "?"
+        titel = (e.get("title") or "")[:52]
+        zeilen.append(f"{WT[lokal.weekday()]} {lokal:%d.%m.} {lokal:%H:%M}-{bis_txt} {titel}")
+
+    text = "\n".join(zeilen)
+    _kalender_cache.update(stand=jetzt, text=text)
+    return text
+
+
+ENTWURF_SYSTEM = """Du bist Lena, die persoenliche Assistentin von Sven Herbert,
+Geschaeftsfuehrer der Herbert Gruppe (Gebaeudetechnik/TGA).
+
+Du bereitest eine Antwort auf eine E-Mail vor. Sven prueft und sendet selbst.
+
+SVENS SCHREIBSTIL — halte dich strikt daran:
+{schreibstil}
+
+SVENS TERMINE (Ortszeit, naechste Tage) — nutze sie fuer Terminfragen:
+{kalender}
+
+Wenn jemand nach einem Termin fragt, pruefe diese Liste und antworte konkret:
+frei -> zusagen, belegt -> absagen und den Konflikt benennen. Steht der genannte
+Termin bereits in der Liste, ist er angenommen — dann bestaetigen.
+Liegt der gefragte Zeitpunkt ausserhalb der Liste, sage das ehrlich ("nein").
+
+ENTSCHEIDE ZUERST, OB DU UEBERHAUPT ANTWORTEN KANNST:
+
+- "voll"    Die Antwort folgt vollstaendig aus der Mail. Terminbestaetigung,
+            Empfangsbestaetigung, Dank, Zusage zu etwas bereits Abgestimmtem,
+            einfache Rueckfrage beantworten. Schreibe die fertige Antwort.
+- "geruest" Anrede, Struktur und Schluss stehen fest, aber ein inhaltlicher Kern
+            fehlt, den nur Sven kennt (ein Termin, eine Zahl, eine Einschaetzung).
+            Schreibe den Rahmen und markiere die Luecke mit [[...]].
+- "nein"    Die Antwort ist eine Entscheidung oder braucht Wissen, das nicht in
+            der Mail steht. Schreibe KEINEN Text. Nenne stattdessen unter
+            "offene_frage" praezise, was Sven klaeren muss.
+
+Erfinde niemals Inhalte, Zusagen, Termine oder Zahlen. Im Zweifel "nein".
+
+Antworte AUSSCHLIESSLICH mit JSON:
+{{"stufe": "voll|geruest|nein", "text": "Antworttext oder leer",
+  "offene_frage": "nur bei nein, sonst leer"}}"""
+
+
+def _volltext(message_id: str, rueckfall: str = "") -> str:
+    """
+    Holt den vollstaendigen Mailtext. Faellt auf die Vorschau zurueck.
+
+    bodyPreview ist auf 500 Zeichen begrenzt und schneidet mitten im Satz ab.
+    Das Modell verweigerte im ersten Test mehrfach den Entwurf mit der
+    Begruendung, die Mail breche ab — nicht weil die Antwort schwierig war.
+    """
+    if not message_id:
+        return rueckfall
+    try:
+        resp = requests.get(
+            f"{API_URL.rstrip('/')}/api/lena/mail/{message_id}/body",
+            headers={"X-API-Key": API_KEY}, params={"max_chars": 6000}, timeout=40,
+        )
+        if resp.status_code == 200:
+            text = (resp.json().get("body_text") or "").strip()
+            if text:
+                return text
+        else:
+            logger.warning("mail/body HTTP %d", resp.status_code)
+    except Exception as exc:
+        logger.warning("Volltext nicht abrufbar: %s", exc)
+    return rueckfall
+
+
+def _llm_entwurf(subject: str, sender_name: str, sender_email: str,
+                 body_preview: str, message_id: str = "") -> Tuple[str, str, str]:
+    """Erzeugt einen Antwortentwurf. Returns (stufe, text, offene_frage)."""
+    client = _get_llm_client()
+    if client is None:
+        raise RuntimeError("Anthropic-Client nicht verfuegbar.")
+    inhalt = _volltext(message_id, body_preview or "")
+    prompt = (f"Von: {sender_name} <{sender_email}>\n"
+              f"Betreff: {subject}\n\n{inhalt[:6000]}")
+    kal = _kalender_kontext()
+    resp = client.messages.create(
+        model=LLM_MODEL,
+        max_tokens=700,
+        system=ENTWURF_SYSTEM.format(
+            schreibstil=_schreibstil(),
+            kalender=kal or "(keine Termindaten verfuegbar — bei Terminfragen 'nein')",
+        ),
+        messages=[{"role": "user", "content": prompt}],
+        timeout=LLM_TIMEOUT_SEC,
+    )
+    data = _erstes_json_objekt(resp.content[0].text)
+    stufe = str(data.get("stufe", "nein")).strip().lower()
+    if stufe not in ("voll", "geruest", "nein"):
+        stufe = "nein"
+    return stufe, str(data.get("text") or "").strip(), str(data.get("offene_frage") or "").strip()
+
+
+def _entwurf_anlegen(message_id: str, betreff: str, text: str,
+                     modus: str = "reply", to: Optional[List[Dict[str, str]]] = None) -> Optional[str]:
+    """Legt einen Entwurf in Svens Entwuerfe-Ordner an. Gibt die Draft-ID zurueck."""
+    payload: Dict[str, Any] = {
+        "to": to or [],
+        "cc": [],
+        "subject": betreff,
+        "body_text": text,
+        "reply_to_message_id": message_id,
+        "mode": modus,
+        "category": ENTWURF_KATEGORIE,
+    }
+    resp = requests.post(f"{API_URL.rstrip('/')}/api/lena/mail/draft",
+                         headers=_api_headers(), json=payload, timeout=40)
+    if resp.status_code != 200:
+        logger.warning("draft HTTP %d: %s", resp.status_code, resp.text[:200])
+        return None
+    return resp.json().get("draft_id")
+
+
+def _asana_aufgabe(betreff: str, sender_name: str, sender_email: str,
+                   body_preview: str, empfangen: str) -> Optional[str]:
+    """Legt eine Aufgabe im Board 'Meine Aufgaben SH' an."""
+    if not ASANA_TOKEN:
+        logger.warning("ASANA_ACCESS_TOKEN fehlt — keine Aufgabe angelegt.")
+        return None
+    notes = (f"Aus einer E-Mail vom {empfangen[:10]}.\n\n"
+             f"Von: {sender_name} <{sender_email}>\n"
+             f"Betreff: {betreff}\n\n"
+             f"{(body_preview or '')[:1200]}\n\n"
+             f"— angelegt von Lena aus der Mail-Triage")
+    try:
+        resp = requests.post(
+            f"{ASANA_API}/tasks",
+            headers={"Authorization": f"Bearer {ASANA_TOKEN}",
+                     "Content-Type": "application/json"},
+            json={"data": {"name": betreff[:120], "notes": notes,
+                           "projects": [ASANA_BOARD_GID]}},
+            timeout=30,
+        )
+        if resp.status_code not in (200, 201):
+            logger.warning("Asana HTTP %d: %s", resp.status_code, resp.text[:200])
+            return None
+        return resp.json().get("data", {}).get("gid")
+    except Exception as exc:
+        logger.warning("Asana-Aufgabe fehlgeschlagen: %s", exc)
+        return None
+
+
+def konsequenz_ausfuehren(mail: Dict[str, Any], schritt: int,
+                          empfaenger: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Fuehrt die Konsequenz des Schritts aus. Gibt ein Protokoll-Dict zurueck.
+
+    Nichts hiervon wird gesendet oder zugewiesen — es entstehen ausschliesslich
+    Entwuerfe und Aufgaben, die Sven prueft.
+    """
+    ergebnis: Dict[str, Any] = {"art": None, "id": None, "stufe": None, "hinweis": None}
+    if not AKTIONEN_AKTIV or schritt not in (3, 4, 5):
+        return ergebnis
+
+    betreff = mail.get("subject", "") or ""
+    s_name = mail.get("sender_name", "") or ""
+    s_mail = mail.get("sender_email", "") or ""
+    vorschau = mail.get("body_preview", "") or ""
+    mid = mail.get("message_id", "") or ""
+
+    try:
+        if schritt == 4:
+            gid = _asana_aufgabe(betreff, s_name, s_mail, vorschau,
+                                 mail.get("received_at", "") or "")
+            ergebnis.update(art="asana", id=gid)
+            return ergebnis
+
+        if schritt == 3:
+            adr = empfaenger_zu_adresse(empfaenger)
+            if not adr:
+                ergebnis["hinweis"] = f"Empfaenger '{empfaenger}' nicht aufloesbar"
+                return ergebnis
+            text = (f"Hallo,\n\nkannst du das bitte uebernehmen?\n\n"
+                    f"Viele Gruesse\nSven")
+            did = _entwurf_anlegen(mid, f"WG: {betreff}", text, modus="forward",
+                                   to=[{"name": empfaenger or "", "email": adr}])
+            ergebnis.update(art="weiterleitung", id=did, hinweis=f"an {adr}")
+            return ergebnis
+
+        # Schritt 5 — Antwortentwurf
+        stufe, text, frage = _llm_entwurf(betreff, s_name, s_mail, vorschau, mid)
+        ergebnis["stufe"] = stufe
+        text = (text or "").strip()
+        # Leerer oder nur aus Leerzeichen bestehender Text ist kein Entwurf.
+        if stufe == "nein" or not text:
+            ergebnis["hinweis"] = frage or "kein Entwurf moeglich"
+            return ergebnis
+        if stufe == "geruest":
+            text += ("\n\n---\nHinweis von Lena: Die mit [[...]] markierten Stellen "
+                     "brauchen deine Angabe.")
+        did = _entwurf_anlegen(mid, f"AW: {betreff}", text, modus="reply")
+        ergebnis.update(art="antwort", id=did)
+        return ergebnis
+
+    except Exception as exc:
+        logger.warning("Konsequenz fuer Schritt %s fehlgeschlagen: %s", schritt, exc)
+        ergebnis["hinweis"] = f"Fehler: {exc}"[:120]
+        return ergebnis
 
 
 # ── API-Helpers ───────────────────────────────────────────────────────────────
@@ -1408,6 +1750,11 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
         # HBE-3044
         "thread_uebernommen": 0,  # Entscheidung vom Vorgang uebernommen
         "guard_korrigiert": 0,    # mechanische Pruefung hat zurueckgestuft
+        # HBE-3048 — Konsequenzen
+        "entwurf_antwort": 0,        # Antwortentwurf angelegt
+        "entwurf_weiterleitung": 0,  # Weiterleitungs-Entwurf angelegt
+        "entwurf_verzichtet": 0,     # bewusst kein Entwurf (Antwort braucht Sven)
+        "asana_aufgabe": 0,          # Aufgabe im Board angelegt
     }
 
     # Save before the pass — used as `since` for override detection below
@@ -1442,12 +1789,12 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
 
         conv = (m.get("conversation_id") or "") if THREAD_GROUPING else ""
         if conv and conv in thread_entscheidung:
-            action, priority, base_rule, schritt = thread_entscheidung[conv]
+            action, priority, base_rule, schritt, empfaenger = thread_entscheidung[conv]
             rule_id = f"thread:{base_rule}"
             learned_from = None
             counters["thread_uebernommen"] += 1
         else:
-            action, priority, rule_id, learned_from, schritt = triage_mail(
+            action, priority, rule_id, learned_from, schritt, empfaenger = triage_mail(
                 m.get("subject", ""),
                 m.get("sender_email", ""),
                 m.get("body_preview", ""),
@@ -1457,7 +1804,7 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
                 received_at=m.get("received_at", "") or "",
             )
             if conv:
-                thread_entscheidung[conv] = (action, priority, rule_id, schritt)
+                thread_entscheidung[conv] = (action, priority, rule_id, schritt, empfaenger)
 
         if rule_id.startswith("guard:") or ":guard:" in rule_id:
             counters["guard_korrigiert"] += 1
@@ -1500,6 +1847,19 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
         counters["categorized"] += 1
         new_processed.append(mid)
 
+        # HBE-3048: Konsequenz des Schritts ausfuehren — Entwurf oder Aufgabe.
+        # Laeuft NACH dem Kategorisieren, damit ein Fehler hier die Kategorie
+        # nicht verliert. Nichts wird gesendet oder zugewiesen.
+        konsequenz = konsequenz_ausfuehren(m, schritt, empfaenger)
+        if konsequenz.get("art") == "antwort":
+            counters["entwurf_antwort"] += 1
+        elif konsequenz.get("art") == "weiterleitung":
+            counters["entwurf_weiterleitung"] += 1
+        elif konsequenz.get("art") == "asana":
+            counters["asana_aufgabe"] += 1
+        elif AKTIONEN_AKTIV and schritt == 5 and konsequenz.get("stufe") == "nein":
+            counters["entwurf_verzichtet"] += 1
+
         # Cache Lena's triage result so _learn_from_overrides can fill original_action/priority
         triage_results = state.setdefault("triage_results", {})
         triage_results[mid] = {"action": action, "priority": priority}
@@ -1535,6 +1895,8 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
         }
         if learned_from is not None:
             log_entry["learned_from"] = learned_from
+        if konsequenz.get("art") or konsequenz.get("hinweis"):
+            log_entry["konsequenz"] = {k: v for k, v in konsequenz.items() if v}
         logger.info(json.dumps(log_entry, ensure_ascii=False))
 
         if priority == "hoch":
@@ -1643,6 +2005,24 @@ def main() -> None:
         logger.warning(
             "TROCKENLAUF AKTIV (LENA_MAIL_TRIAGE_DRY_RUN=1) — es werden KEINE Kategorien "
             "gesetzt und KEINE Mails verschoben. Entscheidungen nur im Log."
+        )
+
+    # HBE-3048: Konsequenzen je Schritt
+    if AKTIONEN_AKTIV:
+        stil = _schreibstil()
+        logger.info(
+            "Konsequenzen AKTIV: Schritt 3 -> Weiterleitungs-Entwurf, "
+            "Schritt 4 -> Asana (%s), Schritt 5 -> Antwort-Entwurf. "
+            "Kategorie auf Entwuerfen: '%s'. Schreibstil: %d Zeichen aus %s",
+            ASANA_BOARD_GID, ENTWURF_KATEGORIE, len(stil),
+            SCHREIBSTIL_DATEI if Path(SCHREIBSTIL_DATEI).exists() else "Fallback",
+        )
+        if not ASANA_TOKEN:
+            logger.warning("ASANA_ACCESS_TOKEN fehlt — Schritt 4 legt keine Aufgaben an.")
+    else:
+        logger.info(
+            "Konsequenzen inaktiv (LENA_MAIL_TRIAGE_AKTIONEN=0) — es entstehen "
+            "keine Entwuerfe und keine Aufgaben."
         )
 
     # Hindsight-Lernloop: SQLite-Schema initialisieren
