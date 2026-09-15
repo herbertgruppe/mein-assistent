@@ -71,6 +71,36 @@ weiterleitung_routing:
   it: "Sven Walter"     # IT
   regional: "jeweiliger NL-Leiter"  # regionale Themen
 
+# ── Svens eigene Regeln (HBE-3056) ───────────────────────────────────────────
+# Diese Regeln gewinnen gegen alles andere — kein Sprachmodell diskutiert sie weg.
+#
+# Zwei Schlüssel, weil die Praxis beide braucht:
+#   absender          → wenn der Absender stabil ist und der Betreff wechselt
+#   betreff_enthaelt  → wenn der Betreff stabil ist und der Absender wechselt
+# Sind beide gesetzt, müssen beide zutreffen. Vergleich ist Teilstring,
+# Groß-/Kleinschreibung wird ignoriert.
+#
+# Regeln, die Sven zur Laufzeit ergänzt, landen in
+# /var/lib/mail-triage-poller/regeln.json — außerhalb des Repos, damit der
+# nächste Deploy sie nicht überschreibt. Beide Quellen werden zusammengeführt.
+regeln:
+  # Anthropic-Belege gehen an Laura für die Kreditkartenabrechnung.
+  # Der Absender ist über 72 Mails stabil; der Betreff trägt die wechselnde
+  # Rechnungsnummer ("Your receipt from Anthropic, PBC #2849-3094-3660").
+  # Wichtig: NICHT auf die Domain mail.anthropic.com regeln — von dort kommen
+  # auch die Anmelde-Links, die Sven selbst braucht.
+  - name: "Anthropic-Belege"
+    absender: "invoice+statements@mail.anthropic.com"
+    aktion: "weiterleiten"
+    empfaenger: "Laura Ann Hernandez-Allmann"
+
+  # DMARC-Berichte: acht verschiedene Absender, aber ein durch RFC 7489
+  # festgelegter Betreff. Microsoft stellt "[Preview] " voran, Google schreibt
+  # "Report domain" klein — deshalb Teilstring ohne Groß-/Kleinschreibung.
+  - name: "DMARC-Berichte"
+    betreff_enthaelt: "report domain: herbertgruppe.com"
+    aktion: "ablegen"
+
 # ── Systemabsender (Mail-Konzept 2026-09) ────────────────────────────────────
 # Absender, die deterministisch behandelt werden — ohne LLM-Aufruf und damit
 # ohne Streuung. Die Grundregel gilt für alle Mails des Absenders; Mails, deren

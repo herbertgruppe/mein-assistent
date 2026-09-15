@@ -553,6 +553,81 @@ def _load_system_senders(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+# ── Svens eigene Regeln (HBE-3056) ───────────────────────────────────────────
+# Regeln, die Sven selbst gesetzt hat. Sie gewinnen gegen alles andere — wenn er
+# sagt "immer ablegen", diskutiert kein Modell mehr darueber.
+#
+# Zwei Schluessel, weil die Praxis beide braucht:
+#   absender          Anthropic-Belege kommen immer von derselben Adresse,
+#                     der Betreff wechselt (Rechnungsnummer).
+#   betreff_enthaelt  DMARC-Berichte kommen von acht verschiedenen Absendern,
+#                     der Betreff ist durch einen Standard festgelegt.
+# Sind beide gesetzt, muessen beide zutreffen.
+#
+# Feste Regeln stehen in config/lena-mail-triage.yaml (versioniert, ueber PR
+# geaendert). Regeln, die Sven zur Laufzeit ergaenzt, landen in einer eigenen
+# Datei ausserhalb des Repos — sonst wuerde der naechste Deploy sie ueberschreiben.
+LAUFZEIT_REGELN = os.getenv(
+    "LENA_MAIL_TRIAGE_REGELN",
+    "/var/lib/mail-triage-poller/regeln.json",
+)
+
+
+def _regel_normieren(r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    absender = (r.get("absender") or "").strip().lower()
+    betreff = (r.get("betreff_enthaelt") or "").strip().lower()
+    aktion = (r.get("aktion") or "").strip().lower()
+    if not (absender or betreff) or aktion not in _VALID_ACTIONS:
+        return None
+    return {
+        "name": (r.get("name") or "").strip() or (absender or betreff)[:40],
+        "absender": absender,
+        "betreff_enthaelt": betreff,
+        "aktion": aktion,
+        "empfaenger": (r.get("empfaenger") or "").strip() or None,
+        "quelle": r.get("quelle") or "config",
+    }
+
+
+def _laufzeit_regeln_lesen() -> List[Dict[str, Any]]:
+    try:
+        p = Path(LAUFZEIT_REGELN)
+        if not p.exists():
+            return []
+        daten = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(daten, dict):
+            daten = daten.get("regeln", [])
+        return [dict(r, quelle="laufzeit") for r in daten if isinstance(r, dict)]
+    except Exception as exc:
+        logger.warning("Laufzeit-Regeln nicht lesbar (%s): %s", LAUFZEIT_REGELN, exc)
+        return []
+
+
+_REGELN: Optional[List[Dict[str, Any]]] = None
+
+
+def _get_regeln(neu_laden: bool = False) -> List[Dict[str, Any]]:
+    global _REGELN
+    if _REGELN is None or neu_laden:
+        roh = list((_PERSONA_CONFIG or _load_persona_config()).get("regeln") or [])
+        roh += _laufzeit_regeln_lesen()
+        _REGELN = [x for x in (_regel_normieren(r) for r in roh) if x]
+    return _REGELN
+
+
+def match_regel(sender_email: str, subject: str) -> Optional[Dict[str, Any]]:
+    """Prueft Svens eigene Regeln. Erste passende gewinnt."""
+    s = (sender_email or "").strip().lower()
+    b = (subject or "").strip().lower()
+    for r in _get_regeln():
+        if r["absender"] and r["absender"] not in s:
+            continue
+        if r["betreff_enthaelt"] and r["betreff_enthaelt"] not in b:
+            continue
+        return r
+    return None
+
+
 _SYSTEM_SENDERS: Optional[List[Dict[str, Any]]] = None
 
 
@@ -639,7 +714,8 @@ def may_auto_archive(sender_email: str, rule_id: str, schritt: Optional[int] = N
     """
     if schritt is not None and schritt in SCHRITTE_OHNE_AUTOARCHIV:
         return False
-    if rule_id.startswith(("system_sender", "newsletter_sender", "calendar_subject")):
+    # HBE-3056: Svens eigene Regel ist die staerkste Deckung ueberhaupt.
+    if rule_id.startswith(("sven_regel", "system_sender", "newsletter_sender", "calendar_subject")):
         return True
     return sender_verdict(sender_email) in AUTO_ARCHIVE_VERDICTS
 
@@ -983,6 +1059,9 @@ AKTIONEN_AKTIV = os.getenv("LENA_MAIL_TRIAGE_AKTIONEN", "0").strip() == "1"
 # und ohne ihn bleibt eine Korrektur in Outlook folgenlos.
 KORREKTUREN_AKTIV = os.getenv("LENA_MAIL_TRIAGE_KORREKTUREN", "1").strip() == "1"
 
+# Wiederholt sich eine Korrektur, schlaegt Lena eine feste Regel vor.
+REGELVORSCHLAG_AKTIV = os.getenv("LENA_MAIL_TRIAGE_REGELVORSCHLAG", "1").strip() == "1"
+
 # Kategorie auf den erzeugten Entwuerfen, damit sie im Entwuerfe-Ordner von
 # Svens eigenen unterscheidbar sind.
 ENTWURF_KATEGORIE = os.getenv("LENA_MAIL_TRIAGE_ENTWURF_KATEGORIE", "Lena: Entwurf")
@@ -1285,6 +1364,16 @@ def triage_mail(
     """
     subj = subject or ""
     sender = (sender_email or "").lower()
+
+    # Svens eigene Regeln gewinnen gegen alles (HBE-3056)
+    eigene = match_regel(sender, subj)
+    if eigene:
+        aktion = eigene["aktion"]
+        # Eine ausdrueckliche Anweisung von Sven ist mindestens so verbindlich
+        # wie eine Systemregel — "ablegen" heisst hier wirklich ablegen.
+        schritt = 1 if aktion == "ablegen" else AKTION_ZU_SCHRITT.get(aktion, 2)
+        return (aktion, "niedrig" if schritt == 1 else "mittel",
+                f"sven_regel:{eigene['name']}", None, schritt, eigene.get("empfaenger"))
 
     # Regel 0: Systemabsender -> deterministisch, kein LLM-Aufruf (Mail-Konzept 2026-09)
     sys_hit = match_system_sender(sender, subj)
@@ -1713,11 +1802,109 @@ KATEGORIE_ZU_AKTION = {v: k for k, v in AKTION_ZU_KATEGORIE.items()}
 MAX_KORREKTUR_MERKER = 300
 
 
-def _lena_kategorie(categories: List[str]) -> Optional[str]:
-    for c in (categories or []):
-        if c in KATEGORIE_ZU_AKTION:
-            return c
-    return None
+def _lena_kategorie(categories: List[str],
+                    eigene_aktion: Optional[str] = None) -> Optional[str]:
+    """
+    Findet die massgebliche Lena-Kategorie auf einer Mail.
+
+    HBE-3056: Liegen ZWEI Lena-Kategorien auf der Mail, gilt die, die NICHT von
+    Lena selbst stammt. Damit genuegt es, eine Kategorie hinzuzufuegen — das
+    Abwaehlen der alten entfaellt. Vorher entschied die Reihenfolge, in der
+    Outlook die Kategorien zurueckgibt, also der Zufall.
+    """
+    gefunden = [c for c in (categories or []) if c in KATEGORIE_ZU_AKTION]
+    if not gefunden:
+        return None
+    if len(gefunden) > 1 and eigene_aktion:
+        meine = AKTION_ZU_KATEGORIE.get(eigene_aktion)
+        andere = [c for c in gefunden if c != meine]
+        if andere:
+            return andere[0]
+    return gefunden[0]
+
+
+def regel_schluessel_waehlen(absender: str, betreff: str) -> Tuple[str, str]:
+    """
+    Waehlt den passenden Regel-Schluessel: Absender oder Betreff.
+
+    Die Praxis verlangt beides. Anthropic-Belege kommen immer von
+    invoice+statements@mail.anthropic.com, der Betreff traegt eine wechselnde
+    Rechnungsnummer — dort greift der Absender. DMARC-Berichte kommen von acht
+    verschiedenen Absendern, der Betreff ist durch einen Standard festgelegt —
+    dort greift der Betreff.
+
+    Heuristik: Enthaelt der lokale Teil der Adresse eine lange Zufallskennung,
+    ist der Absender unbrauchbar. Dann wird der Betreff genommen.
+    """
+    s = (absender or "").strip().lower()
+    local = s.split("@")[0]
+    zufall = bool(re.search(r'[0-9a-z]{16,}', local)) or local.count("-") >= 3
+    if s and not zufall:
+        return "absender", s
+    kern = re.sub(r'[0-9]+', '', (betreff or "")).strip()
+    kern = re.sub(r'\s+', ' ', kern)[:45].strip().lower()
+    return ("betreff_enthaelt", kern) if kern else ("absender", s)
+
+
+def regel_vorschlagen(state: Dict[str, Any], absender: str, betreff: str,
+                      aktion: str, db: Any) -> bool:
+    """
+    Schlaegt Sven eine feste Regel vor, wenn sich ein Muster wiederholt hat.
+
+    Der Vorschlag nennt den gewaehlten Schluessel und wie viele Mails er
+    getroffen haette — damit sofort sichtbar ist, ob er zu weit greift.
+    """
+    if not REGELVORSCHLAG_AKTIV or not db:
+        return False
+    domain = absender.lower().split("@")[-1] if "@" in absender else absender.lower()
+    prefix = _normalize_subject_prefix(betreff)
+    try:
+        muster = db.recall_pattern(domain, prefix, LEARN_THRESHOLD)
+    except Exception:
+        return False
+    if not muster or muster.get("action") != aktion:
+        return False
+
+    art, wert = regel_schluessel_waehlen(absender, betreff)
+    vorgeschlagen = state.setdefault("regelvorschlaege", {})
+    schluessel = f"{art}:{wert}:{aktion}"
+    if schluessel in vorgeschlagen:
+        return False          # nicht zweimal fragen
+
+    treffer = _regel_treffer_schaetzen(art, wert)
+    beschreibung = (f"Absender `{wert}`" if art == "absender"
+                    else f"Betreff enthält „{wert}“")
+    _tg_alert(
+        f"📌 *Regel vorschlagen?*\n\n"
+        f"Du hast das jetzt {muster.get('count', LEARN_THRESHOLD)}× auf "
+        f"*{aktion}* gesetzt.\n\n"
+        f"Regel: {beschreibung} → *{aktion}*\n"
+        f"_Hätte {treffer} Mails der letzten Monate betroffen._\n\n"
+        f"Antwort: *ja* — oder korrigiert tippen",
+        state,
+    )
+    vorgeschlagen[schluessel] = datetime.now(timezone.utc).isoformat()
+    logger.info("Regelvorschlag gesendet: %s -> %s (%d Treffer)", beschreibung, aktion, treffer)
+    return True
+
+
+def _regel_treffer_schaetzen(art: str, wert: str) -> int:
+    """Wie viele Mails der Historie haette diese Regel betroffen?"""
+    pfad = os.getenv("LENA_MAIL_TRIAGE_ARCHIV_DB", "/root/mail-archive/archive.db")
+    if not os.path.exists(pfad):
+        return 0
+    try:
+        conn = sqlite3.connect(f"file:{pfad}?mode=ro", uri=True, timeout=5)
+        try:
+            spalte = "sender_email" if art == "absender" else "subject"
+            n = conn.execute(
+                f"SELECT COUNT(*) FROM mails WHERE lower({spalte}) LIKE ?",
+                (f"%{wert}%",)).fetchone()[0]
+            return int(n)
+        finally:
+            conn.close()
+    except Exception:
+        return 0
 
 
 def korrekturen_verarbeiten(state: Dict[str, Any]) -> Dict[str, int]:
@@ -1750,12 +1937,12 @@ def korrekturen_verarbeiten(state: Dict[str, Any]) -> Dict[str, int]:
         mid = m.get("message_id") or ""
         if not mid:
             continue
-        aktuell_kat = _lena_kategorie(m.get("categories") or [])
-        if not aktuell_kat:
-            continue
         meine = (eigene.get(mid) or {}).get("action")
         if not meine:
             continue          # nie von uns kategorisiert — nichts zu vergleichen
+        aktuell_kat = _lena_kategorie(m.get("categories") or [], meine)
+        if not aktuell_kat:
+            continue
         z["geprueft"] += 1
 
         aktuell_aktion = KATEGORIE_ZU_AKTION[aktuell_kat]
@@ -1820,6 +2007,9 @@ def korrekturen_verarbeiten(state: Dict[str, Any]) -> Dict[str, int]:
         erledigt[mid] = aktuell_aktion
         eigene[mid] = {"action": aktuell_aktion,
                        "priority": (eigene.get(mid) or {}).get("priority", "mittel")}
+
+        # 3) Reicht es fuer einen Regelvorschlag?
+        regel_vorschlagen(state, absender, betreff, aktuell_aktion, db)
 
     if len(erledigt) > MAX_KORREKTUR_MERKER:
         for alt in list(erledigt.keys())[:len(erledigt) - MAX_KORREKTUR_MERKER]:
