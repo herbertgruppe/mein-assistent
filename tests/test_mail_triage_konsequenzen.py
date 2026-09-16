@@ -148,16 +148,24 @@ def test_ohne_empfaenger_kein_entwurf(aktiv, monkeypatch):
 def test_asana_aufgabe_wird_angelegt(aktiv, monkeypatch):
     erfasst = {}
 
-    def fake(betreff, s_name, s_mail, vorschau, empfangen):
-        erfasst.update(betreff=betreff, sender=s_mail, vorschau=vorschau)
+    # HBE-3061: Der Aufruf traegt jetzt zusaetzlich Titel, Frist und Kontext,
+    # und der Volltext wird geholt statt der 500-Zeichen-Vorschau.
+    def fake(betreff, s_name, s_mail, vorschau, empfangen, **kw):
+        erfasst.update(betreff=betreff, sender=s_mail, vorschau=vorschau, **kw)
         return "gid-4711"
     monkeypatch.setattr(poller, "_asana_aufgabe", fake)
+    monkeypatch.setattr(poller, "_volltext", lambda *a, **k: "Volltext der Mail")
+    monkeypatch.setattr(poller, "_llm_aufgabe",
+                        lambda *a, **k: ("Termin am Freitag bestaetigen", None, "Kontext"))
+    monkeypatch.setattr(poller, "_mail_archivieren", lambda mid: True)
+    monkeypatch.setattr(poller, "_rueckfrage", lambda *a, **k: True)
 
     r = poller.konsequenz_ausfuehren(MAIL, 4)
     assert r["art"] == "asana"
     assert r["id"] == "gid-4711"
     assert erfasst["betreff"] == MAIL["subject"]
     assert erfasst["sender"] == MAIL["sender_email"]
+    assert erfasst["titel"] == "Termin am Freitag bestaetigen"
 
 
 def test_asana_ohne_token_liefert_none(monkeypatch):
