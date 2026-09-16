@@ -1071,6 +1071,24 @@ ASANA_TOKEN = os.getenv("ASANA_ACCESS_TOKEN", "")
 ASANA_BOARD_GID = os.getenv("LENA_MAIL_TRIAGE_ASANA_BOARD", "1216277431582688")
 ASANA_API = "https://app.asana.com/api/1.0"
 
+# HBE-3061: Eigene Section fuer Aufgaben aus Mails. Ohne Section sortiert Asana
+# neue Aufgaben in die ERSTE Section ein — bei Sven ist das "🔴 Heute". Die drei
+# bisher entstandenen Mail-Aufgaben landeten dadurch ausgerechnet im
+# dringendsten Bereich.
+ASANA_SECTION_NAME = os.getenv("LENA_MAIL_TRIAGE_ASANA_SECTION", "📬 Aus Mails")
+
+# Rueckfragen: wenn eine Konsequenz nicht vollstaendig ausgefuehrt werden kann,
+# fragt Lena nach — statt stillschweigend nichts zu tun. Eigenes Tageslimit,
+# damit die Rueckfragen nicht mit den Hoch-Prio-Alarmen um dasselbe Kontingent
+# konkurrieren.
+RUECKFRAGEN_AKTIV = os.getenv("LENA_MAIL_TRIAGE_RUECKFRAGEN", "1").strip() == "1"
+RUECKFRAGEN_TAGESLIMIT = int(os.getenv("LENA_MAIL_TRIAGE_RUECKFRAGEN_LIMIT", "12"))
+
+# Nach dem Anlegen einer Aufgabe ist die Mail erledigt — die Aufgabe traegt
+# Betreff, Absender und Inhalt. Sie wird deshalb archiviert, damit der
+# Posteingang nicht mit erledigten Vorgaengen volllaeuft.
+TUN_MAIL_ARCHIVIEREN = os.getenv("LENA_MAIL_TRIAGE_TUN_ARCHIVIEREN", "1").strip() == "1"
+
 # Svens Schreibstil — Grundlage jedes Entwurfs.
 SCHREIBSTIL_DATEI = os.getenv(
     "LENA_MAIL_TRIAGE_SCHREIBSTIL",
@@ -1637,8 +1655,103 @@ def _asana_offene_titel(max_alter_sek: int = 600) -> set:
     return titel
 
 
+_asana_section_cache: Dict[str, Any] = {"gid": None, "geprueft": False}
+
+
+def _asana_section_gid() -> Optional[str]:
+    """Liefert die Section fuer Mail-Aufgaben, legt sie bei Bedarf an."""
+    if _asana_section_cache["geprueft"]:
+        return _asana_section_cache["gid"]
+    _asana_section_cache["geprueft"] = True
+    if not ASANA_TOKEN or not ASANA_SECTION_NAME:
+        return None
+    kopf = {"Authorization": f"Bearer {ASANA_TOKEN}", "Content-Type": "application/json"}
+    try:
+        resp = requests.get(f"{ASANA_API}/projects/{ASANA_BOARD_GID}/sections",
+                            headers=kopf, params={"opt_fields": "name"}, timeout=30)
+        if resp.status_code == 200:
+            for s in resp.json().get("data", []):
+                if (s.get("name") or "").strip() == ASANA_SECTION_NAME:
+                    _asana_section_cache["gid"] = s.get("gid")
+                    return s.get("gid")
+        # Nicht vorhanden -> anlegen
+        resp = requests.post(f"{ASANA_API}/projects/{ASANA_BOARD_GID}/sections",
+                             headers=kopf, json={"data": {"name": ASANA_SECTION_NAME}},
+                             timeout=30)
+        if resp.status_code in (200, 201):
+            gid = resp.json().get("data", {}).get("gid")
+            _asana_section_cache["gid"] = gid
+            logger.info("Asana-Section '%s' angelegt (%s)", ASANA_SECTION_NAME, gid)
+            return gid
+        logger.warning("Asana-Section nicht anlegbar: HTTP %d", resp.status_code)
+    except Exception as exc:
+        logger.warning("Asana-Section nicht ermittelbar: %s", exc)
+    return None
+
+
+def _kuerzen(text: str, maximal: int) -> str:
+    """
+    Kuerzt an der Wortgrenze statt mitten im Wort.
+
+    HBE-3061: Ein Aufgabentitel endete mit "Anforderungen (Snapshot-Modell, Histo"
+    — eine harte Kuerzung mitten im Wort sieht nach Fehler aus.
+    """
+    t = (text or "").strip()
+    if len(t) <= maximal:
+        return t
+    schnitt = t[:maximal].rsplit(" ", 1)[0].rstrip(" ,;:-(")
+    return (schnitt or t[:maximal]) + "…"
+
+
+AUFGABE_SYSTEM = """Du bist Lena, die Assistentin von Sven Herbert.
+
+Aus einer E-Mail soll eine Aufgabe fuer Sven werden.
+
+TITEL: Formuliere, WAS Sven tun muss — als Handlung, nicht als Betreffzeile.
+Schlecht: "Lageplan". Gut: "Lageplan Musterstrasse pruefen und zurueckmelden".
+HOECHSTENS 70 Zeichen, keine Anrede, kein "Bitte", keine Klammern mit
+Aufzaehlungen. Details gehoeren in den Kontext, nicht in den Titel.
+
+FRIST: NUR wenn die Mail ausdruecklich ein Datum oder eine Frist nennt
+("bis 04.09.", "bis Ende der Woche", "innerhalb von 14 Tagen"). Rechne relative
+Angaben auf ein Datum um, ausgehend vom Empfangsdatum. Nennt die Mail KEINE
+Frist, gib null zurueck. Erfinde niemals ein Datum.
+
+KONTEXT: Ein bis zwei Saetze, worum es geht.
+
+Antworte AUSSCHLIESSLICH mit JSON:
+{"titel": "...", "frist": "YYYY-MM-DD oder null", "kontext": "..."}"""
+
+
+def _llm_aufgabe(betreff: str, sender_name: str, sender_email: str,
+                 inhalt: str, empfangen: str) -> Tuple[str, Optional[str], str]:
+    """Macht aus einer Mail eine Aufgabe. Returns (titel, frist, kontext)."""
+    client = _get_llm_client()
+    if client is None:
+        return betreff[:90], None, ""
+    try:
+        prompt = (f"Empfangen am: {empfangen[:10]}\n"
+                  f"Von: {sender_name} <{sender_email}>\n"
+                  f"Betreff: {betreff}\n\n{(inhalt or '')[:3000]}")
+        resp = client.messages.create(
+            model=LLM_MODEL, max_tokens=400, system=AUFGABE_SYSTEM,
+            messages=[{"role": "user", "content": prompt}], timeout=LLM_TIMEOUT_SEC)
+        d = _erstes_json_objekt(resp.content[0].text)
+        titel = _kuerzen(str(d.get("titel") or "").strip() or betreff, 90)
+        frist = d.get("frist")
+        frist = str(frist).strip() if frist and str(frist).lower() not in ("null", "none", "") else None
+        if frist and not re.match(r'^\d{4}-\d{2}-\d{2}$', frist):
+            frist = None
+        return titel, frist, str(d.get("kontext") or "").strip()[:400]
+    except Exception as exc:
+        logger.warning("Aufgaben-Formulierung fehlgeschlagen: %s", exc)
+        return betreff[:90], None, ""
+
+
 def _asana_aufgabe(betreff: str, sender_name: str, sender_email: str,
-                   body_preview: str, empfangen: str) -> Optional[str]:
+                   body_preview: str, empfangen: str,
+                   titel: Optional[str] = None, frist: Optional[str] = None,
+                   kontext: str = "") -> Optional[str]:
     """Legt eine Aufgabe im Board 'Meine Aufgaben SH' an — falls es sie nicht gibt."""
     if not ASANA_TOKEN:
         logger.warning("ASANA_ACCESS_TOKEN fehlt — keine Aufgabe angelegt.")
@@ -1650,30 +1763,144 @@ def _asana_aufgabe(betreff: str, sender_name: str, sender_email: str,
     if norm and norm in _asana_offene_titel():
         logger.info("Asana: Aufgabe '%s' existiert bereits — uebersprungen.", betreff[:60])
         return None
-    notes = (f"Aus einer E-Mail vom {empfangen[:10]}.\n\n"
+    name = (titel or betreff)[:120]
+    notes = ((f"{kontext}\n\n" if kontext else "")
+             + f"Aus einer E-Mail vom {empfangen[:10]}.\n\n"
              f"Von: {sender_name} <{sender_email}>\n"
              f"Betreff: {betreff}\n\n"
              f"{(body_preview or '')[:1200]}\n\n"
              f"— angelegt von Lena aus der Mail-Triage")
+    kopf = {"Authorization": f"Bearer {ASANA_TOKEN}", "Content-Type": "application/json"}
+    daten: Dict[str, Any] = {"name": name, "notes": notes, "projects": [ASANA_BOARD_GID]}
+    # HBE-3061: Faelligkeit NUR wenn die Mail eine nennt. Ein erfundenes Datum
+    # sieht aus wie Information und wird zu Rauschen — das Board zeigt zehn
+    # ueberfaellige Aufgaben mit Daten aus Januar bis August.
+    if frist:
+        daten["due_on"] = frist
     try:
-        resp = requests.post(
-            f"{ASANA_API}/tasks",
-            headers={"Authorization": f"Bearer {ASANA_TOKEN}",
-                     "Content-Type": "application/json"},
-            json={"data": {"name": betreff[:120], "notes": notes,
-                           "projects": [ASANA_BOARD_GID]}},
-            timeout=30,
-        )
+        resp = requests.post(f"{ASANA_API}/tasks", headers=kopf,
+                             json={"data": daten}, timeout=30)
         if resp.status_code not in (200, 201):
             logger.warning("Asana HTTP %d: %s", resp.status_code, resp.text[:200])
             return None
         gid = resp.json().get("data", {}).get("gid")
         if gid and norm:
             _asana_cache["titel"].add(norm)  # sofort merken, gegen Dubletten im selben Lauf
+
+        # In die eigene Section verschieben, sonst landet die Aufgabe in "Heute".
+        sec = _asana_section_gid()
+        if gid and sec:
+            try:
+                r2 = requests.post(f"{ASANA_API}/sections/{sec}/addTask", headers=kopf,
+                                   json={"data": {"task": gid}}, timeout=30)
+                if r2.status_code not in (200, 201):
+                    logger.warning("Asana-Section-Zuordnung HTTP %d", r2.status_code)
+            except Exception as exc:
+                logger.warning("Asana-Section-Zuordnung fehlgeschlagen: %s", exc)
         return gid
     except Exception as exc:
         logger.warning("Asana-Aufgabe fehlgeschlagen: %s", exc)
         return None
+
+
+def _mail_archivieren(message_id: str) -> bool:
+    """Verschiebt eine Mail ins Archiv."""
+    try:
+        resp = requests.post(f"{API_URL.rstrip('/')}/api/lena/mail/move",
+                             headers=_api_headers(), timeout=30,
+                             json={"message_id": message_id, "target_folder": "Archive"})
+        if resp.status_code != 200:
+            logger.warning("mail/move HTTP %d: %s", resp.status_code, resp.text[:150])
+            return False
+        return True
+    except Exception as exc:
+        logger.warning("Mail archivieren fehlgeschlagen: %s", exc)
+        return False
+
+
+def _rueckfrage(text: str, state: Dict[str, Any]) -> bool:
+    """
+    Stellt Sven eine Rueckfrage per Telegram.
+
+    Eigenes Tageslimit, damit Rueckfragen nicht mit den Hoch-Prio-Alarmen um
+    dasselbe Kontingent konkurrieren.
+    """
+    if not RUECKFRAGEN_AKTIV:
+        return False
+    heute = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    zaehler = state.setdefault("rueckfragen", {})
+    if zaehler.get("tag") != heute:
+        zaehler.clear()
+        zaehler["tag"] = heute
+        zaehler["anzahl"] = 0
+    if zaehler.get("anzahl", 0) >= RUECKFRAGEN_TAGESLIMIT:
+        logger.info("Rueckfrage unterdrueckt — Tageslimit %d erreicht.", RUECKFRAGEN_TAGESLIMIT)
+        return False
+    if not TG_ADMIN_CHAT:
+        logger.warning("TELEGRAM_ADMIN_CHAT_ID fehlt — Rueckfrage nicht moeglich.")
+        return False
+    try:
+        # WICHTIG: ueber mein-assistent senden, nicht direkt an die Telegram-API.
+        # Nur so landet die Nachricht in outbound_messages — und nur dann sieht
+        # Lena Svens Antwort mitsamt dem zitierten Original. Ohne das Tracking
+        # laeuft jede Rueckfrage ins Leere.
+        resp = requests.post(f"{API_URL.rstrip('/')}/api/lena/telegram/send",
+                             headers=_api_headers(), timeout=30,
+                             json={"chat_id": TG_ADMIN_CHAT, "text": text,
+                                   "parse_mode": "Markdown"})
+        if resp.status_code != 200:
+            logger.warning("Rueckfrage HTTP %d: %s", resp.status_code, resp.text[:150])
+            return False
+        zaehler["anzahl"] = zaehler.get("anzahl", 0) + 1
+        return True
+    except Exception as exc:
+        logger.warning("Rueckfrage fehlgeschlagen: %s", exc)
+        return False
+
+
+WEITERLEITUNG_SYSTEM = """Du formulierst fuer Sven Herbert einen einzigen Satz,
+der erklaert, warum er eine E-Mail an einen seiner Direktberichte weitergibt.
+
+Regeln:
+- EIN Satz, hoechstens 20 Woerter.
+- Sven duzt seine Direktberichte.
+- Sachlich, ohne Floskeln, ohne "bitte um Erledigung".
+- Nenne den Kern der Sache, nicht die Betreffzeile.
+- Schreibe AN den Empfaenger, nicht ueber Sven. Also nicht "Ich soll die
+  Rechnungen hochladen", sondern "hier geht es um die Rechnungen im JobRouter".
+
+Beispiele:
+  "das ist eine Zahlungserinnerung von Coglas, schau bitte mal drauf."
+  "hier fragt jemand nach einer Entwicklungspartnerschaft fuer einen Bauroboter."
+
+Antworte NUR mit dem Satz, ohne Anrede, ohne Gruss, ohne Anfuehrungszeichen."""
+
+
+def _weiterleitungstext(vorname: str, betreff: str, absender: str,
+                        vorschau: str) -> str:
+    """
+    Baut den Text des Weiterleitungs-Entwurfs.
+
+    HBE-3061: Vorher stand hier ein fester Platzhalter ohne Anrede, ohne Kontext
+    und ohne Umlaute ("Hallo, kannst du das bitte uebernehmen? Viele Gruesse").
+    In einer Mail an einen Direktbericht sah das nach Maschine aus.
+    """
+    anrede = f"Hallo {vorname}," if vorname else "Hallo,"
+    satz = ""
+    client = _get_llm_client()
+    if client is not None:
+        try:
+            resp = client.messages.create(
+                model=LLM_MODEL, max_tokens=120, system=WEITERLEITUNG_SYSTEM,
+                messages=[{"role": "user", "content":
+                           f"Von: {absender}\nBetreff: {betreff}\n\n{(vorschau or '')[:800]}"}],
+                timeout=LLM_TIMEOUT_SEC)
+            satz = resp.content[0].text.strip().strip('"').split("\n")[0][:200]
+        except Exception as exc:
+            logger.warning("Weiterleitungstext nicht formulierbar: %s", exc)
+    if not satz:
+        satz = f"kannst du das bitte übernehmen? Es geht um „{betreff[:70]}“."
+    return f"{anrede}\n\n{satz}\n\nViele Grüße\nSven"
 
 
 MAX_VORGANGS_MERKER = 400
@@ -1730,22 +1957,47 @@ def konsequenz_ausfuehren(mail: Dict[str, Any], schritt: int,
 
     try:
         if schritt == 4:
+            inhalt = _volltext(mid, vorschau)
+            titel, frist, kontext = _llm_aufgabe(betreff, s_name, s_mail, inhalt,
+                                                 mail.get("received_at", "") or "")
             gid = _asana_aufgabe(betreff, s_name, s_mail, vorschau,
-                                 mail.get("received_at", "") or "")
+                                 mail.get("received_at", "") or "",
+                                 titel=titel, frist=frist, kontext=kontext)
             ergebnis.update(art="asana" if gid else None, id=gid)
             if not gid:
                 ergebnis["hinweis"] = "Aufgabe existiert bereits oder Asana nicht erreichbar"
-            elif state is not None:
+                return ergebnis
+            if state is not None:
                 vorgang_merken(state, conv, ergebnis)
+            # HBE-3061: Die Aufgabe traegt Betreff, Absender und Inhalt — die Mail
+            # hat ihren Zweck erfuellt und muss den Posteingang nicht blockieren.
+            archiviert = _mail_archivieren(mid) if TUN_MAIL_ARCHIVIEREN else False
+            ergebnis["hinweis"] = "Mail archiviert" if archiviert else "Mail bleibt liegen"
+            if state is not None:
+                _rueckfrage(
+                    f"📋 *Aufgabe angelegt*\n\n{titel}\n"
+                    + (f"_Fällig: {frist}_\n" if frist else "")
+                    + ("_Mail abgelegt._" if archiviert else "_Mail bleibt im Posteingang._")
+                    + f"\n\nhttps://app.asana.com/0/{ASANA_BOARD_GID}/{gid}",
+                    state)
             return ergebnis
 
         if schritt == 3:
             adr = empfaenger_zu_adresse(empfaenger)
             if not adr:
                 ergebnis["hinweis"] = f"Empfaenger '{empfaenger}' nicht aufloesbar"
+                if state is not None:
+                    _rueckfrage(
+                        f"↪️ *An wen weiterleiten?*\n\n"
+                        f"_{s_name or s_mail}_\n*{betreff[:80]}*\n\n"
+                        + (f"Vorschlag war „{empfaenger}“, konnte ich aber nicht zuordnen.\n\n"
+                           if empfaenger else "Ich konnte niemanden zuordnen.\n\n")
+                        + "Antwort: Name — oder andere Kategorie nennen "
+                          "(ablegen / erledigen / terminieren)",
+                        state)
                 return ergebnis
-            text = (f"Hallo,\n\nkannst du das bitte uebernehmen?\n\n"
-                    f"Viele Gruesse\nSven")
+            vorname = (empfaenger or "").split()[0] if empfaenger else ""
+            text = _weiterleitungstext(vorname, betreff, s_name, vorschau)
             did = _entwurf_anlegen(mid, f"WG: {betreff}", text, modus="forward",
                                    to=[{"name": empfaenger or "", "email": adr}])
             ergebnis.update(art="weiterleitung" if did else None, id=did,
@@ -1761,6 +2013,13 @@ def konsequenz_ausfuehren(mail: Dict[str, Any], schritt: int,
         # Leerer oder nur aus Leerzeichen bestehender Text ist kein Entwurf.
         if stufe == "nein" or not text:
             ergebnis["hinweis"] = frage or "kein Entwurf moeglich"
+            # HBE-3061: Nicht schweigen. Die Begruendung des Modells ist bereits
+            # eine brauchbare Frage mit Optionen — die gehoert zu Sven, nicht ins Log.
+            if state is not None and frage:
+                _rueckfrage(
+                    f"✏️ *Wie soll ich antworten?*\n\n"
+                    f"_{s_name or s_mail}_\n*{betreff[:80]}*\n\n{frage[:600]}",
+                    state)
             return ergebnis
         if stufe == "geruest":
             text += ("\n\n---\nHinweis von Lena: Die mit [[...]] markierten Stellen "
@@ -1874,7 +2133,11 @@ def regel_vorschlagen(state: Dict[str, Any], absender: str, betreff: str,
     treffer = _regel_treffer_schaetzen(art, wert)
     beschreibung = (f"Absender `{wert}`" if art == "absender"
                     else f"Betreff enthält „{wert}“")
-    _tg_alert(
+    # HBE-3061: ueber _rueckfrage und damit ueber mein-assistent senden. Vorher
+    # ging der Vorschlag direkt an die Telegram-API — dadurch fehlte das
+    # outbound_messages-Tracking, und Svens "ja" erreichte Lena ohne den
+    # zitierten Vorschlag. Sie haette gar nicht gewusst, worauf er antwortet.
+    _rueckfrage(
         f"📌 *Regel vorschlagen?*\n\n"
         f"Du hast das jetzt {muster.get('count', LEARN_THRESHOLD)}× auf "
         f"*{aktion}* gesetzt.\n\n"
@@ -1905,6 +2168,77 @@ def _regel_treffer_schaetzen(art: str, wert: str) -> int:
             conn.close()
     except Exception:
         return 0
+
+
+def regeln_rueckwirkend(state: Dict[str, Any]) -> Dict[str, int]:
+    """
+    Wendet neu hinzugekommene Regeln auf Mails an, die schon im Posteingang liegen.
+
+    HBE-3061: Eine Regel wirkte bisher nur auf neue Mails. Am 16.09. lagen ein
+    Anthropic-Beleg und vier DMARC-Berichte im Posteingang, auf die die frisch
+    angelegten Regeln gepasst haetten — sie waren aber schon kategorisiert und
+    wurden nie wieder angefasst. Wer eine Regel anlegt, erwartet zu Recht, dass
+    sie auch aufraeumt, was bereits dasteht.
+
+    Laeuft nur, wenn sich die Regeldatei geaendert hat.
+    """
+    z = {"geprueft": 0, "angewendet": 0}
+    try:
+        p = Path(LAUFZEIT_REGELN)
+        stand = p.stat().st_mtime if p.exists() else 0.0
+    except Exception:
+        stand = 0.0
+    # Config-Regeln aendern sich nur beim Deploy — der Poller-Neustart deckt das ab.
+    letzter = state.get("regeln_stand")
+    if letzter is not None and abs(stand - float(letzter)) < 0.001:
+        return z
+    state["regeln_stand"] = stand
+    if letzter is None:
+        return z          # erster Lauf: nur merken, nicht rueckwirkend anwenden
+
+    _get_regeln(neu_laden=True)
+    try:
+        resp = requests.get(f"{API_URL.rstrip('/')}/api/lena/mail/inbox",
+                            headers={"X-API-Key": API_KEY},
+                            params={"limit": 100, "unread_only": "false"}, timeout=60)
+        if resp.status_code != 200:
+            return z
+        msgs = resp.json().get("messages", [])
+    except Exception as exc:
+        logger.warning("Rueckwirkende Regelpruefung fehlgeschlagen: %s", exc)
+        return z
+
+    for m in msgs:
+        z["geprueft"] += 1
+        regel = match_regel(m.get("from_email", "") or "", m.get("subject", "") or "")
+        if not regel:
+            continue
+        mid = m.get("message_id") or ""
+        aktion = regel["aktion"]
+        vorher = _lena_kategorie(m.get("categories") or [])
+        if vorher == AKTION_ZU_KATEGORIE.get(aktion):
+            continue          # steht schon richtig
+        schritt = 1 if aktion == "ablegen" else AKTION_ZU_SCHRITT.get(aktion, 2)
+        if not _categorize_mail(mid, aktion, skip_archive=(aktion != "ablegen")):
+            continue
+        z["angewendet"] += 1
+        logger.info(json.dumps({
+            "event": "regel_rueckwirkend", "message_id": mid,
+            "subject": (m.get("subject") or "")[:100], "regel": regel["name"],
+            "vorher": vorher, "nachher": aktion,
+        }, ensure_ascii=False))
+        state.setdefault("triage_results", {})[mid] = {"action": aktion, "priority": "niedrig"}
+        if schritt in (3, 4, 5):
+            mail = {"message_id": mid, "subject": m.get("subject", "") or "",
+                    "sender_name": m.get("from_name", "") or "",
+                    "sender_email": m.get("from_email", "") or "",
+                    "body_preview": m.get("body_preview", "") or "",
+                    "received_at": m.get("received_at", "") or "",
+                    "conversation_id": ""}
+            konsequenz_ausfuehren(mail, schritt, regel.get("empfaenger"), state=state)
+    if z["angewendet"]:
+        logger.info("Rueckwirkend angewendet: %d Mails", z["angewendet"])
+    return z
 
 
 def korrekturen_verarbeiten(state: Dict[str, Any]) -> Dict[str, int]:
@@ -2185,6 +2519,8 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
         "korrekturen": 0,             # Kategorie von Sven geaendert
         "korrektur_konsequenzen": 0,  # daraufhin ausgeloeste Konsequenz
         "korrektur_gelernt": 0,       # als Lernsignal gespeichert
+        # HBE-3061
+        "regel_rueckwirkend": 0,      # neue Regel auf vorhandene Mails angewendet
     }
 
     # Save before the pass — used as `since` for override detection below
@@ -2343,6 +2679,9 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
     # und daraus lernen. Laeuft nach der Kategorisierung, damit die eigenen
     # Entscheidungen dieses Laufs bereits im State stehen.
     if not DRY_RUN:
+        # HBE-3061: Neue Regeln zuerst rueckwirkend anwenden, dann Korrekturen.
+        r = regeln_rueckwirkend(state)
+        counters["regel_rueckwirkend"] = r["angewendet"]
         k = korrekturen_verarbeiten(state)
         counters["korrekturen"] = k["korrekturen"]
         counters["korrektur_konsequenzen"] = k["konsequenzen"]
