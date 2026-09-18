@@ -318,7 +318,7 @@ class TestAssignmentStage:
         ok = db.confirm_assignment(
             result["id"],
             event_id="AAMkAD...",
-            teilnehmer=["Sven Herbert", "Thomas Winzer"],
+            eingeladene=["Sven Herbert", "Thomas Winzer"],
             asana_board_gid="123",
             asana_section_gid="456",
             ablageort="03 Bereiche/Interne Gremien/Protokolle",
@@ -329,35 +329,64 @@ class TestAssignmentStage:
 
         stored = db.get_by_id(result["id"])
         assert stored["status"] == "assigned"
-        assert stored["teilnehmer"] == ["Sven Herbert", "Thomas Winzer"]
+        assert stored["eingeladene"] == ["Sven Herbert", "Thomas Winzer"]
         assert stored["event_id"] == "AAMkAD..."
         assert stored["asana_board_gid"] == "123"
         assert stored["assigned_at"]
         # Termindaten schlagen den ungenauen Plaud-Titel
         assert stored["meeting_name"] == "BL-Besprechung HRN"
 
+    def test_confirm_assignment_leaves_teilnehmer_empty(self, db):
+        """
+        Teilnehmer sind bei der Freigabe noch unbekannt — sie ergeben sich erst
+        aus der Sprecherzuordnung, die Sven gerade erst korrigiert hat.
+        """
+        result = db.create_assignment(
+            meeting_name="M", meeting_datetime="2026-09-18T10:00:00+02:00", source="plaud-poller"
+        )
+        db.confirm_assignment(
+            result["id"], event_id="ev", eingeladene=["Sven Herbert", "Nie Erschienen"]
+        )
+        stored = db.get_by_id(result["id"])
+        assert stored["teilnehmer"] == []
+        assert stored["eingeladene"] == ["Sven Herbert", "Nie Erschienen"]
+
     def test_confirm_assignment_keeps_plaud_title_when_no_override(self, db):
         result = db.create_assignment(
             meeting_name="Plaud-Titel", meeting_datetime="2026-09-18T09:59:21+02:00",
             source="plaud-poller",
         )
-        db.confirm_assignment(result["id"], event_id=None, teilnehmer=[])
+        db.confirm_assignment(result["id"], event_id=None)
         assert db.get_by_id(result["id"])["meeting_name"] == "Plaud-Titel"
 
     def test_attach_draft_markdown_moves_to_draft(self, db):
-        """Mara liefert den Text nach — ab hier greift der bestehende Editor."""
+        """Mara liefert Text und die ermittelten Teilnehmer nach."""
         result = db.create_assignment(
             meeting_name="M", meeting_datetime="2026-09-18T10:00:00+02:00", source="plaud-poller"
         )
-        db.confirm_assignment(result["id"], event_id="ev", teilnehmer=["Sven Herbert"])
-        assert db.attach_draft_markdown(result["id"], "# Protokoll\n## TOP 1") is True
+        db.confirm_assignment(
+            result["id"], event_id="ev", eingeladene=["Sven Herbert", "Nie Erschienen"]
+        )
+        assert db.attach_draft_markdown(
+            result["id"], "# Protokoll\n## TOP 1", teilnehmer=["Sven Herbert", "Lev Keimes"]
+        ) is True
 
         stored = db.get_by_id(result["id"])
         assert stored["status"] == "draft"
         assert stored["current_markdown"] == "# Protokoll\n## TOP 1"
         assert stored["draft_markdown"] == stored["current_markdown"]
-        # Die bestätigte Zuordnung überlebt
-        assert stored["teilnehmer"] == ["Sven Herbert"]
+        # Aus der Sprecherzuordnung — nicht die Einladungsliste
+        assert stored["teilnehmer"] == ["Sven Herbert", "Lev Keimes"]
+        assert stored["eingeladene"] == ["Sven Herbert", "Nie Erschienen"]
+
+    def test_attach_draft_markdown_without_teilnehmer_keeps_existing(self, db):
+        result = db.create_assignment(
+            meeting_name="M", meeting_datetime="2026-09-18T10:00:00+02:00", source="plaud-poller"
+        )
+        db.confirm_assignment(result["id"], event_id="ev")
+        db.attach_draft_markdown(result["id"], "# A", teilnehmer=["Sven Herbert"])
+        db.attach_draft_markdown(result["id"], "# B")
+        assert db.get_by_id(result["id"])["teilnehmer"] == ["Sven Herbert"]
 
     def test_get_by_recording_id_finds_latest(self, db):
         db.create_assignment(
@@ -380,7 +409,7 @@ class TestAssignmentStage:
         b = db.create_assignment(
             meeting_name="erledigt", meeting_datetime="2026-09-18T11:00:00+02:00", source="plaud-poller"
         )
-        db.confirm_assignment(b["id"], event_id="ev", teilnehmer=[])
+        db.confirm_assignment(b["id"], event_id="ev")
 
         pending = db.list_pending_assignments()
         assert [p["id"] for p in pending] == [a["id"]]
@@ -572,7 +601,7 @@ class TestAssignmentEndpoints:
             f"/api/protocols/{created['draft_id']}/assign?token={token}",
             json={
                 "event_id": "AAMkAD...",
-                "teilnehmer": ["Sven Herbert", "Thomas Winzer"],
+                "eingeladene": ["Sven Herbert", "Thomas Winzer"],
                 "asana_board_gid": "111",
                 "asana_section_gid": "s1",
                 "create_asana_task": True,
@@ -582,8 +611,9 @@ class TestAssignmentEndpoints:
         assert resp.status_code == 202, resp.text
         assert resp.json()["mara_issue"] == "HBE-9999"
         assert len(mara_issues) == 1
-        # Mara bekommt die bestätigte Liste mit
-        assert mara_issues[0]["teilnehmer"] == ["Sven Herbert", "Thomas Winzer"]
+        # Mara bekommt die Einladungsliste als Gegenprobe — nicht als Teilnehmer
+        assert mara_issues[0]["eingeladene"] == ["Sven Herbert", "Thomas Winzer"]
+        assert mara_issues[0]["teilnehmer"] == []
 
         stored = api_env["db"].get_by_id(created["draft_id"])
         assert stored["status"] == "assigned"
@@ -594,7 +624,7 @@ class TestAssignmentEndpoints:
         token = _token_of(api_env, created["draft_id"])
         body = {
             "event_id": "ev",
-            "teilnehmer": ["Sven Herbert"],
+            "eingeladene": ["Sven Herbert"],
             "create_asana_task": False,
         }
         url = f"/api/protocols/{created['draft_id']}/assign?token={token}"
@@ -610,7 +640,7 @@ class TestAssignmentEndpoints:
         token = _token_of(api_env, created["draft_id"])
         resp = api_env["client"].post(
             f"/api/protocols/{created['draft_id']}/assign?token={token}",
-            json={"event_id": "ev", "teilnehmer": [], "create_asana_task": True},
+            json={"event_id": "ev", "create_asana_task": True},
         )
         assert resp.status_code == 422
         assert mara_issues == []
@@ -620,7 +650,7 @@ class TestAssignmentEndpoints:
         token = _token_of(api_env, created["draft_id"])
         resp = api_env["client"].post(
             f"/api/protocols/{created['draft_id']}/assign?token={token}",
-            json={"event_id": "ev", "teilnehmer": ["Sven Herbert"], "create_asana_task": False},
+            json={"event_id": "ev", "create_asana_task": False},
         )
         assert resp.status_code == 202
 
@@ -628,7 +658,7 @@ class TestAssignmentEndpoints:
         created = _create_assignment(api_env)
         resp = api_env["client"].post(
             f"/api/protocols/{created['draft_id']}/assign?token=falsch",
-            json={"event_id": "ev", "teilnehmer": [], "create_asana_task": False},
+            json={"event_id": "ev", "create_asana_task": False},
         )
         assert resp.status_code == 401
         assert mara_issues == []
@@ -641,7 +671,7 @@ class TestAssignmentEndpoints:
 
         resp = api_env["client"].post(
             f"/api/protocols/{mine['draft_id']}/assign?token={foreign_token}",
-            json={"event_id": "ev", "teilnehmer": [], "create_asana_task": False},
+            json={"event_id": "ev", "create_asana_task": False},
         )
         assert resp.status_code == 403
         assert mara_issues == []
@@ -653,20 +683,28 @@ class TestAssignmentEndpoints:
         token = _token_of(api_env, draft["draft_id"])
         resp = api_env["client"].post(
             f"/api/protocols/{draft['draft_id']}/assign?token={token}",
-            json={"event_id": "ev", "teilnehmer": [], "create_asana_task": False},
+            json={"event_id": "ev", "create_asana_task": False},
         )
         assert resp.status_code == 409
 
     def test_draft_markdown_completes_stage_two(self, api_env, mara_issues):
+        """Mara liefert Text UND die aus der Sprecherzuordnung ermittelten Teilnehmer."""
         created = _create_assignment(api_env)
         token = _token_of(api_env, created["draft_id"])
         api_env["client"].post(
             f"/api/protocols/{created['draft_id']}/assign?token={token}",
-            json={"event_id": "ev", "teilnehmer": ["Sven Herbert"], "create_asana_task": False},
+            json={
+                "event_id": "ev",
+                "eingeladene": ["Sven Herbert", "Nie Erschienen"],
+                "create_asana_task": False,
+            },
         )
         resp = api_env["client"].patch(
             f"/api/protocols/{created['draft_id']}/draft-markdown",
-            json={"markdown": "# Protokoll\n## TOP 1\nInhalt"},
+            json={
+                "markdown": "# Protokoll\n## TOP 1\nInhalt",
+                "teilnehmer": ["Sven Herbert", "Lev Keimes"],
+            },
             headers=KEY_HEADER,
         )
         assert resp.status_code == 200, resp.text
@@ -675,7 +713,9 @@ class TestAssignmentEndpoints:
         stored = api_env["db"].get_by_id(created["draft_id"])
         assert stored["status"] == "draft"
         assert stored["current_markdown"].startswith("# Protokoll")
-        assert stored["teilnehmer"] == ["Sven Herbert"]
+        # Anwesend laut Sprecherzuordnung — nicht die Einladungsliste
+        assert stored["teilnehmer"] == ["Sven Herbert", "Lev Keimes"]
+        assert stored["eingeladene"] == ["Sven Herbert", "Nie Erschienen"]
 
     def test_draft_markdown_rejected_before_assignment(self, api_env):
         """Ohne bestätigte Zuordnung darf kein Text ankommen."""
@@ -982,3 +1022,4 @@ class TestCalendarDualAuth:
     def test_calendar_requires_auth(self, api_env):
         resp = api_env["client"].get("/api/calendar/events")
         assert resp.status_code == 401
+
