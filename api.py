@@ -65,7 +65,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
 
-from database.protocols_db import ProtocolsDB
+from database.protocols_db import ASSIGNMENT_STATUSES, ProtocolsDB
 
 load_dotenv()
 
@@ -301,6 +301,12 @@ _PC_COMPANY_ID = os.getenv("PAPERCLIP_COMPANY_ID_MA", "").strip()
 
 # MARA_SPEAKER_FALLBACK_DEFAULT: ask | continue | pause
 _MARA_SPEAKER_FALLBACK_DEFAULT = os.getenv("MARA_SPEAKER_FALLBACK_DEFAULT", "ask").strip()
+
+# Mara — Protokoll-Agentin. Bekommt in Stufe 2 den Auftrag, das Transkript zu
+# ziehen, nachdem Sven Termin, Board und Teilnehmer bestaetigt hat.
+_MARA_AGENT_ID = os.getenv(
+    "PAPERCLIP_PROTOKOLL_AGENT_ID", "ed26f194-f0a9-4f70-a52d-6e39be9013e3"
+).strip()
 
 # ---------------------------------------------------------------------------
 # Backward-compat module-level globals (derived from registry; used by speaker
@@ -1343,6 +1349,10 @@ PLAUD_STATE_DB = _PLAUD_DB_PATH
 _PROTOCOLS_DB_PATH = str(_BASE_DIR / "data" / "protocols.db")
 # protocols.status → tracking_status mapping (module-level constant, not per-request)
 _PROTO_STATUS_MAP: dict = {
+    # Stufe 1: wartet auf Svens Zuordnung, es gibt noch kein Protokoll zu lesen
+    "pending_assignment": "assignment_pending",
+    # Stufe 1 bestaetigt, Mara zieht das Transkript
+    "assigned":  "processing",
     "draft":     "review_ready",
     "in_review": "review_ready",
     "approved":  "review_ready",   # BackgroundTask kann scheitern; nur finalized = done
@@ -2922,6 +2932,66 @@ class ProtocolDraftResponse(BaseModel):
     expires_at: str
 
 
+class ProtocolAssignmentRequest(BaseModel):
+    """Stufe 1: der Poller meldet eine Aufnahme, bevor ein Transkript existiert."""
+
+    meeting_name: str = Field(..., description="Plaud-Aufnahmename als vorläufiger Titel")
+    meeting_datetime: str = Field(..., description="ISO-8601, Aufnahmezeitpunkt")
+    source: str = "plaud-poller"
+    recording_id: Optional[str] = None
+    recording_title: Optional[str] = Field(
+        None, description="Name der Aufnahme in Plaud — zum Wiederfinden in der App"
+    )
+    recording_duration: Optional[str] = None
+
+
+class ProtocolAssignmentResponse(BaseModel):
+    draft_id: str
+    assignment_url: str
+    expires_at: str
+    created: bool = Field(
+        True, description="False, wenn zu dieser recording_id bereits eine Zuordnung lief"
+    )
+
+
+class ProtocolAssignRequest(BaseModel):
+    """
+    Svens bestätigte Zuordnung — gibt die Aufnahme für Mara frei.
+
+    Teilnehmer werden hier NICHT erfasst. Sie ergeben sich erst aus der
+    Sprecherzuordnung, die Sven unmittelbar vor dieser Freigabe in Plaud
+    korrigiert hat — vorher sind sie schlicht noch nicht bekannt.
+    """
+
+    event_id: Optional[str] = Field(None, description="Outlook-Event-ID")
+    eingeladene: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Eingeladene laut Outlook-Termin. Gegenprobe für Mara, KEINE "
+            "Teilnehmerliste — eingeladen ist nicht anwesend."
+        ),
+    )
+    asana_board_gid: Optional[str] = None
+    asana_section_gid: Optional[str] = None
+    create_asana_task: bool = True
+    ablageort: Optional[str] = None
+    meeting_name: Optional[str] = Field(None, description="Übersteuert den Plaud-Titel")
+    meeting_datetime: Optional[str] = None
+
+
+class ProtocolDraftMarkdownRequest(BaseModel):
+    """Maras Lieferung aus Stufe 2: Protokolltext plus ermittelte Teilnehmer."""
+
+    markdown: str
+    teilnehmer: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Aus der korrigierten Sprecherzuordnung ermittelt. None lässt einen "
+            "vorhandenen Stand unangetastet."
+        ),
+    )
+
+
 class ProtocolPatchRequest(BaseModel):
     markdown: str
 
@@ -3171,6 +3241,218 @@ def create_protocol_draft(
     )
 
 
+@app.post(
+    "/api/protocols/assignment",
+    response_model=ProtocolAssignmentResponse,
+    status_code=201,
+)
+def create_protocol_assignment(
+    req: ProtocolAssignmentRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Stufe 1 des zweistufigen Workflows: der Poller meldet eine neue Aufnahme.
+
+    Hier wird noch kein Transkript geholt. Erst nach Svens Zuordnung (und der
+    Gelegenheit, die Sprecher in Plaud zu korrigieren) übernimmt Mara — vorher
+    war die Reihenfolge umgekehrt, wodurch jede Sprecherkorrektur zu spät kam.
+
+    Idempotent über recording_id: ein zweiter Aufruf für dieselbe Aufnahme gibt
+    die bestehende Zuordnung zurück, statt eine zweite anzulegen.
+    """
+    if req.recording_id:
+        existing = _protocols_db.get_by_recording_id(req.recording_id)
+        if existing:
+            logger.info(
+                "[protocols] Zuordnung zu recording_id=%s existiert bereits (%s, status=%s)",
+                req.recording_id, existing["id"], existing["status"],
+            )
+            return ProtocolAssignmentResponse(
+                draft_id=existing["id"],
+                assignment_url=f"{_PUBLIC_BASE_URL}/review/{existing['reviewer_token']}",
+                expires_at=existing["expires_at"],
+                created=False,
+            )
+
+    result = _protocols_db.create_assignment(
+        meeting_name=req.meeting_name,
+        meeting_datetime=req.meeting_datetime,
+        source=req.source,
+        recording_id=req.recording_id,
+        recording_title=req.recording_title or req.meeting_name,
+        recording_duration=req.recording_duration,
+    )
+    return ProtocolAssignmentResponse(
+        draft_id=result["id"],
+        assignment_url=f"{_PUBLIC_BASE_URL}/review/{result['reviewer_token']}",
+        expires_at=result["expires_at"],
+        created=True,
+    )
+
+
+def _create_mara_issue(protocol: Dict[str, Any]) -> Optional[str]:
+    """
+    Beauftragt Mara mit Stufe 2: Transkript ziehen und Protokoll verfassen.
+
+    Der entscheidende Unterschied zum bisherigen Ablauf: das Transkript wird
+    erst jetzt geholt, nachdem Sven die Sprecherzuordnung in Plaud korrigiert
+    hat. Die Sprecherzuordnung ist damit eine verlaessliche Quelle geworden —
+    vorher war sie es nicht, weil der Text schon gezogen war, bevor Sven sie
+    anfassen konnte.
+    """
+    if not _PC_API_KEY:
+        logger.warning("[protocols] PAPERCLIP_API_KEY_MA nicht gesetzt — kein Mara-Issue")
+        return None
+
+    eingeladene = protocol.get("eingeladene") or []
+    eingeladene_block = (
+        "\n".join(f"- {name}" for name in eingeladene)
+        if eingeladene
+        else "_Kein Termin zugeordnet — es gibt keine Gegenprobe._"
+    )
+    recording_id = protocol.get("recording_id") or "?"
+
+    description = (
+        f"Sven hat die Zuordnung bestätigt und **unmittelbar davor die Sprecher in "
+        f"Plaud korrigiert**. Das Transkript kann jetzt gezogen werden.\n\n"
+        f"**Draft-ID:** `{protocol['id']}`\n"
+        f"**Recording-ID:** `{recording_id}`\n"
+        f"**Aufnahme in Plaud:** {protocol.get('recording_title') or '—'}\n"
+        f"**Termin:** {protocol.get('meeting_name')} ({protocol.get('meeting_datetime')})\n"
+        f"**Outlook-Event:** `{protocol.get('event_id') or '—'}`\n"
+        f"**Asana-Board:** `{protocol.get('asana_board_gid') or '—'}` / "
+        f"Section `{protocol.get('asana_section_gid') or '—'}`\n\n"
+        f"### Teilnehmer ermitteln — verbindliche Reihenfolge\n\n"
+        f"1. **Die korrigierte Sprecherzuordnung im Transkript ist die Quelle.** "
+        f"Wer dort als sprechende Person gefuehrt wird, war anwesend. Sven hat sie "
+        f"gerade geprueft, also ist sie belastbar.\n"
+        f"2. **Die Eingeladenen unten sind nur die Gegenprobe**, keine Quelle. "
+        f"Eingeladen ist nicht anwesend.\n"
+        f"3. **Niemals** aus Termintitel oder Niederlassungs-Kuerzel ableiten. "
+        f"„BL HRN\" heisst nicht, dass Dragan dabei war.\n"
+        f"4. Wer im Transkript nur **erwaehnt** wird, ist kein Teilnehmer.\n"
+        f"5. Bleibt jemand unklar, vermerke das als offene Frage im Protokoll, "
+        f"statt zu raten.\n\n"
+        f"### Eingeladene laut Outlook (Gegenprobe)\n{eingeladene_block}\n\n"
+        f"### Ablauf\n"
+        f"1. Transkript und Zusammenfassung zur Recording-ID holen\n"
+        f"2. Teilnehmer nach obiger Reihenfolge ermitteln\n"
+        f"3. Protokoll verfassen\n"
+        f"4. Text und ermittelte Teilnehmer an "
+        f"`PATCH /api/protocols/{protocol['id']}/draft-markdown` uebergeben\n"
+        f"5. Sven den Reviewer-Link schicken"
+    )
+
+    try:
+        resp = _http.post(
+            f"{_PC_API_URL}/api/companies/{_PC_COMPANY_ID}/issues",
+            headers={"Authorization": f"Bearer {_PC_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "title": f"📄 Protokoll erstellen: {protocol.get('meeting_name')}",
+                "description": description,
+                "assigneeAgentId": _MARA_AGENT_ID,
+                "priority": "medium",
+            },
+            timeout=15,
+        )
+        if resp.status_code not in (200, 201):
+            logger.error(
+                "[protocols] Mara-Issue fehlgeschlagen: %s — %s",
+                resp.status_code, resp.text[:200],
+            )
+            return None
+        identifier = str(resp.json().get("identifier") or "?")
+        logger.info("[protocols] Mara beauftragt: %s (draft=%s)", identifier, protocol["id"])
+        return identifier
+    except Exception as exc:
+        logger.error("[protocols] Mara-Issue fehlgeschlagen: %s", exc)
+        return None
+
+
+@app.post("/api/protocols/{draft_id}/assign", status_code=202)
+def assign_protocol(
+    draft_id: str,
+    req: ProtocolAssignRequest,
+    token: Optional[str] = None,
+    _user: str = Depends(get_authenticated_user),
+):
+    """
+    Sven bestätigt die Zuordnung — das ist der Startschuss für Stufe 2.
+
+    Ab hier ist das Transkript eingefroren: was jetzt noch in Plaud geändert
+    wird, kommt zu spät. Deshalb steht der Hinweis zur Sprecherkorrektur im
+    Editor vor diesem Button, nicht danach.
+    """
+    protocol = _get_protocol_for_token(draft_id, token)
+
+    if protocol["status"] not in ("pending_assignment", "assigned"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Protokoll ist nicht mehr in der Zuordnungs-Stufe (status={protocol['status']})",
+        )
+    if req.create_asana_task and not (req.asana_board_gid and req.asana_section_gid):
+        raise HTTPException(
+            status_code=422,
+            detail="Asana-Board und -Abschnitt sind Pflicht, wenn eine Aufgabe angelegt werden soll",
+        )
+
+    already_assigned = protocol["status"] == "assigned"
+    _protocols_db.confirm_assignment(
+        draft_id,
+        event_id=req.event_id,
+        eingeladene=req.eingeladene,
+        asana_board_gid=req.asana_board_gid,
+        asana_section_gid=req.asana_section_gid,
+        create_asana_task=req.create_asana_task,
+        ablageort=req.ablageort,
+        meeting_name=req.meeting_name,
+        meeting_datetime=req.meeting_datetime,
+    )
+
+    # Ein zweiter Klick darf Mara nicht ein zweites Mal beauftragen.
+    issue = None if already_assigned else _create_mara_issue(_protocols_db.get_by_id(draft_id))
+
+    return {
+        "status": "assigned",
+        "draft_id": draft_id,
+        "mara_issue": issue,
+        "eingeladene": req.eingeladene,
+    }
+
+
+@app.patch("/api/protocols/{draft_id}/draft-markdown", status_code=200)
+def attach_protocol_markdown(
+    draft_id: str,
+    req: ProtocolDraftMarkdownRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Mara liefert Protokolltext und ermittelte Teilnehmer nach und hebt die
+    Zeile auf 'draft'.
+
+    Die Teilnehmer entstehen erst hier: sie stammen aus der Sprecherzuordnung,
+    die Sven vor der Freigabe in Plaud korrigiert hat. Ab diesem Punkt
+    übernimmt der bestehende Review-Editor unverändert.
+    """
+    protocol = _protocols_db.get_by_id(draft_id)
+    if not protocol:
+        raise HTTPException(status_code=404, detail="Protokoll nicht gefunden")
+    if protocol["status"] != "assigned":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Protokoll erwartet keinen Text (status={protocol['status']})",
+        )
+
+    _protocols_db.attach_draft_markdown(
+        draft_id, req.markdown, teilnehmer=req.teilnehmer
+    )
+    return {
+        "status": "draft",
+        "draft_id": draft_id,
+        "reviewer_url": f"{_PUBLIC_BASE_URL}/review/{protocol['reviewer_token']}",
+    }
+
+
 # WICHTIG: /finalized muss VOR /{draft_id} deklariert sein (Routing-Reihenfolge)
 @app.get("/api/protocols/finalized")
 def list_finalized_protocols(
@@ -3372,9 +3654,14 @@ def review_page(
             request, "review_error.html", {"reason": "expired"}, status_code=410
         )
 
+    # Nur ein fertiger Entwurf wandert beim Öffnen auf 'in_review'. Die
+    # Zuordnungs-Stufe behält ihren Status — sonst überschriebe der erste
+    # Seitenaufruf den Zustand, auf den der Nachfass-Lauf schaut.
     if protocol["status"] == "draft":
         _protocols_db.set_status(protocol["id"], "in_review")
         protocol["status"] = "in_review"
+
+    assignment_only = protocol["status"] in ASSIGNMENT_STATUSES
 
     meeting_dt_fmt = protocol["meeting_datetime"]
     try:
@@ -3402,6 +3689,12 @@ def review_page(
             "create_asana_task": protocol["create_asana_task"],
             "finalization_error": protocol["finalization_error"],
             "reviewer_name": x_authentik_username or "",
+            # Zuordnungs-Modus: kein Protokolltext, dafür Teilnehmer-Pflege und
+            # der Plaud-Aufnahmename zum Wiederfinden in der App.
+            "assignment_only": assignment_only,
+            "recording_title": protocol.get("recording_title") or "",
+            "recording_duration": protocol.get("recording_duration") or "",
+            "recording_id": protocol.get("recording_id") or "",
         },
     )
 
