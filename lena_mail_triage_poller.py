@@ -1059,6 +1059,19 @@ AKTIONEN_AKTIV = os.getenv("LENA_MAIL_TRIAGE_AKTIONEN", "0").strip() == "1"
 # und ohne ihn bleibt eine Korrektur in Outlook folgenlos.
 KORREKTUREN_AKTIV = os.getenv("LENA_MAIL_TRIAGE_KORREKTUREN", "1").strip() == "1"
 
+# HBE-3113: Eine Lena-Kategorie auf einer Mail, zu der KEINE eigene Entscheidung
+# vorliegt, ist eine Anweisung — keine Korrektur. Bisher wurde sie stillschweigend
+# uebergangen ("nichts zu vergleichen"), und Sven sah eine gesetzte Kategorie
+# ohne jede Wirkung. Drei Wege fuehren dorthin:
+#   * Sven kategorisiert schneller als der 10-Minuten-Takt
+#   * die Entscheidung ist aus dem 500er-Cache gefallen
+#   * die Mail wurde verschoben und hat dabei eine neue message_id bekommen
+#     (Graph POST /messages/{id}/move vergibt eine neue ID)
+ANWEISUNGEN_AKTIV = os.getenv("LENA_MAIL_TRIAGE_ANWEISUNGEN", "1").strip() == "1"
+# Altbestand nicht ruekwirkend abarbeiten: aeltere Mails werden einmal gemeldet,
+# aber nicht ausgefuehrt. Sonst loest der erste Lauf einen Schwall Aufgaben aus.
+ANWEISUNG_MAX_ALTER_TAGE = int(os.getenv("LENA_MAIL_TRIAGE_ANWEISUNG_MAX_TAGE", "7"))
+
 # Wiederholt sich eine Korrektur, schlaegt Lena eine feste Regel vor.
 REGELVORSCHLAG_AKTIV = os.getenv("LENA_MAIL_TRIAGE_REGELVORSCHLAG", "1").strip() == "1"
 
@@ -2244,13 +2257,98 @@ def regeln_rueckwirkend(state: Dict[str, Any]) -> Dict[str, int]:
     return z
 
 
+def _ist_zu_alt_fuer_anweisung(received_at: str) -> bool:
+    """Ohne verwertbares Datum lieber als alt behandeln — nicht ausfuehren."""
+    if not received_at:
+        return True
+    try:
+        empfangen = datetime.fromisoformat(received_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    alter = (datetime.now(timezone.utc) - empfangen).days
+    return alter > ANWEISUNG_MAX_ALTER_TAGE
+
+
+def _anweisung_ausfuehren(m: Dict[str, Any], mid: str, kategorie: str,
+                          state: Dict[str, Any], erledigt: Dict[str, str],
+                          eigene: Dict[str, Any], z: Dict[str, int]) -> None:
+    """
+    Fuehrt die Konsequenz einer von Sven gesetzten Kategorie aus (HBE-3118).
+
+    Anders als bei einer Korrektur gibt es hier nichts zu lernen: Es liegt keine
+    eigene Entscheidung vor, der die Kategorie widersprechen koennte. Ein
+    Override waere eine erfundene Gegenueberstellung.
+    """
+    if not ANWEISUNGEN_AKTIV:
+        return
+    aktion = KATEGORIE_ZU_AKTION[kategorie]
+    if erledigt.get(mid) == aktion:
+        return                       # schon ausgefuehrt
+
+    betreff = m.get("subject", "") or ""
+    absender = m.get("from_email", "") or ""
+    empfangen = m.get("received_at", "") or ""
+
+    if _ist_zu_alt_fuer_anweisung(empfangen):
+        # Einmal melden, dann Ruhe. Altbestand wird nicht rueckwirkend
+        # abgearbeitet — sonst legt der erste Lauf einen Schwall Aufgaben an.
+        gemeldet = state.setdefault("anweisungen_uebergangen", [])
+        if mid not in gemeldet:
+            gemeldet.append(mid)
+            if len(gemeldet) > MAX_KORREKTUR_MERKER:
+                del gemeldet[:len(gemeldet) - MAX_KORREKTUR_MERKER]
+            logger.info(json.dumps({
+                "event": "anweisung_uebergangen",
+                "grund": f"aelter_als_{ANWEISUNG_MAX_ALTER_TAGE}_tage",
+                "subject": betreff[:100], "sender": absender,
+                "kategorie": kategorie, "empfangen": empfangen[:10],
+            }, ensure_ascii=False))
+            z["anweisungen_uebergangen"] = z.get("anweisungen_uebergangen", 0) + 1
+        return
+
+    z["anweisungen"] = z.get("anweisungen", 0) + 1
+    logger.info(json.dumps({
+        "event": "anweisung_erkannt",
+        "message_id": mid, "subject": betreff[:100],
+        "sender": absender, "kategorie": kategorie, "aktion": aktion,
+    }, ensure_ascii=False))
+
+    schritt = AKTION_ZU_SCHRITT.get(aktion, 2)
+    mail = {
+        "message_id": mid,
+        "subject": betreff,
+        "sender_name": m.get("from_name", "") or "",
+        "sender_email": absender,
+        "body_preview": m.get("body_preview", "") or "",
+        "received_at": empfangen,
+        "conversation_id": "",       # die Anweisung gilt dieser einen Mail
+    }
+    empf = None
+    if schritt == 3:
+        try:
+            *_r, empf = triage_mail(betreff, absender, mail["body_preview"],
+                                    mail["sender_name"], received_at=empfangen)
+        except Exception as exc:
+            logger.warning("Empfaenger fuer Anweisung nicht bestimmbar: %s", exc)
+
+    erg = konsequenz_ausfuehren(mail, schritt, empf, state=state)
+    if erg.get("art"):
+        z["konsequenzen"] = z.get("konsequenzen", 0) + 1
+        logger.info("Anweisungs-Konsequenz: %s fuer '%s'", erg["art"], betreff[:60])
+
+    # Auch ohne Konsequenz vermerken — sonst laeuft der Fall in jedem Zyklus neu.
+    erledigt[mid] = aktion
+    eigene[mid] = {"action": aktion, "priority": "mittel"}
+
+
 def korrekturen_verarbeiten(state: Dict[str, Any]) -> Dict[str, int]:
     """
     Sucht Mails, deren Lena-Kategorie Sven geaendert hat, und reagiert darauf.
 
     Returns Zaehler-Dict.
     """
-    z = {"geprueft": 0, "korrekturen": 0, "konsequenzen": 0, "gelernt": 0}
+    z = {"geprueft": 0, "korrekturen": 0, "konsequenzen": 0, "gelernt": 0,
+         "anweisungen": 0, "anweisungen_uebergangen": 0}
     if not KORREKTUREN_AKTIV:
         return z
 
@@ -2275,10 +2373,14 @@ def korrekturen_verarbeiten(state: Dict[str, Any]) -> Dict[str, int]:
         if not mid:
             continue
         meine = (eigene.get(mid) or {}).get("action")
-        if not meine:
-            continue          # nie von uns kategorisiert — nichts zu vergleichen
         aktuell_kat = _lena_kategorie(m.get("categories") or [], meine)
         if not aktuell_kat:
+            continue
+        if not meine:
+            # HBE-3118: Keine eigene Entscheidung — also keine Korrektur, sondern
+            # eine Anweisung. Bisher endete der Fall hier mit "continue", und die
+            # gesetzte Kategorie blieb folgenlos.
+            _anweisung_ausfuehren(m, mid, aktuell_kat, state, erledigt, eigene, z)
             continue
         z["geprueft"] += 1
 
@@ -2522,6 +2624,9 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
         "korrekturen": 0,             # Kategorie von Sven geaendert
         "korrektur_konsequenzen": 0,  # daraufhin ausgeloeste Konsequenz
         "korrektur_gelernt": 0,       # als Lernsignal gespeichert
+        # HBE-3118 — von Sven gesetzte Kategorien ohne eigene Vorentscheidung
+        "anweisungen": 0,             # ausgefuehrt
+        "anweisungen_uebergangen": 0, # zu alt, nur gemeldet
         # HBE-3061
         "regel_rueckwirkend": 0,      # neue Regel auf vorhandene Mails angewendet
     }
@@ -2689,6 +2794,8 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
         counters["korrekturen"] = k["korrekturen"]
         counters["korrektur_konsequenzen"] = k["konsequenzen"]
         counters["korrektur_gelernt"] = k["gelernt"]
+        counters["anweisungen"] = k.get("anweisungen", 0)
+        counters["anweisungen_uebergangen"] = k.get("anweisungen_uebergangen", 0)
 
     state["processed_message_ids"] = new_processed
     last_triage_at = state.get("last_triage_at", "")
