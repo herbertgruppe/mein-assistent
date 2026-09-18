@@ -519,6 +519,125 @@ class TestParseMismatchWatchdog:
         assert len(spy.sent) == 2
 
 
+class TestTwoStageFlow:
+    """Stufe 1 meldet nur — das Transkript bleibt bis zu Svens Bestätigung unberührt."""
+
+    def _setup(self, monkeypatch, two_stage=True):
+        monkeypatch.setattr(plaud_poller, "TWO_STAGE", two_stage)
+        monkeypatch.setattr(plaud_poller, "MA_API_KEY", "test-key")
+        monkeypatch.setattr(plaud_poller, "_auto_refresh_token", lambda *a, **k: None)
+        cli_calls = []
+
+        def fake_run(args, home, **k):
+            cli_calls.append(args[0])
+            if args[0] == "recent":
+                return (
+                    "Recordings in the last 7 days: 1\n"
+                    f"  of_{'a' * 32}  Titel  2026-09-18  47m04s\n"
+                )
+            return "name: 09-18 Abstimmung: TGA\nduration: 47m04s\nstart_at: 2026-09-18T09:59:21"
+
+        monkeypatch.setattr(plaud_poller, "_run_plaud", fake_run)
+        return cli_calls
+
+    def test_stage_one_does_not_fetch_transcript(self, monkeypatch):
+        """Der Kern des Umbaus: kein `plaud summary` vor der Zuordnung."""
+        cli_calls = self._setup(monkeypatch)
+        monkeypatch.setattr(
+            plaud_poller, "_create_assignment", lambda *a, **k: "assignment:abc"
+        )
+        conn = _init_db(":memory:")
+        new_ids, created, skipped, errors = plaud_poller._poll_account("/opt/x", "agent", conn)
+
+        assert "summary" not in cli_calls
+        assert created == ["assignment:abc"]
+        assert errors == []
+
+    def test_legacy_mode_still_fetches_summary(self, monkeypatch):
+        """Mit TWO_STAGE=false bleibt der alte Weg unverändert."""
+        cli_calls = self._setup(monkeypatch, two_stage=False)
+        monkeypatch.setattr(plaud_poller, "_create_pc_issue", lambda payload: "HBE-1")
+        conn = _init_db(":memory:")
+        plaud_poller._poll_account("/opt/x", "agent", conn)
+        assert "summary" in cli_calls
+
+    def test_recording_marked_processed_after_assignment(self, monkeypatch):
+        """Ohne Vermerk würde die Aufnahme alle zehn Minuten erneut gemeldet."""
+        self._setup(monkeypatch)
+        monkeypatch.setattr(
+            plaud_poller, "_create_assignment", lambda *a, **k: "assignment:abc"
+        )
+        conn = _init_db(":memory:")
+        plaud_poller._poll_account("/opt/x", "agent", conn)
+        assert _is_processed(conn, "of_" + "a" * 32) is True
+
+    def test_failed_assignment_is_not_marked_processed(self, monkeypatch):
+        """Sonst ginge die Aufnahme still verloren."""
+        self._setup(monkeypatch)
+
+        def boom(*a, **k):
+            raise RuntimeError("API weg")
+
+        monkeypatch.setattr(plaud_poller, "_create_assignment", boom)
+        conn = _init_db(":memory:")
+        _, created, _, errors = plaud_poller._poll_account("/opt/x", "agent", conn)
+
+        assert created == []
+        assert errors == ["of_" + "a" * 32]
+        assert _is_processed(conn, "of_" + "a" * 32) is False
+
+
+class TestCreateAssignment:
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    def test_sends_link_and_speaker_hint(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        monkeypatch.setattr(plaud_poller, "MA_API_KEY", "k")
+        sent = {}
+
+        def fake_post(url, **kwargs):
+            sent.update(kwargs.get("json") or {})
+            return self._Resp({
+                "draft_id": "d1",
+                "assignment_url": "https://mein-assistent.herbertgruppe.com/review/tok",
+                "created": True,
+            })
+
+        monkeypatch.setattr(plaud_poller.requests, "post", fake_post)
+        ref = plaud_poller._create_assignment("of_x", "09-18 Abstimmung: TGA", "2026-09-18T09:59:21", 2824)
+
+        assert ref == "assignment:d1"
+        assert sent["recording_title"] == "09-18 Abstimmung: TGA"
+        assert len(spy.sent) == 1
+        # Der Hinweis auf die Sprecherkorrektur ist der Zweck der Meldung
+        assert "Sprecher" in spy.sent[0]
+        assert "/review/tok" in spy.sent[0]
+        assert "09-18 Abstimmung: TGA" in spy.sent[0]
+
+    def test_known_recording_does_not_notify_again(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        monkeypatch.setattr(plaud_poller, "MA_API_KEY", "k")
+        monkeypatch.setattr(
+            plaud_poller.requests, "post",
+            lambda url, **k: self._Resp({"draft_id": "d1", "assignment_url": "u", "created": False}),
+        )
+        ref = plaud_poller._create_assignment("of_x", "Titel", "2026-09-18T09:59:21", 60)
+        assert ref == "assignment:d1"
+        assert spy.sent == []
+
+    def test_missing_api_key_reports_failure(self, monkeypatch):
+        monkeypatch.setattr(plaud_poller, "MA_API_KEY", "")
+        assert plaud_poller._create_assignment("of_x", "T", "2026-09-18T09:59:21", 60) is None
+
+
 class TestJwtExpiry:
     def test_reads_exp(self):
         assert _jwt_expiry(_jwt(1789741854)) == 1789741854
