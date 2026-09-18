@@ -111,6 +111,13 @@ def _setup_logging() -> logging.Logger:
 logger = _setup_logging()
 
 
+# ── Recording-ID shapes ───────────────────────────────────────────────────────
+# Bare form (pre-2026-09-15):  cecd2ad55fff73d23ac083c1e2f7c646
+# Prefixed form (current):     of_cecd2ad55fff73d23ac083c1e2f7c646
+_RECORDING_ID_PREFIX_RE = re.compile(r'^[a-z]{1,8}_')
+_RECORDING_ID_RE = re.compile(r'^(?:[a-z]{1,8}_)?[0-9a-f]{32}$')
+
+
 # ── SQLite ─────────────────────────────────────────────────────────────────────
 def _init_db(db_path: str) -> sqlite3.Connection:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -141,21 +148,51 @@ def _init_db(db_path: str) -> sqlite3.Connection:
         conn.execute("ALTER TABLE plaud_processed_recordings ADD COLUMN tracking_notes TEXT")
     except sqlite3.OperationalError:
         pass
+    # Safe migration: recording_title is written by _mark_processed but was never
+    # part of CREATE TABLE — a freshly built state DB would crash on first write.
+    try:
+        conn.execute("ALTER TABLE plaud_processed_recordings ADD COLUMN recording_title TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     return conn
 
 
+def _id_variants(recording_id: str) -> List[str]:
+    """
+    All spellings under which a recording may appear in the state DB.
+
+    Plaud changed its CLI output format around 2026-09-15: IDs are now emitted
+    with a type prefix (``of_<32-hex>``) where they used to be bare 32-hex
+    strings. Rows written before that change carry the bare form, rows written
+    after it carry the prefixed form. Dedup must match across both so that a
+    format flip — in either direction — never re-processes an old recording.
+
+    The *raw* ID as emitted by the CLI stays authoritative for CLI calls and for
+    new DB writes; only the lookup is widened.
+    """
+    variants = [recording_id]
+    bare = _RECORDING_ID_PREFIX_RE.sub("", recording_id, count=1)
+    if bare != recording_id:
+        variants.append(bare)
+    return variants
+
+
 def _is_processed(conn: sqlite3.Connection, recording_id: str) -> bool:
+    variants = _id_variants(recording_id)
+    placeholders = ",".join("?" * len(variants))
     return conn.execute(
-        "SELECT 1 FROM plaud_processed_recordings WHERE recording_id = ?",
-        (recording_id,),
+        f"SELECT 1 FROM plaud_processed_recordings WHERE recording_id IN ({placeholders})",
+        variants,
     ).fetchone() is not None
 
 
 def _get_status(conn: sqlite3.Connection, recording_id: str) -> Optional[str]:
+    variants = _id_variants(recording_id)
+    placeholders = ",".join("?" * len(variants))
     row = conn.execute(
-        "SELECT status FROM plaud_processed_recordings WHERE recording_id = ?",
-        (recording_id,),
+        f"SELECT status FROM plaud_processed_recordings WHERE recording_id IN ({placeholders})",
+        variants,
     ).fetchone()
     return row[0] if row else None
 
@@ -228,14 +265,16 @@ def _parse_recent_ids(output: str) -> List[str]:
             pass
 
     # Line-by-line: first whitespace-separated token that looks like a Plaud file ID.
-    # Plaud file IDs are exactly 32 lowercase hex characters (UUID without dashes).
-    id_re = re.compile(r'^[0-9a-f]{32}$')
+    # Plaud file IDs are 32 lowercase hex characters (UUID without dashes), since
+    # ~2026-09-15 preceded by a short type prefix (e.g. "of_"). Both spellings are
+    # accepted; the ID is returned exactly as emitted, because the CLI only
+    # resolves the form it printed (`plaud file <bare-hex>` → NOT_FOUND).
     for line in stripped.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         first = line.split()[0] if line.split() else ""
-        if id_re.match(first):
+        if _RECORDING_ID_RE.match(first):
             ids.append(first)
         elif first:
             logger.debug("Ignoring non-ID token from plaud recent output: %r", first)
