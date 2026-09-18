@@ -2955,12 +2955,21 @@ class ProtocolAssignmentResponse(BaseModel):
 
 
 class ProtocolAssignRequest(BaseModel):
-    """Svens bestätigte Zuordnung — gibt die Aufnahme für Mara frei."""
+    """
+    Svens bestätigte Zuordnung — gibt die Aufnahme für Mara frei.
+
+    Teilnehmer werden hier NICHT erfasst. Sie ergeben sich erst aus der
+    Sprecherzuordnung, die Sven unmittelbar vor dieser Freigabe in Plaud
+    korrigiert hat — vorher sind sie schlicht noch nicht bekannt.
+    """
 
     event_id: Optional[str] = Field(None, description="Outlook-Event-ID")
-    teilnehmer: List[str] = Field(
+    eingeladene: List[str] = Field(
         default_factory=list,
-        description="Verbindliche Teilnehmerliste. Mara darf keine anderen Namen zuordnen.",
+        description=(
+            "Eingeladene laut Outlook-Termin. Gegenprobe für Mara, KEINE "
+            "Teilnehmerliste — eingeladen ist nicht anwesend."
+        ),
     )
     asana_board_gid: Optional[str] = None
     asana_section_gid: Optional[str] = None
@@ -2968,6 +2977,19 @@ class ProtocolAssignRequest(BaseModel):
     ablageort: Optional[str] = None
     meeting_name: Optional[str] = Field(None, description="Übersteuert den Plaud-Titel")
     meeting_datetime: Optional[str] = None
+
+
+class ProtocolDraftMarkdownRequest(BaseModel):
+    """Maras Lieferung aus Stufe 2: Protokolltext plus ermittelte Teilnehmer."""
+
+    markdown: str
+    teilnehmer: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Aus der korrigierten Sprecherzuordnung ermittelt. None lässt einen "
+            "vorhandenen Stand unangetastet."
+        ),
+    )
 
 
 class ProtocolPatchRequest(BaseModel):
@@ -3272,25 +3294,27 @@ def _create_mara_issue(protocol: Dict[str, Any]) -> Optional[str]:
     """
     Beauftragt Mara mit Stufe 2: Transkript ziehen und Protokoll verfassen.
 
-    Die bestätigte Teilnehmerliste geht als verbindliche Vorgabe mit. Sie ist
-    der Grund für den ganzen Umbau: Mara soll Sprecher nicht mehr raten,
-    sondern gegen eine von Sven bestätigte Liste prüfen.
+    Der entscheidende Unterschied zum bisherigen Ablauf: das Transkript wird
+    erst jetzt geholt, nachdem Sven die Sprecherzuordnung in Plaud korrigiert
+    hat. Die Sprecherzuordnung ist damit eine verlaessliche Quelle geworden —
+    vorher war sie es nicht, weil der Text schon gezogen war, bevor Sven sie
+    anfassen konnte.
     """
     if not _PC_API_KEY:
         logger.warning("[protocols] PAPERCLIP_API_KEY_MA nicht gesetzt — kein Mara-Issue")
         return None
 
-    teilnehmer = protocol.get("teilnehmer") or []
-    teilnehmer_block = (
-        "\n".join(f"- {name}" for name in teilnehmer)
-        if teilnehmer
-        else "_Keine Teilnehmer bestätigt — im Protokoll offen lassen und nachfragen._"
+    eingeladene = protocol.get("eingeladene") or []
+    eingeladene_block = (
+        "\n".join(f"- {name}" for name in eingeladene)
+        if eingeladene
+        else "_Kein Termin zugeordnet — es gibt keine Gegenprobe._"
     )
     recording_id = protocol.get("recording_id") or "?"
 
     description = (
-        f"Sven hat die Zuordnung bestätigt und die Sprecher in Plaud korrigiert. "
-        f"Das Transkript kann jetzt gezogen werden.\n\n"
+        f"Sven hat die Zuordnung bestätigt und **unmittelbar davor die Sprecher in "
+        f"Plaud korrigiert**. Das Transkript kann jetzt gezogen werden.\n\n"
         f"**Draft-ID:** `{protocol['id']}`\n"
         f"**Recording-ID:** `{recording_id}`\n"
         f"**Aufnahme in Plaud:** {protocol.get('recording_title') or '—'}\n"
@@ -3298,17 +3322,25 @@ def _create_mara_issue(protocol: Dict[str, Any]) -> Optional[str]:
         f"**Outlook-Event:** `{protocol.get('event_id') or '—'}`\n"
         f"**Asana-Board:** `{protocol.get('asana_board_gid') or '—'}` / "
         f"Section `{protocol.get('asana_section_gid') or '—'}`\n\n"
-        f"### Verbindliche Teilnehmerliste\n{teilnehmer_block}\n\n"
-        f"Diese Liste ist **abschliessend**. Ordne keine Sprecher oder Teilnehmer zu, "
-        f"die nicht darauf stehen — auch dann nicht, wenn das Transkript einen Namen "
-        f"nennt oder der Termintitel eine Niederlassung nahelegt. Taucht ein Name auf, "
-        f"der nicht auf der Liste steht, vermerke ihn als offene Frage im Protokoll, "
-        f"statt ihn zuzuordnen.\n\n"
+        f"### Teilnehmer ermitteln — verbindliche Reihenfolge\n\n"
+        f"1. **Die korrigierte Sprecherzuordnung im Transkript ist die Quelle.** "
+        f"Wer dort als sprechende Person gefuehrt wird, war anwesend. Sven hat sie "
+        f"gerade geprueft, also ist sie belastbar.\n"
+        f"2. **Die Eingeladenen unten sind nur die Gegenprobe**, keine Quelle. "
+        f"Eingeladen ist nicht anwesend.\n"
+        f"3. **Niemals** aus Termintitel oder Niederlassungs-Kuerzel ableiten. "
+        f"„BL HRN\" heisst nicht, dass Dragan dabei war.\n"
+        f"4. Wer im Transkript nur **erwaehnt** wird, ist kein Teilnehmer.\n"
+        f"5. Bleibt jemand unklar, vermerke das als offene Frage im Protokoll, "
+        f"statt zu raten.\n\n"
+        f"### Eingeladene laut Outlook (Gegenprobe)\n{eingeladene_block}\n\n"
         f"### Ablauf\n"
         f"1. Transkript und Zusammenfassung zur Recording-ID holen\n"
-        f"2. Protokoll verfassen\n"
-        f"3. Text an `PATCH /api/protocols/{protocol['id']}/draft-markdown` uebergeben\n"
-        f"4. Sven den Reviewer-Link schicken"
+        f"2. Teilnehmer nach obiger Reihenfolge ermitteln\n"
+        f"3. Protokoll verfassen\n"
+        f"4. Text und ermittelte Teilnehmer an "
+        f"`PATCH /api/protocols/{protocol['id']}/draft-markdown` uebergeben\n"
+        f"5. Sven den Reviewer-Link schicken"
     )
 
     try:
@@ -3368,7 +3400,7 @@ def assign_protocol(
     _protocols_db.confirm_assignment(
         draft_id,
         event_id=req.event_id,
-        teilnehmer=req.teilnehmer,
+        eingeladene=req.eingeladene,
         asana_board_gid=req.asana_board_gid,
         asana_section_gid=req.asana_section_gid,
         create_asana_task=req.create_asana_task,
@@ -3384,20 +3416,23 @@ def assign_protocol(
         "status": "assigned",
         "draft_id": draft_id,
         "mara_issue": issue,
-        "teilnehmer": req.teilnehmer,
+        "eingeladene": req.eingeladene,
     }
 
 
 @app.patch("/api/protocols/{draft_id}/draft-markdown", status_code=200)
 def attach_protocol_markdown(
     draft_id: str,
-    req: ProtocolPatchRequest,
+    req: ProtocolDraftMarkdownRequest,
     _key: str = Security(verify_api_key),
 ):
     """
-    Mara liefert den Protokolltext nach und hebt die Zeile auf 'draft'.
+    Mara liefert Protokolltext und ermittelte Teilnehmer nach und hebt die
+    Zeile auf 'draft'.
 
-    Ab hier übernimmt der bestehende Review-Editor unverändert.
+    Die Teilnehmer entstehen erst hier: sie stammen aus der Sprecherzuordnung,
+    die Sven vor der Freigabe in Plaud korrigiert hat. Ab diesem Punkt
+    übernimmt der bestehende Review-Editor unverändert.
     """
     protocol = _protocols_db.get_by_id(draft_id)
     if not protocol:
@@ -3408,7 +3443,9 @@ def attach_protocol_markdown(
             detail=f"Protokoll erwartet keinen Text (status={protocol['status']})",
         )
 
-    _protocols_db.attach_draft_markdown(draft_id, req.markdown)
+    _protocols_db.attach_draft_markdown(
+        draft_id, req.markdown, teilnehmer=req.teilnehmer
+    )
     return {
         "status": "draft",
         "draft_id": draft_id,

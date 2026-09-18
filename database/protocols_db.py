@@ -146,6 +146,10 @@ class ProtocolsDB:
             # Plaud-App nicht wiederfinden, um die Sprecher zu korrigieren.
             ("recording_title", "ALTER TABLE protocols ADD COLUMN recording_title TEXT"),
             ("recording_duration", "ALTER TABLE protocols ADD COLUMN recording_duration TEXT"),
+            # Eingeladene laut Outlook-Termin — bewusst getrennt von teilnehmer.
+            # Eingeladen ist nicht anwesend; die Vermischung beider Begriffe war
+            # die Ursache falscher Teilnehmerlisten.
+            ("eingeladene", "ALTER TABLE protocols ADD COLUMN eingeladene TEXT"),
             ("assigned_at", "ALTER TABLE protocols ADD COLUMN assigned_at TEXT"),
             ("reminder_sent_at", "ALTER TABLE protocols ADD COLUMN reminder_sent_at TEXT"),
             (
@@ -166,7 +170,7 @@ class ProtocolsDB:
     def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
         """Konvertiert Row zu Dict und parst JSON-Felder."""
         protocol = dict(row)
-        for json_field in ("teilnehmer", "reviewer_emails"):
+        for json_field in ("teilnehmer", "eingeladene", "reviewer_emails"):
             raw = protocol.get(json_field)
             try:
                 protocol[json_field] = json.loads(raw) if raw else []
@@ -443,7 +447,7 @@ class ProtocolsDB:
         self,
         draft_id: str,
         event_id: Optional[str],
-        teilnehmer: List[str],
+        eingeladene: Optional[List[str]] = None,
         asana_board_gid: Optional[str] = None,
         asana_section_gid: Optional[str] = None,
         create_asana_task: bool = True,
@@ -454,10 +458,13 @@ class ProtocolsDB:
         """
         Übernimmt Svens Zuordnung und gibt die Aufnahme für Mara frei.
 
-        Die hier bestätigte Teilnehmerliste ist für Mara bindend: sie ist die
-        einzige erlaubte Quelle für Sprecher- und Teilnehmernamen. Ein Name,
-        der im Transkript auftaucht, aber nicht in dieser Liste steht, wird
-        nicht zugeordnet, sondern als offene Frage markiert.
+        Teilnehmer werden hier bewusst NICHT gesetzt. Zum Zeitpunkt der
+        Freigabe sind sie noch nicht bekannt: sie ergeben sich aus der
+        Sprecherzuordnung, die Sven unmittelbar vor der Freigabe in Plaud
+        korrigiert hat und die Mara erst mit dem Transkript sieht.
+
+        Gespeichert werden stattdessen die Eingeladenen aus dem Outlook-Termin
+        — als Gegenprobe für Mara, nicht als Teilnehmerliste.
 
         meeting_name/meeting_datetime sind optional — sie kommen aus dem
         gewählten Outlook-Termin und ersetzen dann den Plaud-Titel und die
@@ -466,7 +473,7 @@ class ProtocolsDB:
         now = _utcnow_iso()
         fields = [
             "event_id = ?",
-            "teilnehmer = ?",
+            "eingeladene = ?",
             "asana_board_gid = ?",
             "asana_section_gid = ?",
             "create_asana_task = ?",
@@ -476,7 +483,7 @@ class ProtocolsDB:
         ]
         params: List[Any] = [
             event_id,
-            json.dumps(teilnehmer or [], ensure_ascii=False),
+            json.dumps(eingeladene or [], ensure_ascii=False),
             asana_board_gid,
             asana_section_gid,
             1 if create_asana_task else 0,
@@ -503,23 +510,39 @@ class ProtocolsDB:
             return cursor.rowcount > 0
 
     def attach_draft_markdown(
-        self, draft_id: str, markdown: str, modified_by: str = "mara"
+        self,
+        draft_id: str,
+        markdown: str,
+        teilnehmer: Optional[List[str]] = None,
+        modified_by: str = "mara",
     ) -> bool:
         """
         Setzt den von Mara erzeugten Protokolltext in eine zugeordnete Zeile
         und hebt sie damit auf 'draft' — den Zustand, in dem der bestehende
         Review-Editor übernimmt.
+
+        Hier kommen auch die Teilnehmer an: Mara hat sie aus der korrigierten
+        Sprecherzuordnung ermittelt. Erst ab diesem Moment sind sie bekannt.
+        teilnehmer=None lässt einen vorhandenen Stand unangetastet.
         """
         now = _utcnow_iso()
+        fields = [
+            "draft_markdown = ?",
+            "current_markdown = ?",
+            "status = 'draft'",
+            "last_modified = ?",
+            "last_modified_by = ?",
+        ]
+        params: List[Any] = [markdown, markdown, now, modified_by]
+        if teilnehmer is not None:
+            fields.insert(2, "teilnehmer = ?")
+            params.insert(2, json.dumps(teilnehmer, ensure_ascii=False))
+        params.append(draft_id)
+
         with self._get_connection() as conn:
             cursor = conn.execute(
-                """
-                UPDATE protocols
-                SET draft_markdown = ?, current_markdown = ?, status = 'draft',
-                    last_modified = ?, last_modified_by = ?
-                WHERE id = ?
-                """,
-                (markdown, markdown, now, modified_by, draft_id),
+                f"UPDATE protocols SET {', '.join(fields)} WHERE id = ?",
+                params,
             )
             conn.commit()
             return cursor.rowcount > 0
