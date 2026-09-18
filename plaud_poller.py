@@ -62,6 +62,14 @@ PLAUD_ACCOUNTS_ENV = os.getenv("PLAUD_ACCOUNTS", f"/var/lib/plaud:{PC_PROTOKOLL_
 MAX_BACKOFF_SEC = 300
 ALERT_THRESHOLD = 3  # consecutive errors before Telegram alert
 
+# ── Dead-man switch ───────────────────────────────────────────────────────────
+# The 2026-09 outage stayed invisible for four days because a broken parser and
+# a quiet week look identical from the outside: both report "0 recordings".
+# These three watchdogs make silence distinguishable from failure.
+SILENCE_ALERT_HOURS  = int(os.getenv("PLAUD_SILENCE_ALERT_HOURS", "72"))
+TOKEN_WARN_HOURS     = int(os.getenv("PLAUD_TOKEN_WARN_HOURS", "48"))
+ALERT_COOLDOWN_HOURS = int(os.getenv("PLAUD_ALERT_COOLDOWN_HOURS", "24"))
+
 # Demo/Tutorial-Aufnahmen überspringen (HBE-1212).
 # Pipe-separierte, case-insensitive Substring-Liste. Standard: Plaud-Tutorial-Video.
 _SKIP_TITLE_PATTERNS: List[str] = [
@@ -154,8 +162,29 @@ def _init_db(db_path: str) -> sqlite3.Connection:
         conn.execute("ALTER TABLE plaud_processed_recordings ADD COLUMN recording_title TEXT")
     except sqlite3.OperationalError:
         pass
+    # Key/value scratch space for the dead-man switch (last alert timestamps).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS poller_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
     conn.commit()
     return conn
+
+
+def _meta_get(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    row = conn.execute("SELECT value FROM poller_meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def _meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO poller_meta (key, value) VALUES (?, ?)"
+        " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    conn.commit()
 
 
 def _id_variants(recording_id: str) -> List[str]:
@@ -280,6 +309,22 @@ def _parse_recent_ids(output: str) -> List[str]:
             logger.debug("Ignoring non-ID token from plaud recent output: %r", first)
 
     return ids
+
+
+def _parse_reported_count(output: str) -> Optional[int]:
+    """
+    Read the recording count the CLI states in its own header.
+
+    `plaud recent` prints "Recordings in the last 7 days: 4" before the list.
+    Comparing that number against the number of IDs actually parsed turns a
+    silent parser failure into a loud one — had this existed in September 2026,
+    the prefixed-ID regression would have alerted within ten minutes instead of
+    going unnoticed for four days.
+
+    Returns None if the header is absent (format changed, nothing to compare).
+    """
+    match = re.search(r'Recordings\s+in\s+the\s+last\s+\d+\s+days?:\s*(\d+)', output, re.IGNORECASE)
+    return int(match.group(1)) if match else None
 
 
 def _parse_file_metadata(output: str) -> Dict[str, Any]:
@@ -415,8 +460,87 @@ def _tg_alert(text: str) -> None:
         logger.error("Telegram alert failed: %s", exc)
 
 
+def _alert_throttled(conn: sqlite3.Connection, key: str, text: str) -> bool:
+    """
+    Send a Telegram alert at most once per ALERT_COOLDOWN_HOURS per key.
+
+    A watchdog that fires every 10 minutes trains the reader to ignore it, which
+    is the same failure mode as no alert at all. Returns True if sent.
+    """
+    now = time.time()
+    last_raw = _meta_get(conn, f"alert:{key}")
+    if last_raw:
+        try:
+            if now - float(last_raw) < ALERT_COOLDOWN_HOURS * 3600:
+                logger.debug("Alert %r suppressed (cooldown active)", key)
+                return False
+        except ValueError:
+            pass
+    _tg_alert(text)
+    _meta_set(conn, f"alert:{key}", str(now))
+    logger.warning("Dead-man alert sent: %s", key)
+    return True
+
+
+def _clear_alert(conn: sqlite3.Connection, key: str) -> None:
+    """Reset an alert's cooldown so a recurrence is reported immediately."""
+    if _meta_get(conn, f"alert:{key}") is not None:
+        conn.execute("DELETE FROM poller_meta WHERE key = ?", (f"alert:{key}",))
+        conn.commit()
+
+
 # ── Plaud Auth: Auto-Refresh ───────────────────────────────────────────────────
-def _auto_refresh_token(home_dir: str) -> None:
+def _jwt_expiry(token: str) -> Optional[float]:
+    """Unix timestamp from a JWT's exp claim, or None if unreadable."""
+    import base64 as _b64
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(_b64.urlsafe_b64decode(payload))
+        exp = claims.get("exp")
+        return float(exp) if exp else None
+    except Exception:
+        return None
+
+
+def _check_refresh_token_expiry(conn: sqlite3.Connection, home_dir: str, tokens: dict) -> None:
+    """
+    Watchdog 3: warn before the refresh token dies.
+
+    The access token renews itself; the refresh token lasts six days and only
+    survives while the poller keeps refreshing it. If the service is down over a
+    long holiday — or refreshes keep failing — it expires and only an
+    interactive `plaud login` can recover. Warning early keeps that from
+    becoming a discovery after the fact.
+    """
+    exp = _jwt_expiry(tokens.get("refresh_token", ""))
+    if exp is None:
+        return
+    hours_left = (exp - time.time()) / 3600
+    if hours_left > TOKEN_WARN_HOURS:
+        _clear_alert(conn, f"token_expiry:{home_dir}")
+        return
+    if hours_left <= 0:
+        headline = "🔴 <b>Plaud-Token abgelaufen</b>\nDer Poller kann keine Aufnahmen mehr abholen."
+    else:
+        headline = (
+            f"🟠 <b>Plaud-Token laeuft ab</b>\n"
+            f"Noch <b>{hours_left:.0f} Stunden</b> gueltig "
+            f"(bis {datetime.fromtimestamp(exp, timezone.utc):%d.%m. %H:%M} UTC)."
+        )
+    _alert_throttled(
+        conn,
+        f"token_expiry:{home_dir}",
+        f"{headline}\n\n"
+        f"<b>So erneuerst du ihn:</b>\n"
+        f"1. Lokal <code>plaud login</code> ausfuehren und im Browser bestaetigen\n"
+        f"2. Inhalt von <code>~/.plaud/tokens.json</code> an "
+        f"<code>POST /plaud/auth/upload-tokens</code> schicken\n\n"
+        f"Konto: <code>{home_dir}</code>",
+    )
+
+
+def _auto_refresh_token(home_dir: str, conn: Optional[sqlite3.Connection] = None) -> None:
     """Refresh Plaud access_token if it expires within the next hour."""
     import base64 as _b64
     token_file = Path(home_dir) / ".plaud" / "tokens.json"
@@ -429,6 +553,8 @@ def _auto_refresh_token(home_dir: str) -> None:
             return
     try:
         tokens = json.loads(token_file.read_text())
+        if conn is not None:
+            _check_refresh_token_expiry(conn, home_dir, tokens)
         expires_at_ms = tokens.get("expires_at", 0)
         now_ms = time.time() * 1000
         # Refresh if token expires within 60 minutes
@@ -454,8 +580,23 @@ def _auto_refresh_token(home_dir: str) -> None:
                 new_tokens["expires_at"] = int((time.time() + new_tokens["expires_in"]) * 1000)
             token_file.write_text(json.dumps(new_tokens, indent=2))
             logger.info("[plaud_auth] Token erfolgreich aktualisiert")
+            if conn is not None:
+                _clear_alert(conn, f"token_refresh_failed:{home_dir}")
         else:
             logger.error("[plaud_auth] Refresh fehlgeschlagen: %s %s", resp.status_code, resp.text[:200])
+            # A failing refresh is how a working poller quietly becomes a dead
+            # one: the access token simply runs out a few hours later.
+            if conn is not None:
+                _alert_throttled(
+                    conn,
+                    f"token_refresh_failed:{home_dir}",
+                    f"⚠️ <b>Plaud-Token-Refresh fehlgeschlagen</b>\n"
+                    f"HTTP {resp.status_code} — der Zugang laeuft in Kuerze aus.\n"
+                    f"Konto: <code>{home_dir}</code>\n\n"
+                    f"Wenn es sich nicht von selbst faengt: lokal <code>plaud login</code>, "
+                    f"dann <code>tokens.json</code> an "
+                    f"<code>POST /plaud/auth/upload-tokens</code>.",
+                )
     except Exception as exc:
         logger.error("[plaud_auth] Refresh-Fehler: %s", exc)
 
@@ -476,7 +617,7 @@ def _poll_account(
     errors: List[str] = []
 
     logger.info("Polling account home=%s", home_dir)
-    _auto_refresh_token(home_dir)
+    _auto_refresh_token(home_dir, db)
     try:
         recent_out = _run_plaud(["recent", "--days", str(RECENT_DAYS)], home_dir)
     except Exception as exc:
@@ -485,6 +626,29 @@ def _poll_account(
 
     ids = _parse_recent_ids(recent_out)
     logger.info("Found %d recording IDs in recent output", len(ids))
+
+    # Watchdog 1: the CLI says N, we parsed M. Any shortfall means the output
+    # format moved and we are dropping recordings on the floor.
+    reported = _parse_reported_count(recent_out)
+    if reported is not None and reported > len(ids):
+        sample = next(
+            (ln.strip() for ln in recent_out.splitlines()
+             if ln.strip() and not ln.strip().startswith(("-", "#", "Recordings"))),
+            "",
+        )
+        _alert_throttled(
+            db,
+            f"parse_mismatch:{home_dir}",
+            f"⚠️ <b>plaud-poller erkennt Aufnahmen nicht</b>\n"
+            f"Plaud meldet <b>{reported}</b> Aufnahmen, erkannt wurden <b>{len(ids)}</b>.\n"
+            f"Das Ausgabeformat hat sich vermutlich geaendert.\n"
+            f"Nicht erkannte Zeile: <code>{sample[:120]}</code>\n"
+            f"Pruefen: <code>journalctl -u plaud-poller -n 50</code>",
+        )
+    elif reported is not None:
+        _clear_alert(db, f"parse_mismatch:{home_dir}")
+    else:
+        logger.debug("No count header in `plaud recent` output — skipping parse check")
 
     for recording_id in ids:
         if _is_processed(db, recording_id):
@@ -565,6 +729,36 @@ def _poll_account(
                     backoff = min(backoff * 2, MAX_BACKOFF_SEC)
 
     return new_ids, created_issues, skipped, errors
+
+
+def _check_silence(conn: sqlite3.Connection) -> None:
+    """
+    Watchdog 2: nothing processed for SILENCE_ALERT_HOURS.
+
+    The catch-all for failure modes the specific watchdogs miss. It cannot tell
+    a quiet week from a broken pipeline, so it is worded as a question rather
+    than an alarm, and fires at most once per cooldown.
+    """
+    last_raw = _meta_get(conn, "last_recording_seen")
+    if last_raw is None:
+        # First run after the upgrade: start the clock rather than alert on a
+        # history we never recorded.
+        _meta_set(conn, "last_recording_seen", str(time.time()))
+        return
+    try:
+        hours_quiet = (time.time() - float(last_raw)) / 3600
+    except ValueError:
+        _meta_set(conn, "last_recording_seen", str(time.time()))
+        return
+    if hours_quiet < SILENCE_ALERT_HOURS:
+        return
+    _alert_throttled(
+        conn,
+        "silence",
+        f"🔕 <b>plaud-poller seit {hours_quiet:.0f} Stunden ohne neue Aufnahme</b>\n"
+        f"Das kann eine ruhige Phase sein — oder die Kette steht.\n"
+        f"Kurz gegenpruefen, ob in Plaud Aufnahmen liegen, die hier nicht ankommen.",
+    )
 
 
 # ── Account config parser ──────────────────────────────────────────────────────
@@ -658,6 +852,12 @@ def main() -> None:
                         f"Letzter Fehler: {exc}\n"
                         f"Pruefen: <code>journalctl -u plaud-poller -n 50</code>"
                     )
+
+        if all_new:
+            _meta_set(db, "last_recording_seen", str(time.time()))
+            _clear_alert(db, "silence")
+        else:
+            _check_silence(db)
 
         audit = {
             "timestamp":       cycle_start,

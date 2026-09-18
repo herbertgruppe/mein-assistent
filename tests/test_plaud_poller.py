@@ -13,6 +13,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("PAPERCLIP_COMPANY_ID_MA", "00000000-0000-0000-0000-000000000001")
 os.environ.setdefault("PAPERCLIP_PROTOKOLL_AGENT_ID", "00000000-0000-0000-0000-000000000002")
 
+import base64
+import json as _json
+import time
+
+import plaud_poller
 from plaud_poller import (
     _parse_recent_ids,
     _parse_file_metadata,
@@ -22,7 +27,21 @@ from plaud_poller import (
     _is_processed,
     _get_status,
     _mark_processed,
+    _parse_reported_count,
+    _alert_throttled,
+    _clear_alert,
+    _check_silence,
+    _check_refresh_token_expiry,
+    _jwt_expiry,
+    _meta_get,
+    _meta_set,
 )
+
+
+def _jwt(exp_unix):
+    """Minimal unsigned JWT carrying just an exp claim."""
+    payload = base64.urlsafe_b64encode(_json.dumps({"exp": int(exp_unix)}).encode()).rstrip(b"=")
+    return "hdr." + payload.decode() + ".sig"
 
 
 # ── _parse_recent_ids ─────────────────────────────────────────────────────────
@@ -260,3 +279,253 @@ class TestExtractDurationSec:
 
     def test_empty_string(self):
         assert _extract_duration_sec({"duration": ""}) == 0
+
+
+# ── Dead-man switch ───────────────────────────────────────────────────────────
+
+class _AlertSpy:
+    """Captures Telegram alerts instead of sending them."""
+
+    def __init__(self, monkeypatch):
+        self.sent = []
+        monkeypatch.setattr(plaud_poller, "_tg_alert", lambda text: self.sent.append(text))
+
+
+class TestParseReportedCount:
+    def test_reads_count_from_header(self):
+        assert _parse_reported_count("Recordings in the last 7 days: 4") == 4
+
+    def test_singular_day(self):
+        assert _parse_reported_count("Recordings in the last 1 day: 2") == 2
+
+    def test_zero_is_not_none(self):
+        """0 must be distinguishable from 'header absent'."""
+        assert _parse_reported_count("Recordings in the last 7 days: 0") == 0
+
+    def test_absent_header_returns_none(self):
+        assert _parse_reported_count("of_" + "a" * 32) is None
+
+    def test_finds_header_in_full_output(self):
+        output = (
+            "- Fetching recordings from the last 7 days...\n\n"
+            "Recordings in the last 7 days: 4\n\n"
+            "  of_9e2f24bf7ca2f447b3b2bbf6ddca4d4d  Titel  2026-09-18  3m21s\n"
+        )
+        assert _parse_reported_count(output) == 4
+
+
+class TestAlertThrottling:
+    def test_first_alert_is_sent(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        assert _alert_throttled(conn, "k", "boom") is True
+        assert spy.sent == ["boom"]
+
+    def test_second_alert_within_cooldown_is_suppressed(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        _alert_throttled(conn, "k", "boom")
+        assert _alert_throttled(conn, "k", "boom again") is False
+        assert len(spy.sent) == 1
+
+    def test_distinct_keys_do_not_share_cooldown(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        _alert_throttled(conn, "a", "x")
+        _alert_throttled(conn, "b", "y")
+        assert len(spy.sent) == 2
+
+    def test_alert_resends_after_cooldown_expires(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        _alert_throttled(conn, "k", "boom")
+        stale = time.time() - (plaud_poller.ALERT_COOLDOWN_HOURS + 1) * 3600
+        _meta_set(conn, "alert:k", str(stale))
+        assert _alert_throttled(conn, "k", "boom") is True
+        assert len(spy.sent) == 2
+
+    def test_clear_alert_allows_immediate_resend(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        _alert_throttled(conn, "k", "boom")
+        _clear_alert(conn, "k")
+        assert _alert_throttled(conn, "k", "boom") is True
+        assert len(spy.sent) == 2
+
+    def test_corrupt_timestamp_does_not_block_alerting(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        _meta_set(conn, "alert:k", "not-a-number")
+        assert _alert_throttled(conn, "k", "boom") is True
+
+
+class TestSilenceWatchdog:
+    def test_first_run_starts_clock_without_alerting(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        _check_silence(conn)
+        assert spy.sent == []
+        assert _meta_get(conn, "last_recording_seen") is not None
+
+    def test_quiet_but_within_threshold_stays_silent(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        recent = time.time() - (plaud_poller.SILENCE_ALERT_HOURS - 1) * 3600
+        _meta_set(conn, "last_recording_seen", str(recent))
+        _check_silence(conn)
+        assert spy.sent == []
+
+    def test_alerts_past_threshold(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        old = time.time() - (plaud_poller.SILENCE_ALERT_HOURS + 1) * 3600
+        _meta_set(conn, "last_recording_seen", str(old))
+        _check_silence(conn)
+        assert len(spy.sent) == 1
+        assert "ohne neue Aufnahme" in spy.sent[0]
+
+    def test_corrupt_timestamp_resets_instead_of_alerting(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        _meta_set(conn, "last_recording_seen", "garbage")
+        _check_silence(conn)
+        assert spy.sent == []
+
+
+class TestTokenExpiryWatchdog:
+    def test_healthy_token_stays_silent(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        tokens = {"refresh_token": _jwt(time.time() + 6 * 24 * 3600)}
+        _check_refresh_token_expiry(conn, "/opt/x", tokens)
+        assert spy.sent == []
+
+    def test_warns_inside_window(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        tokens = {"refresh_token": _jwt(time.time() + 12 * 3600)}
+        _check_refresh_token_expiry(conn, "/opt/x", tokens)
+        assert len(spy.sent) == 1
+        assert "laeuft ab" in spy.sent[0]
+        assert "plaud login" in spy.sent[0]
+
+    def test_expired_token_reports_as_dead(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        tokens = {"refresh_token": _jwt(time.time() - 3600)}
+        _check_refresh_token_expiry(conn, "/opt/x", tokens)
+        assert len(spy.sent) == 1
+        assert "abgelaufen" in spy.sent[0]
+
+    def test_unreadable_token_is_ignored(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        _check_refresh_token_expiry(conn, "/opt/x", {"refresh_token": "not-a-jwt"})
+        assert spy.sent == []
+
+    def test_missing_token_is_ignored(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        _check_refresh_token_expiry(conn, "/opt/x", {})
+        assert spy.sent == []
+
+    def test_recovery_clears_cooldown(self, monkeypatch):
+        """After a renewed token, a later expiry must alert again immediately."""
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        _check_refresh_token_expiry(conn, "/opt/x", {"refresh_token": _jwt(time.time() + 12 * 3600)})
+        _check_refresh_token_expiry(conn, "/opt/x", {"refresh_token": _jwt(time.time() + 6 * 24 * 3600)})
+        _check_refresh_token_expiry(conn, "/opt/x", {"refresh_token": _jwt(time.time() + 12 * 3600)})
+        assert len(spy.sent) == 2
+
+    def test_per_account_isolation(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        tokens = {"refresh_token": _jwt(time.time() + 12 * 3600)}
+        _check_refresh_token_expiry(conn, "/opt/a", tokens)
+        _check_refresh_token_expiry(conn, "/opt/b", tokens)
+        assert len(spy.sent) == 2
+
+
+class TestParseMismatchWatchdog:
+    """The regression that cost four days: CLI lists recordings, parser sees none."""
+
+    def _poll(self, monkeypatch, recent_output, conn):
+        monkeypatch.setattr(plaud_poller, "_auto_refresh_token", lambda *a, **k: None)
+        monkeypatch.setattr(plaud_poller, "_run_plaud", lambda args, home, **k: recent_output)
+        return plaud_poller._poll_account("/opt/x", "agent-1", conn)
+
+    def test_unparseable_format_triggers_alert(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        # A future format change the current regex cannot handle.
+        output = (
+            "Recordings in the last 7 days: 2\n"
+            "  REC-9e2f24bf7ca2f447b3b2bbf6ddca4d4d  Titel A  2026-09-18  3m21s\n"
+            "  REC-1dc2b2b20bd9f18a230d11f74aaabb6d  Titel B  2026-09-18  47m04s\n"
+        )
+        self._poll(monkeypatch, output, conn)
+        assert len(spy.sent) == 1
+        assert "erkennt Aufnahmen nicht" in spy.sent[0]
+        assert "meldet <b>2</b>" in spy.sent[0]
+
+    def test_partial_loss_triggers_alert(self, monkeypatch):
+        """Even losing one of three recordings must be reported."""
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        output = (
+            "Recordings in the last 7 days: 3\n"
+            f"  of_{'a' * 32}  Titel A  2026-09-18  3m21s\n"
+            f"  of_{'b' * 32}  Titel B  2026-09-18  5m00s\n"
+            "  BROKEN-ID-HERE  Titel C  2026-09-18  9m00s\n"
+        )
+        monkeypatch.setattr(plaud_poller, "_auto_refresh_token", lambda *a, **k: None)
+        calls = {"n": 0}
+
+        def fake_run(args, home, **k):
+            if args[0] == "recent":
+                return output
+            calls["n"] += 1
+            return "duration: 10m00s\nname: Titel\nstart_at: 2026-09-18T09:00:00"
+
+        monkeypatch.setattr(plaud_poller, "_run_plaud", fake_run)
+        monkeypatch.setattr(plaud_poller, "_create_pc_issue", lambda payload: "HBE-9999")
+        plaud_poller._poll_account("/opt/x", "agent-1", conn)
+        assert len(spy.sent) == 1
+        assert "meldet <b>3</b>" in spy.sent[0]
+        assert "erkannt wurden <b>2</b>" in spy.sent[0]
+
+    def test_healthy_poll_stays_silent(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        output = "Recordings in the last 7 days: 0\n"
+        self._poll(monkeypatch, output, conn)
+        assert spy.sent == []
+
+    def test_missing_header_does_not_alert(self, monkeypatch):
+        """No count to compare against — stay quiet rather than guess."""
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        self._poll(monkeypatch, "some unexpected output\n", conn)
+        assert spy.sent == []
+
+    def test_recovery_clears_cooldown(self, monkeypatch):
+        spy = _AlertSpy(monkeypatch)
+        conn = _init_db(":memory:")
+        broken = "Recordings in the last 7 days: 1\n  REC-abc  Titel  2026-09-18  3m21s\n"
+        self._poll(monkeypatch, broken, conn)
+        self._poll(monkeypatch, "Recordings in the last 7 days: 0\n", conn)
+        self._poll(monkeypatch, broken, conn)
+        assert len(spy.sent) == 2
+
+
+class TestJwtExpiry:
+    def test_reads_exp(self):
+        assert _jwt_expiry(_jwt(1789741854)) == 1789741854
+
+    def test_malformed_returns_none(self):
+        assert _jwt_expiry("garbage") is None
+
+    def test_missing_exp_returns_none(self):
+        payload = base64.urlsafe_b64encode(b'{"sub":"x"}').rstrip(b"=").decode()
+        assert _jwt_expiry(f"hdr.{payload}.sig") is None
