@@ -1664,24 +1664,39 @@ def _asana_offene_titel(max_alter_sek: int = 600) -> set:
         return _asana_cache["titel"]
     schluessel: set = set()
     if ASANA_TOKEN:
+        # HBE-3122: Reichweite. Die Abfrage ging ueber das GANZE Board und war
+        # bei 100 Aufgaben abgeschnitten — Svens Board hat mehr, und die
+        # Mail-Aufgaben lagen jenseits der Grenze. Die Pruefung sah also
+        # ausgerechnet die Aufgaben nicht, gegen die sie schuetzen soll.
+        # Die Section "📬 Aus Mails" enthaelt genau diese und ist klein.
+        section = _asana_section_gid()
+        if section:
+            url = f"{ASANA_API}/sections/{section}/tasks"
+            params: Dict[str, Any] = {"opt_fields": "name,completed,notes", "limit": 100}
+        else:
+            url = f"{ASANA_API}/tasks"
+            params = {"project": ASANA_BOARD_GID,
+                      "opt_fields": "name,completed,notes", "limit": 100}
         try:
-            resp = requests.get(
-                f"{ASANA_API}/tasks",
-                headers={"Authorization": f"Bearer {ASANA_TOKEN}"},
-                params={"project": ASANA_BOARD_GID,
-                        "opt_fields": "name,completed,notes", "limit": 100},
-                timeout=30,
-            )
-            if resp.status_code == 200:
-                for t in resp.json().get("data", []):
+            while url:
+                resp = requests.get(
+                    url, headers={"Authorization": f"Bearer {ASANA_TOKEN}"},
+                    params=params, timeout=30,
+                )
+                if resp.status_code != 200:
+                    logger.warning("Asana-Liste HTTP %d", resp.status_code)
+                    break
+                daten = resp.json()
+                for t in daten.get("data", []):
                     if t.get("completed"):
                         continue
                     schluessel.add(_titel_normalisieren(t.get("name", "")))
                     treffer = _BETREFF_ZEILE.search(t.get("notes") or "")
                     if treffer:
                         schluessel.add(_titel_normalisieren(treffer.group(1)))
-            else:
-                logger.warning("Asana-Liste HTTP %d", resp.status_code)
+                # Ohne Section muss geblaettert werden, sonst bleibt die Luecke.
+                weiter = (daten.get("next_page") or {}).get("uri") if not section else None
+                url, params = weiter, {}
         except Exception as exc:
             logger.warning("Asana-Liste nicht abrufbar: %s", exc)
     schluessel.discard("")
