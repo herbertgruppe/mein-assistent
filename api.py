@@ -1,4 +1,4 @@
-﻿"""
+"""
 FastAPI REST-Endpunkt für den Meeting-Protokoll-Workflow der Herbert Gruppe.
 
 Wird vom Cowork-Skill `meeting-protokoll` aufgerufen, sobald Sven ein Protokoll
@@ -455,6 +455,14 @@ def _tg_agent_send(
         )
         if resp.ok:
             return resp.json().get("result", {}).get("message_id")
+        # HBE-3107: Diese Zeile fehlte. Telegram lehnte 105 von 130 Sendungen ab,
+        # ohne dass irgendwo eine Spur davon blieb. Die Fehlerbeschreibung von
+        # Telegram nennt das Problem praezise ("Character '-' is reserved") und
+        # gehoert deshalb ins Log. Sie enthaelt kein Token.
+        logger.warning(
+            "[telegram] sendMessage abgelehnt: HTTP %s %s",
+            resp.status_code, resp.text[:300],
+        )
         return None
     except _http.exceptions.RequestException as exc:
         # Use type name only — str(exc) would include the full URL with the BOT_TOKEN
@@ -1729,7 +1737,15 @@ class TelegramSendRequest(BaseModel):
 class LenaTelegramSendRequest(BaseModel):
     chat_id: str = Field(..., description="Telegram Chat-ID (Empfänger)")
     text: str = Field(..., description="Nachrichtentext")
-    parse_mode: str = Field("MarkdownV2", description="Telegram parse_mode (MarkdownV2 empfohlen)")
+    # HBE-3107: KEIN Default. MarkdownV2 als Vorbelegung hat jeden unescapten
+    # Bindestrich, Punkt oder Klammerausdruck zu einem HTTP 400 gemacht — und
+    # der Fehler war fuer den Aufrufer unsichtbar. Wer Formatierung will,
+    # fordert sie ausdruecklich an und escapet selbst.
+    parse_mode: Optional[str] = Field(
+        None,
+        description="Telegram parse_mode. Leer = unformatierter Text (sicher). "
+                    "Bei 'MarkdownV2' muessen _ * [ ] ( ) ~ ` > # + - = | { } . ! escapet sein.",
+    )
     issue_id: Optional[str] = Field(None, description="Paperclip Issue-ID für outbound_messages Tracking")
     comment_id: Optional[str] = Field(None, description="Paperclip Comment-ID für outbound_messages Tracking")
     reply_markup: Optional[dict] = Field(None, description="Telegram reply_markup (Inline-Keyboard, ReplyKeyboard, etc.)")
@@ -5770,6 +5786,20 @@ def telegram_agent_send(
         cfg.token, req.chat_id, req.text,
         reply_markup=req.reply_markup, parse_mode=req.parse_mode,
     )
+    # HBE-3107: Fehlschlag muss auch als Fehlschlag ankommen. Vorher gab es
+    # HTTP 200 mit success=false zurueck — fuer einen Agenten nicht von Erfolg
+    # zu unterscheiden. Lena hat daraufhin 130-mal gesendet und dabei 14 immer
+    # kuerzere Testnachrichten an Sven zugestellt, bis eine ohne reservierte
+    # Zeichen durchkam.
+    if not sent_msg_id:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Telegram hat die Nachricht abgelehnt. Haeufigste Ursache: parse_mode "
+                "gesetzt, aber Sonderzeichen nicht escapet. Ohne parse_mode erneut "
+                "versuchen — nicht mit anderem Text wiederholen."
+            ),
+        )
     # Always track in outbound_messages (HBE-1212: auch ohne issue_id für retroaktive Flood-Analyse)
     if sent_msg_id:
         import json as _json
