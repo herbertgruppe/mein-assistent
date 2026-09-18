@@ -13,7 +13,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("PAPERCLIP_COMPANY_ID_MA", "00000000-0000-0000-0000-000000000001")
 os.environ.setdefault("PAPERCLIP_PROTOKOLL_AGENT_ID", "00000000-0000-0000-0000-000000000002")
 
-from plaud_poller import _parse_recent_ids, _parse_file_metadata, _extract_duration_sec
+from plaud_poller import (
+    _parse_recent_ids,
+    _parse_file_metadata,
+    _extract_duration_sec,
+    _id_variants,
+    _init_db,
+    _is_processed,
+    _get_status,
+    _mark_processed,
+)
 
 
 # ── _parse_recent_ids ─────────────────────────────────────────────────────────
@@ -86,6 +95,97 @@ class TestParseRecentIds:
         output = "\n".join(ids)
         result = _parse_recent_ids(output)
         assert result == ids
+
+    # ── prefixed IDs (Plaud CLI format change ~2026-09-15) ────────────────────
+
+    def test_line_parse_accepts_prefixed_id(self):
+        """Plaud emits `of_<32hex>` since ~2026-09-15 — must not be dropped."""
+        prefixed = "of_" + "a" * 32
+        assert _parse_recent_ids(prefixed) == [prefixed]
+
+    def test_prefixed_id_returned_verbatim_not_stripped(self):
+        """The CLI only resolves the exact spelling it printed."""
+        prefixed = "of_cecd2ad55fff73d23ac083c1e2f7c646"
+        output = f"  {prefixed}  09-14 Abstimmung: Heizungsanlage  2026-09-14  1h01m"
+        assert _parse_recent_ids(output) == [prefixed]
+
+    def test_line_parse_still_accepts_bare_id(self):
+        """Backwards compatible in case Plaud reverts the format."""
+        bare = "cecd2ad55fff73d23ac083c1e2f7c646"
+        assert _parse_recent_ids(bare) == [bare]
+
+    def test_real_world_recent_output(self):
+        """Verbatim `plaud recent` output as of 2026-09-18."""
+        output = (
+            "- Fetching recordings from the last 7 days...\n"
+            "\n"
+            "Recordings in the last 7 days: 2\n"
+            "\n"
+            "  of_9e2f24bf7ca2f447b3b2bbf6ddca4d4d  09-18 Gespraech: Struktur  2026-09-18  3m21s\n"
+            "  of_1dc2b2b20bd9f18a230d11f74aaabb6d  09-18 Abstimmung: TGA      2026-09-18  47m04s\n"
+        )
+        assert _parse_recent_ids(output) == [
+            "of_9e2f24bf7ca2f447b3b2bbf6ddca4d4d",
+            "of_1dc2b2b20bd9f18a230d11f74aaabb6d",
+        ]
+
+    def test_header_line_still_rejected(self):
+        """The 'Recordings in the last 7 days: N' header must not parse as an ID."""
+        assert _parse_recent_ids("Recordings in the last 7 days: 4") == []
+
+    def test_rejects_prefix_without_hex_body(self):
+        assert _parse_recent_ids("of_notahexstring") == []
+
+
+# ── _id_variants / dedup across the format change ─────────────────────────────
+
+class TestIdVariants:
+    def test_prefixed_id_yields_both_spellings(self):
+        assert _id_variants("of_" + "a" * 32) == ["of_" + "a" * 32, "a" * 32]
+
+    def test_bare_id_yields_itself_only(self):
+        assert _id_variants("a" * 32) == ["a" * 32]
+
+
+class TestDedupAcrossFormatChange:
+    def _db(self):
+        return _init_db(":memory:")
+
+    def test_fresh_db_accepts_write(self):
+        """_init_db must provide every column _mark_processed writes."""
+        conn = self._db()
+        _mark_processed(conn, "e" * 32, "2026-09-18T10:00:00", "HBE-1", "/opt/x", recording_title="Titel")
+        assert _is_processed(conn, "e" * 32) is True
+
+    def test_bare_row_matches_prefixed_lookup(self):
+        """The regression this fixes: recording processed pre-change, seen again post-change."""
+        conn = self._db()
+        bare = "cecd2ad55fff73d23ac083c1e2f7c646"
+        _mark_processed(conn, bare, "2026-09-14T12:05:19", "HBE-3042", "/opt/x")
+        assert _is_processed(conn, "of_" + bare) is True
+
+    def test_prefixed_row_matches_prefixed_lookup(self):
+        conn = self._db()
+        prefixed = "of_" + "b" * 32
+        _mark_processed(conn, prefixed, "2026-09-18T09:59:21", "HBE-3100", "/opt/x")
+        assert _is_processed(conn, prefixed) is True
+
+    def test_unknown_recording_is_not_processed(self):
+        conn = self._db()
+        assert _is_processed(conn, "of_" + "c" * 32) is False
+
+    def test_status_lookup_matches_across_spellings(self):
+        """Cancelled recordings must stay cancelled after the format change."""
+        conn = self._db()
+        bare = "d" * 32
+        conn.execute(
+            "INSERT INTO plaud_processed_recordings"
+            " (recording_id, start_at, processed_at, issue_identifier, account_home, status)"
+            " VALUES (?, '', '2026-09-01', 'HBE-1', '/opt/x', 'cancelled')",
+            (bare,),
+        )
+        conn.commit()
+        assert _get_status(conn, "of_" + bare) == "cancelled"
 
 
 # ── _parse_file_metadata ──────────────────────────────────────────────────────
