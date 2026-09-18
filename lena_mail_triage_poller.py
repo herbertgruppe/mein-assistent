@@ -1640,32 +1640,53 @@ def _titel_normalisieren(text: str) -> str:
 _asana_cache: Dict[str, Any] = {"stand": None, "titel": set()}
 
 
+_BETREFF_ZEILE = re.compile(r"^Betreff:\s*(.+)$", re.MULTILINE)
+
+
 def _asana_offene_titel(max_alter_sek: int = 600) -> set:
-    """Titel der offenen Aufgaben im Board — fuer die Dublettenpruefung."""
+    """
+    Erkennungsmerkmale der offenen Aufgaben im Board — fuer die Dublettenpruefung.
+
+    HBE-3120: Frueher wurden nur die Aufgaben-TITEL gesammelt und gegen den
+    Mail-Betreff verglichen. Das ging auf, solange der Titel der Betreff war.
+    Seit HBE-3061 formuliert das Modell den Titel ("Lageplan" wird zu "Lageplan
+    mit Faechern, Anzahl und Traglast erstellen") — seitdem konnten die beiden
+    Seiten gar nicht mehr uebereinstimmen und die Pruefung lief ins Leere. Am
+    18.09.2026 entstand dadurch eine zweite Aufgabe zur selben Mail.
+
+    Deshalb zusaetzlich der Betreff aus den Notizen: Jede erzeugte Aufgabe
+    traegt dort die Zeile "Betreff: <X>". Der Schluessel wirkt damit auch
+    rueckwirkend fuer Aufgaben, die vor diesem Fix entstanden sind.
+    """
     jetzt = datetime.now(timezone.utc)
     stand = _asana_cache.get("stand")
     if stand and (jetzt - stand).total_seconds() < max_alter_sek:
         return _asana_cache["titel"]
-    titel: set = set()
+    schluessel: set = set()
     if ASANA_TOKEN:
         try:
             resp = requests.get(
                 f"{ASANA_API}/tasks",
                 headers={"Authorization": f"Bearer {ASANA_TOKEN}"},
                 params={"project": ASANA_BOARD_GID,
-                        "opt_fields": "name,completed", "limit": 100},
+                        "opt_fields": "name,completed,notes", "limit": 100},
                 timeout=30,
             )
             if resp.status_code == 200:
                 for t in resp.json().get("data", []):
-                    if not t.get("completed"):
-                        titel.add(_titel_normalisieren(t.get("name", "")))
+                    if t.get("completed"):
+                        continue
+                    schluessel.add(_titel_normalisieren(t.get("name", "")))
+                    treffer = _BETREFF_ZEILE.search(t.get("notes") or "")
+                    if treffer:
+                        schluessel.add(_titel_normalisieren(treffer.group(1)))
             else:
                 logger.warning("Asana-Liste HTTP %d", resp.status_code)
         except Exception as exc:
             logger.warning("Asana-Liste nicht abrufbar: %s", exc)
-    _asana_cache.update(stand=jetzt, titel=titel)
-    return titel
+    schluessel.discard("")
+    _asana_cache.update(stand=jetzt, titel=schluessel)
+    return schluessel
 
 
 _asana_section_cache: Dict[str, Any] = {"gid": None, "geprueft": False}
@@ -1772,10 +1793,16 @@ def _asana_aufgabe(betreff: str, sender_name: str, sender_email: str,
 
     # HBE-3052: Dublettenpruefung. Am 15.09. entstanden drei Aufgaben fuer zwei
     # Vorgaenge, davon zwei Dubletten einer bereits vorhandenen Aufgabe.
-    norm = _titel_normalisieren(betreff)
-    if norm and norm in _asana_offene_titel():
-        logger.info("Asana: Aufgabe '%s' existiert bereits — uebersprungen.", betreff[:60])
-        return None
+    # HBE-3120: Betreff UND formulierten Titel pruefen. Der Betreff ist der
+    # verlaessliche Schluessel — er steht in den Notizen jeder Aufgabe. Der
+    # Titel kommt vom Modell und faellt bei jedem Lauf anders aus.
+    vorhanden = _asana_offene_titel()
+    for kandidat in (betreff, titel):
+        norm = _titel_normalisieren(kandidat or "")
+        if norm and norm in vorhanden:
+            logger.info("Asana: Aufgabe zu '%s' existiert bereits — uebersprungen.",
+                        (betreff or "")[:60])
+            return None
     name = (titel or betreff)[:120]
     notes = ((f"{kontext}\n\n" if kontext else "")
              + f"Aus einer E-Mail vom {empfangen[:10]}.\n\n"
@@ -1991,9 +2018,9 @@ def konsequenz_ausfuehren(mail: Dict[str, Any], schritt: int,
             ergebnis["hinweis"] = "Mail archiviert" if archiviert else "Mail bleibt liegen"
             if state is not None:
                 _rueckfrage(
-                    f"📋 *Aufgabe angelegt*\n\n{titel}\n"
-                    + (f"_Fällig: {frist}_\n" if frist else "")
-                    + ("_Mail abgelegt._" if archiviert else "_Mail bleibt im Posteingang._")
+                    f"📋 Aufgabe angelegt\n\n{titel}\n"  # HBE-3120: Klartext, wir senden ohne parse_mode
+                    + (f"Fällig: {frist}\n" if frist else "")
+                    + ("Mail abgelegt." if archiviert else "Mail bleibt im Posteingang.")
                     + f"\n\nhttps://app.asana.com/0/{ASANA_BOARD_GID}/{gid}",
                     state)
             return ergebnis
@@ -2004,8 +2031,8 @@ def konsequenz_ausfuehren(mail: Dict[str, Any], schritt: int,
                 ergebnis["hinweis"] = f"Empfaenger '{empfaenger}' nicht aufloesbar"
                 if state is not None:
                     _rueckfrage(
-                        f"↪️ *An wen weiterleiten?*\n\n"
-                        f"_{s_name or s_mail}_\n*{betreff[:80]}*\n\n"
+                        f"↪️ An wen weiterleiten?\n\n"
+                        f"{s_name or s_mail}\n{betreff[:80]}\n\n"
                         + (f"Vorschlag war „{empfaenger}“, konnte ich aber nicht zuordnen.\n\n"
                            if empfaenger else "Ich konnte niemanden zuordnen.\n\n")
                         + "Antwort: Name — oder andere Kategorie nennen "
@@ -2033,8 +2060,8 @@ def konsequenz_ausfuehren(mail: Dict[str, Any], schritt: int,
             # eine brauchbare Frage mit Optionen — die gehoert zu Sven, nicht ins Log.
             if state is not None and frage:
                 _rueckfrage(
-                    f"✏️ *Wie soll ich antworten?*\n\n"
-                    f"_{s_name or s_mail}_\n*{betreff[:80]}*\n\n{frage[:600]}",
+                    f"✏️ Wie soll ich antworten?\n\n"
+                    f"{s_name or s_mail}\n{betreff[:80]}\n\n{frage[:600]}",
                     state)
             return ergebnis
         if stufe == "geruest":
@@ -2154,12 +2181,12 @@ def regel_vorschlagen(state: Dict[str, Any], absender: str, betreff: str,
     # outbound_messages-Tracking, und Svens "ja" erreichte Lena ohne den
     # zitierten Vorschlag. Sie haette gar nicht gewusst, worauf er antwortet.
     _rueckfrage(
-        f"📌 *Regel vorschlagen?*\n\n"
+        f"📌 Regel vorschlagen?\n\n"
         f"Du hast das jetzt {muster.get('count', LEARN_THRESHOLD)}× auf "
-        f"*{aktion}* gesetzt.\n\n"
-        f"Regel: {beschreibung} → *{aktion}*\n"
-        f"_Hätte {treffer} Mails der letzten Monate betroffen._\n\n"
-        f"Antwort: *ja* — oder korrigiert tippen",
+        f"{aktion} gesetzt.\n\n"
+        f"Regel: {beschreibung} → {aktion}\n"
+        f"Hätte {treffer} Mails der letzten Monate betroffen.\n\n"
+        f"Antwort: ja — oder korrigiert tippen",
         state,
     )
     vorgeschlagen[schluessel] = datetime.now(timezone.utc).isoformat()
@@ -2776,10 +2803,10 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
         if priority == "hoch":
             counters["high_priority"] += 1
             _tg_alert(
-                f"⚠️ *Lena-Triage Hoch-Prio*\n"
-                f"_Von:_ {m.get('sender_name') or m.get('sender_email','')}\n"
-                f"_Betreff:_ {(m.get('subject') or '')[:100]}\n"
-                f"_Regel:_ `{rule_id}`",
+                f"⚠️ Lena-Triage Hoch-Prio\n"
+                f"Von: {m.get('sender_name') or m.get('sender_email','')}\n"
+                f"Betreff: {(m.get('subject') or '')[:100]}\n"
+                f"Regel: {rule_id}",
                 state,
             )
 
