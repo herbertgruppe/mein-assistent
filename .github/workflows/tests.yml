@@ -22,8 +22,12 @@ jobs:
         with:
           python-version: '3.13'
 
+      # HBE-3107: fastapi, python-multipart und PyYAML fehlten. Ohne sie laesst
+      # sich api.py nicht importieren und lena_mail_triage_poller.py findet
+      # seine Persona-Konfiguration nicht — beide Testgruppen liefen deshalb
+      # hier nie mit, obwohl sie im Repo liegen und gruen sind.
       - name: Install dependencies
-        run: pip install pytest requests python-dotenv
+        run: pip install pytest requests python-dotenv "fastapi>=0.141.1" python-multipart PyYAML
 
       - name: Run regression tests (HBE-273 / HBE-277 — Dragan-Halluzinations-Klasse)
         run: python -m pytest tests/regression -v
@@ -33,3 +37,14 @@ jobs:
 
       - name: Run plaud_poller unit tests (HBE-853)
         run: python -m pytest tests/test_plaud_poller.py -v
+
+      # HBE-3107: Am 16.09.2026 hat ein Default-Wert im Telegram-Endpoint einen
+      # Sendesturm ausgeloest — 130 Versuche, 14 Testnachrichten an Sven. Die
+      # Tests zu diesem Endpoint lagen im Repo, liefen hier aber nicht mit.
+      # Glob statt Dateiliste, damit kuenftige Tests dieser Gruppen automatisch
+      # erfasst werden.
+      - name: Run Telegram tests (HBE-3107 — Sendesturm durch MarkdownV2-Default)
+        run: python -m pytest tests/*telegram*.py -v
+
+      - name: Run mail-triage tests (HBE-3044 ff. — 5-Schritte-Regel, Regeln, Konsequenzen)
+        run: python -m pytest tests/test_mail_triage_*.py -v

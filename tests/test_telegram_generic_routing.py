@@ -278,7 +278,7 @@ class GenericSendEndpointTest(unittest.TestCase):
         self.assertTrue(resp.success)
         self.assertEqual(resp.telegram_msg_id, 42)
         m_send.assert_called_once_with("fake-token", "111222333", "Hallo Florian",
-                                        reply_markup=None, parse_mode="MarkdownV2")
+                                        reply_markup=None, parse_mode=None)  # HBE-3107: kein Default mehr
 
     def test_send_tracks_in_outbound_messages(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -309,7 +309,7 @@ class GenericSendEndpointTest(unittest.TestCase):
                  mock.patch.object(self.api, "_tg_agent_send", return_value=55) as m_send:
                 self.api.telegram_agent_send(_NEW_AGENT_SLUG, req, _key="test-key")
         m_send.assert_called_once_with("fake-token", "111222333", "Hallo Florian",
-                                        reply_markup=keyboard, parse_mode="MarkdownV2")
+                                        reply_markup=keyboard, parse_mode=None)  # HBE-3107: kein Default mehr
 
     def test_send_uses_correct_token_for_lena(self):
         """telegram_agent_send('lena', ...) passes lena's bot token to _tg_agent_send."""
