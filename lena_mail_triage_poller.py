@@ -1846,8 +1846,11 @@ def _rueckfrage(text: str, state: Dict[str, Any]) -> bool:
         # laeuft jede Rueckfrage ins Leere.
         resp = requests.post(f"{API_URL.rstrip('/')}/api/lena/telegram/send",
                              headers=_api_headers(), timeout=30,
-                             json={"chat_id": TG_ADMIN_CHAT, "text": text,
-                                   "parse_mode": "Markdown"})
+                             # HBE-3107: ohne parse_mode. Rueckfragen enthalten
+                             # Betreffzeilen und Namen — dort stehen Klammern,
+                             # Bindestriche und Punkte, die Telegram im Markdown-
+                             # Modus als kaputte Auszeichnung zurueckweist.
+                             json={"chat_id": TG_ADMIN_CHAT, "text": text})
         if resp.status_code != 200:
             logger.warning("Rueckfrage HTTP %d: %s", resp.status_code, resp.text[:150])
             return False
@@ -2410,7 +2413,7 @@ def _tg_alert(text: str, state: Dict[str, Any]) -> None:
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TG_ADMIN_CHAT, "text": text, "parse_mode": "Markdown"},
+            json={"chat_id": TG_ADMIN_CHAT, "text": text},  # HBE-3107: siehe _rueckfrage
             timeout=15,
         )
         if r.status_code == 200:
