@@ -23,7 +23,25 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Gültige Status-Werte (siehe Schema)
-VALID_STATUSES = {"draft", "in_review", "approved", "rejected", "finalized"}
+#
+# pending_assignment/assigned gehören zur Zuordnungs-Stufe (zweistufiger
+# Workflow): Sven ordnet Termin, Asana-Board und Teilnehmer zu und korrigiert
+# die Sprecher in Plaud, BEVOR das Transkript gezogen wird. Vorher war die
+# Reihenfolge umgekehrt, wodurch jede Sprecherkorrektur in Plaud folgenlos
+# blieb — das Transkript war zu dem Zeitpunkt schon geholt.
+VALID_STATUSES = {
+    "pending_assignment",
+    "assigned",
+    "draft",
+    "in_review",
+    "approved",
+    "rejected",
+    "finalized",
+}
+
+# Status, in denen noch kein Protokolltext existiert und die Review-Seite im
+# Zuordnungs-Modus rendert.
+ASSIGNMENT_STATUSES = {"pending_assignment", "assigned"}
 
 # Token-Gültigkeit für Reviewer-Links
 TOKEN_TTL_DAYS = 30
@@ -110,8 +128,36 @@ class ProtocolsDB:
             schema = _SCHEMA_FALLBACK
         with self._get_connection() as conn:
             conn.executescript(schema)
+            self._migrate(conn)
             conn.commit()
         logger.info(f"[ProtocolsDB] ✓ Datenbank initialisiert: {self.db_path}")
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """
+        Additive Spalten-Migrationen für bestehende Datenbanken.
+
+        executescript() mit CREATE TABLE IF NOT EXISTS legt bei einer bereits
+        existierenden Tabelle keine neuen Spalten an — deshalb hier einzeln,
+        idempotent, nach dem im Repo etablierten try/except-Muster.
+        """
+        for column, ddl in (
+            # Der Plaud-Aufnahmename. Ohne ihn lässt sich die Aufnahme in der
+            # Plaud-App nicht wiederfinden, um die Sprecher zu korrigieren.
+            ("recording_title", "ALTER TABLE protocols ADD COLUMN recording_title TEXT"),
+            ("recording_duration", "ALTER TABLE protocols ADD COLUMN recording_duration TEXT"),
+            ("assigned_at", "ALTER TABLE protocols ADD COLUMN assigned_at TEXT"),
+            ("reminder_sent_at", "ALTER TABLE protocols ADD COLUMN reminder_sent_at TEXT"),
+            (
+                "reminder_count",
+                "ALTER TABLE protocols ADD COLUMN reminder_count INTEGER NOT NULL DEFAULT 0",
+            ),
+        ):
+            try:
+                conn.execute(ddl)
+                logger.info("[ProtocolsDB] Migration: Spalte %s ergänzt", column)
+            except sqlite3.OperationalError:
+                pass  # Spalte existiert bereits
 
     # ------------------------------------------------------------------
     # Helpers
@@ -214,6 +260,72 @@ class ProtocolsDB:
             "expires_at": expires_at,
         }
 
+    def create_assignment(
+        self,
+        meeting_name: str,
+        meeting_datetime: str,
+        source: str,
+        recording_id: Optional[str] = None,
+        recording_title: Optional[str] = None,
+        recording_duration: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Legt die Zuordnungs-Stufe an — Stufe 1 des zweistufigen Workflows.
+
+        Anders als create_draft() entsteht hier noch kein Protokolltext: die
+        Zeile hält nur fest, dass eine Aufnahme existiert und auf Svens
+        Zuordnung wartet. Erst nach confirm_assignment() zieht Mara das
+        Transkript — bis dahin kann in Plaud die Sprecherzuordnung korrigiert
+        werden, ohne dass die Korrektur ins Leere läuft.
+
+        draft_markdown/current_markdown sind im Schema NOT NULL und bleiben
+        deshalb vorerst leer.
+        """
+        draft_id = str(uuid.uuid4())
+        reviewer_token = secrets.token_urlsafe(32)
+        now = _utcnow_iso()
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(days=TOKEN_TTL_DAYS)
+        ).isoformat()
+
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO protocols (
+                    id, source, recording_id, recording_title, recording_duration,
+                    meeting_name, meeting_datetime,
+                    teilnehmer, draft_markdown, current_markdown,
+                    status, reviewer_token, reviewer_emails, expires_at,
+                    last_modified, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '', 'pending_assignment', ?, ?, ?, ?, ?)
+                """,
+                (
+                    draft_id,
+                    source,
+                    recording_id,
+                    recording_title,
+                    recording_duration,
+                    meeting_name,
+                    meeting_datetime,
+                    json.dumps([], ensure_ascii=False),
+                    reviewer_token,
+                    json.dumps([], ensure_ascii=False),
+                    expires_at,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+
+        logger.info(
+            "[ProtocolsDB] ✓ Zuordnung angelegt: %s (%s)", draft_id, meeting_name
+        )
+        return {
+            "id": draft_id,
+            "reviewer_token": reviewer_token,
+            "expires_at": expires_at,
+        }
+
     # ------------------------------------------------------------------
     # Read
     # ------------------------------------------------------------------
@@ -275,9 +387,155 @@ class ProtocolsDB:
                 )
             return [self._row_to_dict(row) for row in cursor.fetchall()]
 
+    def get_by_recording_id(self, recording_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Holt das jüngste Protokoll zu einer Plaud-Aufnahme.
+
+        Der Poller nutzt das, um nicht zweimal dieselbe Zuordnung anzulegen,
+        und Mara, um den Draft-Text in die richtige Zeile zu schreiben.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM protocols WHERE recording_id = ?"
+                " ORDER BY created_at DESC LIMIT 1",
+                (recording_id,),
+            )
+            row = cursor.fetchone()
+            return self._row_to_dict(row) if row else None
+
+    def list_pending_assignments(
+        self, older_than_hours: Optional[float] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Alle Aufnahmen, die noch auf Svens Zuordnung warten.
+
+        Mit older_than_hours nur die, deren letzte Erinnerung (ersatzweise:
+        deren Anlage) länger zurückliegt — die Grundlage des Nachfass-Laufs.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM protocols WHERE status = 'pending_assignment'"
+                " ORDER BY created_at ASC"
+            )
+            rows = [self._row_to_dict(row) for row in cursor.fetchall()]
+
+        if older_than_hours is None:
+            return rows
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
+        due: List[Dict[str, Any]] = []
+        for row in rows:
+            reference = row.get("reminder_sent_at") or row.get("created_at")
+            try:
+                ts = datetime.fromisoformat(reference)
+            except (TypeError, ValueError):
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts <= cutoff:
+                due.append(row)
+        return due
+
     # ------------------------------------------------------------------
     # Update
     # ------------------------------------------------------------------
+    def confirm_assignment(
+        self,
+        draft_id: str,
+        event_id: Optional[str],
+        teilnehmer: List[str],
+        asana_board_gid: Optional[str] = None,
+        asana_section_gid: Optional[str] = None,
+        create_asana_task: bool = True,
+        ablageort: Optional[str] = None,
+        meeting_name: Optional[str] = None,
+        meeting_datetime: Optional[str] = None,
+    ) -> bool:
+        """
+        Übernimmt Svens Zuordnung und gibt die Aufnahme für Mara frei.
+
+        Die hier bestätigte Teilnehmerliste ist für Mara bindend: sie ist die
+        einzige erlaubte Quelle für Sprecher- und Teilnehmernamen. Ein Name,
+        der im Transkript auftaucht, aber nicht in dieser Liste steht, wird
+        nicht zugeordnet, sondern als offene Frage markiert.
+
+        meeting_name/meeting_datetime sind optional — sie kommen aus dem
+        gewählten Outlook-Termin und ersetzen dann den Plaud-Titel und die
+        Aufnahmezeit, die beide ungenau sein können.
+        """
+        now = _utcnow_iso()
+        fields = [
+            "event_id = ?",
+            "teilnehmer = ?",
+            "asana_board_gid = ?",
+            "asana_section_gid = ?",
+            "create_asana_task = ?",
+            "status = 'assigned'",
+            "assigned_at = ?",
+            "last_modified = ?",
+        ]
+        params: List[Any] = [
+            event_id,
+            json.dumps(teilnehmer or [], ensure_ascii=False),
+            asana_board_gid,
+            asana_section_gid,
+            1 if create_asana_task else 0,
+            now,
+            now,
+        ]
+        if ablageort is not None:
+            fields.append("ablageort = ?")
+            params.append(ablageort)
+        if meeting_name:
+            fields.append("meeting_name = ?")
+            params.append(meeting_name)
+        if meeting_datetime:
+            fields.append("meeting_datetime = ?")
+            params.append(meeting_datetime)
+        params.append(draft_id)
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                f"UPDATE protocols SET {', '.join(fields)} WHERE id = ?",
+                params,
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def attach_draft_markdown(
+        self, draft_id: str, markdown: str, modified_by: str = "mara"
+    ) -> bool:
+        """
+        Setzt den von Mara erzeugten Protokolltext in eine zugeordnete Zeile
+        und hebt sie damit auf 'draft' — den Zustand, in dem der bestehende
+        Review-Editor übernimmt.
+        """
+        now = _utcnow_iso()
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE protocols
+                SET draft_markdown = ?, current_markdown = ?, status = 'draft',
+                    last_modified = ?, last_modified_by = ?
+                WHERE id = ?
+                """,
+                (markdown, markdown, now, modified_by, draft_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def mark_reminder_sent(self, draft_id: str) -> bool:
+        """Vermerkt eine verschickte Erinnerung für den Nachfass-Rhythmus."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE protocols"
+                " SET reminder_sent_at = ?, reminder_count = COALESCE(reminder_count, 0) + 1"
+                " WHERE id = ?",
+                (_utcnow_iso(), draft_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
     def update_markdown(
         self, draft_id: str, markdown: str, modified_by: str = "reviewer"
     ) -> bool:

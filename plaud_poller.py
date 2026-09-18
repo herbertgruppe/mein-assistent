@@ -55,6 +55,15 @@ PC_PROTOKOLL_AGENT_ID = os.getenv("PAPERCLIP_PROTOKOLL_AGENT_ID", "")
 TG_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN",    "")
 TG_ADMIN_CHAT = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
 
+# ── Zweistufiger Workflow ─────────────────────────────────────────────────────
+# Stufe 1 meldet die Aufnahme und wartet auf Svens Zuordnung; erst danach zieht
+# Mara das Transkript. Grund: eine Sprecherkorrektur in Plaud wirkt nur, solange
+# das Transkript noch nicht geholt ist. Mit TWO_STAGE=false laeuft der alte
+# einstufige Weg (Issue direkt an Mara) unveraendert weiter.
+TWO_STAGE        = os.getenv("PLAUD_TWO_STAGE", "false").strip().lower() in ("1", "true", "yes")
+MA_API_URL       = os.getenv("MEIN_ASSISTENT_API_URL", "http://127.0.0.1:8502").rstrip("/")
+MA_API_KEY       = os.getenv("API_SECRET_KEY", "")
+
 # Multi-Account-Format: "home_dir:agent_id,home_dir2:agent_id2"
 # home_dir ist das HOME-Verzeichnis fuer den jeweiligen plaud-Token (~/.plaud/tokens.json)
 PLAUD_ACCOUNTS_ENV = os.getenv("PLAUD_ACCOUNTS", f"/var/lib/plaud:{PC_PROTOKOLL_AGENT_ID}")
@@ -443,6 +452,58 @@ def _create_pc_issue(payload: dict) -> Optional[str]:
     return str(data.get("identifier") or data.get("id", "?"))
 
 
+# ── Zweistufiger Workflow: Stufe 1 ─────────────────────────────────────────────
+def _create_assignment(
+    recording_id: str,
+    title: str,
+    start_at: str,
+    duration_sec: int,
+) -> Optional[str]:
+    """
+    Meldet eine neue Aufnahme zur Zuordnung an und schickt Sven den Link.
+
+    Bewusst ohne Transkript und ohne Zusammenfassung: beides wuerde die
+    Sprecherkorrektur in Plaud wirkungslos machen, weil der Text dann schon
+    gezogen waere. Mara kommt erst zum Zug, wenn Sven bestaetigt hat.
+
+    Returns eine kurze Referenz fuer die state.db, oder None bei Fehlschlag.
+    """
+    if not MA_API_KEY:
+        logger.error("[assignment] API_SECRET_KEY fehlt — Zuordnung nicht moeglich")
+        return None
+
+    resp = requests.post(
+        f"{MA_API_URL}/api/protocols/assignment",
+        headers={"X-API-Key": MA_API_KEY, "Content-Type": "application/json"},
+        json={
+            "meeting_name": title,
+            "meeting_datetime": start_at,
+            "source": "plaud-poller",
+            "recording_id": recording_id,
+            "recording_title": title,
+            "recording_duration": _format_duration(duration_sec) if duration_sec else None,
+        },
+        timeout=20,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    if not data.get("created", True):
+        logger.info("[assignment] %s war bereits gemeldet — keine zweite Meldung", recording_id)
+        return f"assignment:{data.get('draft_id', '?')}"
+
+    _tg_alert(
+        f"🎙 <b>Neue Aufnahme wartet auf Zuordnung</b>\n"
+        f"<b>{title}</b>\n"
+        f"Dauer: {_format_duration(duration_sec) if duration_sec else 'unbekannt'}\n\n"
+        f"<b>Bitte zuerst in Plaud die Sprecher pruefen</b> — Aufnahme "
+        f"„{title}\". Danach hier zuordnen:\n"
+        f"{data.get('assignment_url', '')}\n\n"
+        f"Das Transkript wird erst nach deiner Bestaetigung gezogen."
+    )
+    return f"assignment:{data.get('draft_id', '?')}"
+
+
 # ── Telegram ───────────────────────────────────────────────────────────────────
 def _tg_alert(text: str) -> None:
     if not TG_BOT_TOKEN or not TG_ADMIN_CHAT:
@@ -691,6 +752,25 @@ def _poll_account(
             skipped.append(recording_id)
             _title = meta.get("name") or meta.get("title") or None
             _mark_processed(db, recording_id, meta.get("start_at", ""), "skipped:demo_recording", home_dir, recording_title=_title)
+            continue
+
+        _title = meta.get("name") or meta.get("title") or recording_id
+        _start = meta.get("start_at") or meta.get("date") or meta.get("created_at") or ""
+
+        if TWO_STAGE:
+            # Stufe 1: nur melden. Kein Transkript, keine Zusammenfassung — beides
+            # wuerde die Sprecherkorrektur in Plaud wirkungslos machen, weil der
+            # Text dann schon gezogen waere.
+            try:
+                ref = _create_assignment(recording_id, _title, _start, duration_sec)
+            except Exception as exc:
+                logger.error("Assignment creation failed for %s: %s", recording_id, exc)
+                errors.append(recording_id)
+                continue
+            if ref:
+                created_issues.append(ref)
+                _mark_processed(db, recording_id, _start, ref, home_dir, recording_title=_title)
+                logger.info("Zuordnung angelegt fuer %s (%s)", recording_id, ref)
             continue
 
         # Get summary (best-effort — don't fail if unavailable)
