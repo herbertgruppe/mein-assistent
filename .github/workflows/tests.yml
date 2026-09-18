@@ -22,12 +22,14 @@ jobs:
         with:
           python-version: '3.13'
 
-      # HBE-3107: fastapi, python-multipart und PyYAML fehlten. Ohne sie laesst
-      # sich api.py nicht importieren und lena_mail_triage_poller.py findet
-      # seine Persona-Konfiguration nicht — beide Testgruppen liefen deshalb
-      # hier nie mit, obwohl sie im Repo liegen und gruen sind.
+      # HBE-3107: fastapi, python-multipart, jinja2 und PyYAML fehlten. Ohne sie
+      # laesst sich api.py nicht importieren und lena_mail_triage_poller.py
+      # findet seine Persona-Konfiguration nicht — beide Testgruppen liefen
+      # deshalb hier nie mit, obwohl sie im Repo liegen und gruen sind.
+      # Die Liste ist in einer frischen venv gegen den vollen Testumfang
+      # geprueft, nicht geraten. Alle vier stehen ohnehin in requirements.txt.
       - name: Install dependencies
-        run: pip install pytest requests python-dotenv "fastapi>=0.141.1" python-multipart PyYAML
+        run: pip install pytest requests python-dotenv "fastapi>=0.141.1" python-multipart PyYAML jinja2
 
       - name: Run regression tests (HBE-273 / HBE-277 — Dragan-Halluzinations-Klasse)
         run: python -m pytest tests/regression -v
