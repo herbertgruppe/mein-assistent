@@ -44,6 +44,7 @@ class _Antwort:
 def board(monkeypatch):
     """Ein Board mit genau der Aufgabe vom 18.09. um 07:06."""
     monkeypatch.setattr(poller, "ASANA_TOKEN", "tok")
+    monkeypatch.setattr(poller, "_asana_section_gid", lambda: "sec-1")
     poller._asana_cache.clear()
     monkeypatch.setattr(poller.requests, "get", lambda *a, **k: _Antwort([
         {"name": "Anforderungen für Saldenliste Controlling Dashboard aufzählen",
@@ -96,8 +97,56 @@ def test_gleicher_titel_bei_anderem_betreff_greift_auch(board, monkeypatch):
     assert not angelegt
 
 
+# ── Reichweite der Abfrage (HBE-3122) ─────────────────────────────────────
+# Die Abfrage ging ueber das ganze Board und war bei 100 Aufgaben
+# abgeschnitten. Svens Board hat mehr — die Mail-Aufgaben lagen jenseits der
+# Grenze. Die Pruefung sah ausgerechnet die Aufgaben nicht, gegen die sie
+# schuetzen soll. Aufgefallen erst beim Abgleich mit dem echten Board.
+
+def test_fragt_die_section_ab_wenn_es_sie_gibt(monkeypatch):
+    monkeypatch.setattr(poller, "ASANA_TOKEN", "tok")
+    monkeypatch.setattr(poller, "_asana_section_gid", lambda: "sec-42")
+    poller._asana_cache.clear()
+    gerufen = {}
+
+    def fake(url, **kw):
+        gerufen["url"] = url
+        return _Antwort([])
+    monkeypatch.setattr(poller.requests, "get", fake)
+    poller._asana_offene_titel()
+    assert "/sections/sec-42/tasks" in gerufen["url"], \
+        "Ohne Section-Abfrage bleibt die Pruefung bei 100 Board-Aufgaben blind"
+
+
+def test_ohne_section_wird_geblaettert(monkeypatch):
+    """Fallback aufs Board — dann aber vollstaendig."""
+    monkeypatch.setattr(poller, "ASANA_TOKEN", "tok")
+    monkeypatch.setattr(poller, "_asana_section_gid", lambda: None)
+    poller._asana_cache.clear()
+    seiten = [
+        {"data": [{"name": "Seite eins", "completed": False}],
+         "next_page": {"uri": "https://app.asana.com/api/1.0/tasks?offset=x"}},
+        {"data": [{"name": "Seite zwei", "completed": False}], "next_page": None},
+    ]
+    aufrufe = []
+
+    class R:
+        status_code = 200
+        def __init__(self, d): self._d = d
+        def json(self): return self._d
+
+    def fake(url, **kw):
+        aufrufe.append(url)
+        return R(seiten[len(aufrufe) - 1])
+    monkeypatch.setattr(poller.requests, "get", fake)
+    s = poller._asana_offene_titel()
+    assert len(aufrufe) == 2, "Die zweite Seite muss geholt werden"
+    assert poller._titel_normalisieren("Seite zwei") in s
+
+
 def test_erledigte_aufgaben_blockieren_nicht(monkeypatch):
     monkeypatch.setattr(poller, "ASANA_TOKEN", "tok")
+    monkeypatch.setattr(poller, "_asana_section_gid", lambda: "sec-1")
     poller._asana_cache.clear()
     monkeypatch.setattr(poller.requests, "get", lambda *a, **k: _Antwort([
         {"name": "Alter Titel", "completed": True, "notes": NOTIZEN},
@@ -107,6 +156,7 @@ def test_erledigte_aufgaben_blockieren_nicht(monkeypatch):
 
 def test_notizen_ohne_betreffzeile_stoeren_nicht(monkeypatch):
     monkeypatch.setattr(poller, "ASANA_TOKEN", "tok")
+    monkeypatch.setattr(poller, "_asana_section_gid", lambda: "sec-1")
     poller._asana_cache.clear()
     monkeypatch.setattr(poller.requests, "get", lambda *a, **k: _Antwort([
         {"name": "Handaufgabe", "completed": False, "notes": "von Hand angelegt"},
