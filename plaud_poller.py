@@ -360,7 +360,13 @@ def _parse_file_metadata(output: str) -> Dict[str, Any]:
 def _extract_duration_sec(meta: Dict[str, Any]) -> int:
     """
     Extract duration in seconds from metadata dict.
-    Handles: int seconds, "HH:MM:SS", "MM:SS", "Xs" strings.
+
+    Handles: int seconds, "1h32m", "47m04s", "3m21s", "HH:MM:SS", "MM:SS", "Xs".
+
+    The compound form ("1h32m") is what `plaud file` actually prints. It was
+    not covered, so every recording came back as 0 seconds — and because the
+    skip rule reads ``0 < duration < MIN``, the minimum-duration filter never
+    fired. Accidental ten-second recordings went through the whole pipeline.
     """
     raw = meta.get("duration") or meta.get("duration_sec") or meta.get("length") or ""
     if not raw:
@@ -370,6 +376,17 @@ def _extract_duration_sec(meta: Dict[str, Any]) -> int:
         return int(raw)
 
     raw_str = str(raw).strip()
+
+    # Compound form first — "1h32m", "47m04s", "3m21s", "90s".
+    # Checked before the plain-number branch below, which would otherwise
+    # swallow "90s" and leave the rest unparsed.
+    compound = re.fullmatch(
+        r'(?:(\d+)\s*h)?\s*(?:(\d+)\s*m(?:in)?)?\s*(?:(\d+)\s*s(?:ec)?)?',
+        raw_str, re.IGNORECASE,
+    )
+    if compound and any(compound.groups()):
+        h, m, s = (int(g) if g else 0 for g in compound.groups())
+        return h * 3600 + m * 60 + s
 
     # "123s" or "123" pure number
     if re.match(r'^\d+\.?\d*s?$', raw_str):

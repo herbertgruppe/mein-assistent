@@ -280,6 +280,38 @@ class TestExtractDurationSec:
     def test_empty_string(self):
         assert _extract_duration_sec({"duration": ""}) == 0
 
+    # ── Verbund-Format: das, was `plaud file` tatsaechlich ausgibt ──────────
+
+    def test_hours_and_minutes(self):
+        """1h32m — die Form, an der die Dauer-Erkennung bisher scheiterte."""
+        assert _extract_duration_sec({"duration": "1h32m"}) == 5520
+
+    def test_minutes_and_seconds(self):
+        assert _extract_duration_sec({"duration": "47m04s"}) == 2824
+
+    def test_short_recording(self):
+        assert _extract_duration_sec({"duration": "3m21s"}) == 201
+
+    def test_leading_zero_minutes(self):
+        assert _extract_duration_sec({"duration": "1h01m"}) == 3660
+
+    def test_seconds_only_compound(self):
+        assert _extract_duration_sec({"duration": "45s"}) == 45
+
+    def test_minutes_only(self):
+        assert _extract_duration_sec({"duration": "12m"}) == 720
+
+    def test_full_compound(self):
+        assert _extract_duration_sec({"duration": "2h05m30s"}) == 7530
+
+    def test_below_minimum_is_detectable(self):
+        """
+        Der Zweck der Aenderung: eine 45-Sekunden-Aufnahme muss als kurz
+        erkennbar sein. Vorher ergab sie 0 und rutschte an der Skip-Regel
+        `0 < duration < MIN` vorbei.
+        """
+        assert 0 < _extract_duration_sec({"duration": "45s"}) < plaud_poller.MIN_DURATION_SEC
+
 
 # ── Dead-man switch ───────────────────────────────────────────────────────────
 
