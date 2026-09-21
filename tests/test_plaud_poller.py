@@ -638,6 +638,61 @@ class TestCreateAssignment:
         assert plaud_poller._create_assignment("of_x", "T", "2026-09-18T09:59:21", 60) is None
 
 
+class TestAssignmentReminderTrigger:
+    class _Resp:
+        def __init__(self, status=200, payload=None, text=""):
+            self.status_code = status
+            self._payload = payload or {}
+            self.text = text
+
+        def json(self):
+            return self._payload
+
+    def test_calls_endpoint_with_api_key(self, monkeypatch):
+        monkeypatch.setattr(plaud_poller, "MA_API_KEY", "k")
+        seen = {}
+
+        def fake_post(url, **kwargs):
+            seen["url"] = url
+            seen["headers"] = kwargs.get("headers", {})
+            return self._Resp(200, {"checked": 0, "reminded": []})
+
+        monkeypatch.setattr(plaud_poller.requests, "post", fake_post)
+        plaud_poller._trigger_assignment_reminders()
+
+        assert seen["url"].endswith("/api/protocols/assignment-reminders")
+        assert seen["headers"].get("X-API-Key") == "k"
+
+    def test_without_api_key_does_nothing(self, monkeypatch):
+        monkeypatch.setattr(plaud_poller, "MA_API_KEY", "")
+        called = {"n": 0}
+        monkeypatch.setattr(
+            plaud_poller.requests, "post",
+            lambda *a, **k: called.__setitem__("n", called["n"] + 1),
+        )
+        plaud_poller._trigger_assignment_reminders()
+        assert called["n"] == 0
+
+    def test_errors_do_not_escalate(self, monkeypatch):
+        """Eine verpasste Erinnerung wird beim naechsten Zyklus nachgeholt —
+        sie darf den Poll-Lauf nicht abbrechen."""
+        monkeypatch.setattr(plaud_poller, "MA_API_KEY", "k")
+
+        def boom(*a, **k):
+            raise RuntimeError("API weg")
+
+        monkeypatch.setattr(plaud_poller.requests, "post", boom)
+        plaud_poller._trigger_assignment_reminders()  # darf nicht werfen
+
+    def test_http_error_does_not_escalate(self, monkeypatch):
+        monkeypatch.setattr(plaud_poller, "MA_API_KEY", "k")
+        monkeypatch.setattr(
+            plaud_poller.requests, "post",
+            lambda *a, **k: self._Resp(503, {}, "Telegram nicht konfiguriert"),
+        )
+        plaud_poller._trigger_assignment_reminders()
+
+
 class TestJwtExpiry:
     def test_reads_exp(self):
         assert _jwt_expiry(_jwt(1789741854)) == 1789741854
