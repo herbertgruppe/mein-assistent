@@ -36,6 +36,7 @@ VALID_STATUSES = {
     "in_review",
     "approved",
     "rejected",
+    "discarded",
     "finalized",
 }
 
@@ -543,6 +544,32 @@ class ProtocolsDB:
             cursor = conn.execute(
                 f"UPDATE protocols SET {', '.join(fields)} WHERE id = ?",
                 params,
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def discard(self, draft_id: str, reason: str = "Fehlaufnahme") -> bool:
+        """
+        Verwirft eine Aufnahme, zu der kein Protokoll entstehen soll.
+
+        Gedacht für versehentliche Mitschnitte — die Aufnahme bleibt in Plaud,
+        hier verschwindet sie aus dem Workflow. Ein eigener Status statt
+        'rejected': abgelehnt heißt „Protokoll überarbeiten", verworfen heißt
+        „hier kommt nie eines".
+
+        Die Zeile bleibt erhalten, damit nachvollziehbar ist, warum zu dieser
+        Aufnahme nichts existiert. Der Poller meldet sie nicht erneut, weil
+        ihr Eintrag in der state.db bestehen bleibt.
+        """
+        now = _utcnow_iso()
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE protocols
+                SET status = 'discarded', rejection_reason = ?, last_modified = ?
+                WHERE id = ?
+                """,
+                (reason, now, draft_id),
             )
             conn.commit()
             return cursor.rowcount > 0

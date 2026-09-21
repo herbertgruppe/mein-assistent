@@ -755,6 +755,92 @@ class TestAssignmentEndpoints:
         assert api_env["db"].get_by_id(created["draft_id"])["status"] == "pending_assignment"
 
 
+class TestDiscardRecording:
+    """
+    Fehlaufnahmen verwerfen — versehentlich angestoßene Mitschnitte, die nie
+    ein Meeting waren. Ohne diesen Weg blieben sie in der Zuordnungs-Stufe
+    liegen und würden alle drei Tage angemahnt.
+    """
+
+    def test_discard_removes_from_workflow(self, api_env):
+        created = _create_assignment(api_env)
+        token = _token_of(api_env, created["draft_id"])
+        resp = api_env["client"].post(
+            f"/api/protocols/{created['draft_id']}/discard?token={token}",
+            json={"reason": "Fehlaufnahme"},
+        )
+        assert resp.status_code == 200, resp.text
+
+        stored = api_env["db"].get_by_id(created["draft_id"])
+        assert stored["status"] == "discarded"
+        assert stored["rejection_reason"] == "Fehlaufnahme"
+
+    def test_discarded_is_never_reminded(self, api_env):
+        """Der eigentliche Zweck: keine Mahnung mehr für Fehlaufnahmen."""
+        created = _create_assignment(api_env)
+        token = _token_of(api_env, created["draft_id"])
+        api_env["client"].post(
+            f"/api/protocols/{created['draft_id']}/discard?token={token}", json={}
+        )
+        stamp = (datetime.now(timezone.utc) - timedelta(hours=200)).isoformat()
+        with api_env["db"]._get_connection() as conn:
+            conn.execute(
+                "UPDATE protocols SET created_at = ? WHERE id = ?",
+                (stamp, created["draft_id"]),
+            )
+            conn.commit()
+
+        assert api_env["db"].list_pending_assignments(older_than_hours=72) == []
+
+    def test_discard_works_without_body(self, api_env):
+        created = _create_assignment(api_env)
+        token = _token_of(api_env, created["draft_id"])
+        resp = api_env["client"].post(
+            f"/api/protocols/{created['draft_id']}/discard?token={token}"
+        )
+        assert resp.status_code == 200
+        assert api_env["db"].get_by_id(created["draft_id"])["status"] == "discarded"
+
+    def test_discard_after_assignment_still_allowed(self, api_env, mara_issues):
+        """Auch wenn Mara schon läuft — der Fehlgriff fällt oft erst dann auf."""
+        created = _create_assignment(api_env)
+        token = _token_of(api_env, created["draft_id"])
+        api_env["client"].post(
+            f"/api/protocols/{created['draft_id']}/assign?token={token}",
+            json={"event_id": "ev", "create_asana_task": False},
+        )
+        resp = api_env["client"].post(
+            f"/api/protocols/{created['draft_id']}/discard?token={token}", json={}
+        )
+        assert resp.status_code == 200
+
+    def test_discard_rejected_once_draft_exists(self, api_env):
+        """Ab 'draft' ist der Editor zuständig — dort heißt es „Ablehnen"."""
+        draft = _create_draft(api_env)
+        token = _token_of(api_env, draft["draft_id"])
+        resp = api_env["client"].post(
+            f"/api/protocols/{draft['draft_id']}/discard?token={token}", json={}
+        )
+        assert resp.status_code == 409
+
+    def test_discard_rejects_foreign_token(self, api_env):
+        mine = _create_assignment(api_env)
+        other = _create_assignment(api_env, recording_id="of_andere2", meeting_name="Fremd")
+        foreign = _token_of(api_env, other["draft_id"])
+        resp = api_env["client"].post(
+            f"/api/protocols/{mine['draft_id']}/discard?token={foreign}", json={}
+        )
+        assert resp.status_code == 403
+        assert api_env["db"].get_by_id(mine["draft_id"])["status"] == "pending_assignment"
+
+    def test_discard_button_on_assignment_page(self, api_env):
+        created = _create_assignment(api_env)
+        token = _token_of(api_env, created["draft_id"])
+        html = api_env["client"].get(f"/review/{token}").text
+        assert "discard-btn" in html
+        assert "verwerfen" in html.lower()
+
+
 class TestAssignmentReminders:
     """
     Nachfassen bei offenen Zuordnungen.
