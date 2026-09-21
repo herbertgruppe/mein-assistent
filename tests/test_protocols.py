@@ -755,6 +755,115 @@ class TestAssignmentEndpoints:
         assert api_env["db"].get_by_id(created["draft_id"])["status"] == "pending_assignment"
 
 
+class TestTranscriptArchiv:
+    """
+    Das Rohtranskript wird mitgespeichert.
+
+    Bisher lag es ausschliesslich in Plaud. Verschwindet die Aufnahme dort,
+    laesst sich das Protokoll nicht mehr gegen die Quelle pruefen — und am
+    21.09. musste Mara auf eine schlechtere Quelle ausweichen, weil sie nicht
+    an Plaud kam.
+    """
+
+    def test_transcript_kommt_mit_dem_protokoll(self, api_env, mara_issues):
+        created = _create_assignment(api_env)
+        token = _token_of(api_env, created["draft_id"])
+        api_env["client"].post(
+            f"/api/protocols/{created['draft_id']}/assign?token={token}",
+            json={"event_id": "ev", "create_asana_task": False},
+        )
+        resp = api_env["client"].patch(
+            f"/api/protocols/{created['draft_id']}/draft-markdown",
+            json={
+                "markdown": "# Protokoll",
+                "teilnehmer": ["Sven Herbert"],
+                "transcript": "Sven Herbert: Guten Morgen.\nLev Keimes: Moin.",
+            },
+            headers=KEY_HEADER,
+        )
+        assert resp.status_code == 200
+
+        stored = api_env["db"].get_by_id(created["draft_id"])
+        assert "Guten Morgen" in stored["transcript"]
+        assert stored["transcript_saved_at"]
+
+    def test_ohne_transcript_bleibt_protokoll_gueltig(self, api_env, mara_issues):
+        """Ein fehlendes Transkript darf die Lieferung nicht scheitern lassen."""
+        created = _create_assignment(api_env)
+        token = _token_of(api_env, created["draft_id"])
+        api_env["client"].post(
+            f"/api/protocols/{created['draft_id']}/assign?token={token}",
+            json={"event_id": "ev", "create_asana_task": False},
+        )
+        resp = api_env["client"].patch(
+            f"/api/protocols/{created['draft_id']}/draft-markdown",
+            json={"markdown": "# Protokoll"},
+            headers=KEY_HEADER,
+        )
+        assert resp.status_code == 200
+        assert api_env["db"].get_by_id(created["draft_id"])["status"] == "draft"
+
+    def test_nachtragen_bei_bestehendem_protokoll(self, api_env):
+        """Auch finalisierte Protokolle sollen ihre Quelle bekommen."""
+        draft = _create_draft(api_env)
+        api_env["db"].set_approved(draft["draft_id"], "ev", "b", "s")
+        api_env["db"].set_finalized(draft["draft_id"])
+
+        resp = api_env["client"].put(
+            f"/api/protocols/{draft['draft_id']}/transcript",
+            json={"transcript": "Nachgetragenes Transkript"},
+            headers=KEY_HEADER,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["characters"] == len("Nachgetragenes Transkript")
+
+        stored = api_env["db"].get_by_id(draft["draft_id"])
+        assert stored["transcript"] == "Nachgetragenes Transkript"
+        # Der Protokolltext bleibt unberührt
+        assert stored["current_markdown"].startswith("# Test")
+        assert stored["status"] == "finalized"
+
+    def test_nachtragen_unbekannte_id(self, api_env):
+        resp = api_env["client"].put(
+            "/api/protocols/gibtsnicht/transcript",
+            json={"transcript": "x"},
+            headers=KEY_HEADER,
+        )
+        assert resp.status_code == 404
+
+    def test_liste_fehlender_transkripte(self, api_env):
+        mit_aufnahme = _create_draft(api_env, recording_id="of_mit")
+        _create_draft(api_env, recording_id=None)  # ohne Aufnahme → nicht listen
+
+        resp = api_env["client"].get(
+            "/api/protocols/missing-transcripts", headers=KEY_HEADER
+        )
+        assert resp.status_code == 200
+        ids = [p["draft_id"] for p in resp.json()["protocols"]]
+        assert mit_aufnahme["draft_id"] in ids
+        assert resp.json()["count"] == len(ids)
+
+    def test_liste_schrumpft_nach_nachtrag(self, api_env):
+        created = _create_draft(api_env, recording_id="of_xyz")
+        vorher = api_env["client"].get(
+            "/api/protocols/missing-transcripts", headers=KEY_HEADER
+        ).json()["count"]
+
+        api_env["client"].put(
+            f"/api/protocols/{created['draft_id']}/transcript",
+            json={"transcript": "Text"},
+            headers=KEY_HEADER,
+        )
+        nachher = api_env["client"].get(
+            "/api/protocols/missing-transcripts", headers=KEY_HEADER
+        ).json()["count"]
+        assert nachher == vorher - 1
+
+    def test_missing_transcripts_braucht_api_key(self, api_env):
+        resp = api_env["client"].get("/api/protocols/missing-transcripts")
+        assert resp.status_code in (401, 403)
+
+
 class TestDiscardRecording:
     """
     Fehlaufnahmen verwerfen — versehentlich angestoßene Mitschnitte, die nie

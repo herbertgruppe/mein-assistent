@@ -151,6 +151,13 @@ class ProtocolsDB:
             # Eingeladen ist nicht anwesend; die Vermischung beider Begriffe war
             # die Ursache falscher Teilnehmerlisten.
             ("eingeladene", "ALTER TABLE protocols ADD COLUMN eingeladene TEXT"),
+            # Das Rohtranskript. Lebte bisher ausschliesslich in Plaud — ist die
+            # Aufnahme dort weg, laesst sich das Protokoll nicht mehr gegen die
+            # Quelle pruefen. Ausserdem musste Mara am 21.09. auf eine
+            # schlechtere Quelle ausweichen, weil sie nicht an Plaud kam; mit
+            # lokaler Kopie waere das nicht passiert.
+            ("transcript", "ALTER TABLE protocols ADD COLUMN transcript TEXT"),
+            ("transcript_saved_at", "ALTER TABLE protocols ADD COLUMN transcript_saved_at TEXT"),
             ("assigned_at", "ALTER TABLE protocols ADD COLUMN assigned_at TEXT"),
             ("reminder_sent_at", "ALTER TABLE protocols ADD COLUMN reminder_sent_at TEXT"),
             (
@@ -408,6 +415,21 @@ class ProtocolsDB:
             row = cursor.fetchone()
             return self._row_to_dict(row) if row else None
 
+    def list_without_transcript(self) -> List[Dict[str, Any]]:
+        """
+        Protokolle mit Plaud-Aufnahme, aber ohne gespeichertes Transkript.
+
+        Grundlage für das Nachtragen der Bestandsprotokolle.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM protocols"
+                " WHERE recording_id IS NOT NULL AND recording_id != ''"
+                "   AND (transcript IS NULL OR transcript = '')"
+                " ORDER BY created_at"
+            )
+            return [self._row_to_dict(row) for row in cursor.fetchall()]
+
     def list_pending_assignments(
         self, older_than_hours: Optional[float] = None
     ) -> List[Dict[str, Any]]:
@@ -510,11 +532,30 @@ class ProtocolsDB:
             conn.commit()
             return cursor.rowcount > 0
 
+    def save_transcript(self, draft_id: str, transcript: str) -> bool:
+        """
+        Legt das Rohtranskript zum Protokoll ab.
+
+        Getrennt von attach_draft_markdown, damit sich Transkripte auch für
+        bereits bestehende Protokolle nachtragen lassen, ohne deren Text
+        anzufassen.
+        """
+        if not transcript:
+            return False
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE protocols SET transcript = ?, transcript_saved_at = ? WHERE id = ?",
+                (transcript, _utcnow_iso(), draft_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
     def attach_draft_markdown(
         self,
         draft_id: str,
         markdown: str,
         teilnehmer: Optional[List[str]] = None,
+        transcript: Optional[str] = None,
         modified_by: str = "mara",
     ) -> bool:
         """
@@ -538,6 +579,11 @@ class ProtocolsDB:
         if teilnehmer is not None:
             fields.insert(2, "teilnehmer = ?")
             params.insert(2, json.dumps(teilnehmer, ensure_ascii=False))
+        if transcript:
+            fields.insert(2, "transcript = ?")
+            params.insert(2, transcript)
+            fields.insert(3, "transcript_saved_at = ?")
+            params.insert(3, now)
         params.append(draft_id)
 
         with self._get_connection() as conn:
