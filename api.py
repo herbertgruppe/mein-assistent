@@ -2986,7 +2986,7 @@ class ProtocolAssignRequest(BaseModel):
 
 
 class ProtocolDraftMarkdownRequest(BaseModel):
-    """Maras Lieferung aus Stufe 2: Protokolltext plus ermittelte Teilnehmer."""
+    """Maras Lieferung aus Stufe 2: Protokolltext, Teilnehmer, Rohtranskript."""
 
     markdown: str
     teilnehmer: Optional[List[str]] = Field(
@@ -2996,6 +2996,19 @@ class ProtocolDraftMarkdownRequest(BaseModel):
             "vorhandenen Stand unangetastet."
         ),
     )
+    transcript: Optional[str] = Field(
+        None,
+        description=(
+            "Rohtranskript aus Plaud. Wird mitgespeichert, damit das Protokoll "
+            "später gegen die Quelle prüfbar bleibt."
+        ),
+    )
+
+
+class ProtocolTranscriptRequest(BaseModel):
+    """Nachtrag eines Transkripts zu einem bestehenden Protokoll."""
+
+    transcript: str
 
 
 class ProtocolPatchRequest(BaseModel):
@@ -3488,8 +3501,14 @@ def attach_protocol_markdown(
         )
 
     _protocols_db.attach_draft_markdown(
-        draft_id, req.markdown, teilnehmer=req.teilnehmer
+        draft_id, req.markdown, teilnehmer=req.teilnehmer, transcript=req.transcript
     )
+    if not req.transcript:
+        logger.warning(
+            "[protocols] %s ohne Transkript geliefert — Protokoll bleibt "
+            "ungeprüfbar, falls die Aufnahme in Plaud verschwindet",
+            draft_id,
+        )
     return {
         "status": "draft",
         "draft_id": draft_id,
@@ -3560,6 +3579,55 @@ def send_assignment_reminders(
 
     logger.info("[protocols] %d von %d Erinnerungen versendet", len(reminded), len(due))
     return {"checked": len(due), "reminded": reminded}
+
+
+@app.get("/api/protocols/missing-transcripts")
+def list_missing_transcripts(_key: str = Security(verify_api_key)):
+    """
+    Protokolle mit Plaud-Aufnahme, aber ohne gespeichertes Transkript.
+
+    Grundlage für das Nachtragen der Bestandsprotokolle: das Skript holt sich
+    hier die Liste, zieht die Transkripte aus Plaud und schickt sie an den
+    PUT-Endpoint unten.
+    """
+    rows = _protocols_db.list_without_transcript()
+    return {
+        "count": len(rows),
+        "protocols": [
+            {
+                "draft_id": r["id"],
+                "recording_id": r["recording_id"],
+                "meeting_name": r["meeting_name"],
+                "meeting_datetime": r["meeting_datetime"],
+                "status": r["status"],
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.put("/api/protocols/{draft_id}/transcript", status_code=200)
+def save_protocol_transcript(
+    draft_id: str,
+    req: ProtocolTranscriptRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Trägt ein Rohtranskript nach — unabhängig vom Protokollstatus.
+
+    Bewusst auch für bereits finalisierte Protokolle erlaubt: dort ist die
+    Quelle genauso wertvoll, und der Protokolltext wird dabei nicht berührt.
+    """
+    protocol = _protocols_db.get_by_id(draft_id)
+    if not protocol:
+        raise HTTPException(status_code=404, detail="Protokoll nicht gefunden")
+
+    _protocols_db.save_transcript(draft_id, req.transcript)
+    return {
+        "status": "saved",
+        "draft_id": draft_id,
+        "characters": len(req.transcript),
+    }
 
 
 # WICHTIG: /finalized muss VOR /{draft_id} deklariert sein (Routing-Reihenfolge)
