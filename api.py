@@ -3675,7 +3675,11 @@ def review_page(
 
     return templates.TemplateResponse(
         request,
-        "review.html",
+        # Zwei Seiten, ein Link: vor dem Transkript die Zuordnung, danach der
+        # gewohnte Editor. Bewusst getrennte Templates — im Zuordnungs-Modus
+        # gibt es keinen Protokolltext, und ein halb ausgeblendeter Editor
+        # waere fehleranfaellig (review.js greift hart auf seine DOM-IDs zu).
+        "review_assign.html" if assignment_only else "review.html",
         {
             "draft_id": protocol["id"],
             "token": token,
