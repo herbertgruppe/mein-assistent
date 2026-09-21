@@ -28,8 +28,10 @@ jobs:
       # deshalb hier nie mit, obwohl sie im Repo liegen und gruen sind.
       # Die Liste ist in einer frischen venv gegen den vollen Testumfang
       # geprueft, nicht geraten. Alle vier stehen ohnehin in requirements.txt.
+      # httpx wird von starlette.testclient benoetigt (test_protocols.py) und ist
+      # keine harte Abhaengigkeit von fastapi — ohne sie schlaegt der Import fehl.
       - name: Install dependencies
-        run: pip install pytest requests python-dotenv "fastapi>=0.141.1" python-multipart PyYAML jinja2
+        run: pip install pytest requests python-dotenv "fastapi>=0.141.1" python-multipart PyYAML jinja2 httpx
 
       - name: Run regression tests (HBE-273 / HBE-277 — Dragan-Halluzinations-Klasse)
         run: python -m pytest tests/regression -v
@@ -50,3 +52,12 @@ jobs:
 
       - name: Run mail-triage tests (HBE-3044 ff. — 5-Schritte-Regel, Regeln, Konsequenzen)
         run: python -m pytest tests/test_mail_triage_*.py -v
+
+      # Die gesamte Protokoll-Strecke — DB-Layer, Review-Editor, Zuordnungs-Stufe
+      # — lief hier nie mit, obwohl sie seit Monaten im Repo liegt. Grund war ein
+      # einzelner dauerhaft roter Test: er schickte den Authentik-Header ueber den
+      # Standard-TestClient, der sich als Host "testclient" meldet und damit zu
+      # Recht nicht als vertrauenswuerdiger Proxy gilt. Mit diesem einen roten
+      # Test liess sich die Datei nicht aufnehmen. Jetzt repariert.
+      - name: Run protocol workflow tests (Review-Editor + Zuordnungs-Stufe)
+        run: python -m pytest tests/test_protocols.py -v
