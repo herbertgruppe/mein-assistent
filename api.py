@@ -3388,6 +3388,72 @@ def _create_mara_issue(protocol: Dict[str, Any]) -> Optional[str]:
         return None
 
 
+def _create_mara_rewrite_issue(protocol: Dict[str, Any]) -> Optional[str]:
+    """
+    Beauftragt Mara, ein bestehendes Protokoll neu zu fassen.
+
+    Anders als beim Erstauftrag gibt es hier nichts zu recherchieren: Termin,
+    Board und Teilnehmer stehen fest, das Transkript liegt im Archiv. Es geht
+    ausschliesslich um die Form.
+    """
+    if not _PC_API_KEY:
+        logger.warning("[protocols] PAPERCLIP_API_KEY_MA nicht gesetzt — kein Mara-Issue")
+        return None
+
+    teilnehmer = protocol.get("teilnehmer") or []
+    teilnehmer_zeile = ", ".join(teilnehmer) if teilnehmer else "_nicht erfasst_"
+
+    description = (
+        f"Dieses Protokoll existiert bereits, entspricht aber noch dem alten "
+        f"Format. Fasse es nach der aktuellen Vorgabe neu.\n\n"
+        f"**Draft-ID:** `{protocol['id']}`\n"
+        f"**Termin:** {protocol.get('meeting_name')} ({protocol.get('meeting_datetime')})\n"
+        f"**Bisher erfasste Teilnehmer:** {teilnehmer_zeile}\n\n"
+        f"### Quelle\n\n"
+        f"Das Transkript liegt im Archiv, **nicht** in Plaud holen:\n\n"
+        f"```\nGET {_PUBLIC_BASE_URL}/api/protocols/{protocol['id']}/transcript\n```\n\n"
+        f"Es enthält die Sprecherzuordnung im Format `[mm:ss] Name: Text`. "
+        f"Ermittle die Teilnehmer daraus — nicht aus der Liste oben, die "
+        f"stammt teils aus Outlook-Einladungen und ist der Grund für die "
+        f"Neufassung.\n\n"
+        f"### Was zu tun ist\n\n"
+        f"1. Transkript abrufen\n"
+        f"2. Protokoll nach dem Format aus SKILL_STAGE2 Schritt 4 schreiben — "
+        f"Summary mit Kernentscheidungen, nummerierte Themen mit Entscheidung "
+        f"und Aufgaben, offene Punkte am Schluss, KI-Hinweis darunter\n"
+        f"3. Text und ermittelte Teilnehmer an "
+        f"`PATCH /api/protocols/{protocol['id']}/draft-markdown` uebergeben — "
+        f"**ohne** `transcript`, das ist bereits gespeichert\n\n"
+        f"**Kein Telegram an Sven.** Diese Protokolle werden gesammelt "
+        f"abgearbeitet; einzelne Meldungen waeren nur Laerm."
+    )
+
+    try:
+        resp = _http.post(
+            f"{_PC_API_URL}/api/companies/{_PC_COMPANY_ID}/issues",
+            headers={"Authorization": f"Bearer {_PC_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "title": f"🔄 Protokoll neu fassen: {protocol.get('meeting_name')}",
+                "description": description,
+                "assigneeAgentId": _MARA_AGENT_ID,
+                "priority": "low",
+            },
+            timeout=15,
+        )
+        if resp.status_code not in (200, 201):
+            logger.error(
+                "[protocols] Rewrite-Issue fehlgeschlagen: %s — %s",
+                resp.status_code, resp.text[:200],
+            )
+            return None
+        identifier = str(resp.json().get("identifier") or "?")
+        logger.info("[protocols] Neufassung beauftragt: %s (draft=%s)", identifier, protocol["id"])
+        return identifier
+    except Exception as exc:
+        logger.error("[protocols] Rewrite-Issue fehlgeschlagen: %s", exc)
+        return None
+
+
 @app.post("/api/protocols/{draft_id}/assign", status_code=202)
 def assign_protocol(
     draft_id: str,
@@ -3604,6 +3670,73 @@ def list_missing_transcripts(_key: str = Security(verify_api_key)):
             for r in rows
         ],
     }
+
+
+@app.get("/api/protocols/{draft_id}/transcript")
+def get_protocol_transcript(
+    draft_id: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Liefert das gespeicherte Rohtranskript.
+
+    Mara nutzt das beim Neufassen: sie arbeitet aus dem Archiv statt aus
+    Plaud. Das ist schneller, unabhängig von Plaud-Verfügbarkeit — und
+    funktioniert auch, wenn die Aufnahme dort inzwischen gelöscht wurde.
+    """
+    protocol = _protocols_db.get_by_id(draft_id)
+    if not protocol:
+        raise HTTPException(status_code=404, detail="Protokoll nicht gefunden")
+    if not protocol.get("transcript"):
+        raise HTTPException(
+            status_code=404,
+            detail="Für dieses Protokoll ist kein Transkript gespeichert",
+        )
+    return {
+        "draft_id": draft_id,
+        "meeting_name": protocol["meeting_name"],
+        "meeting_datetime": protocol["meeting_datetime"],
+        "recording_title": protocol.get("recording_title"),
+        "transcript": protocol["transcript"],
+    }
+
+
+@app.post("/api/protocols/{draft_id}/rewrite", status_code=202)
+def rewrite_protocol(
+    draft_id: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Beauftragt Mara, ein bestehendes Protokoll neu zu fassen.
+
+    Gedacht für Formatwechsel: der Inhalt ist richtig, nur die Struktur
+    entspricht nicht mehr der Vorgabe. Mara arbeitet aus dem gespeicherten
+    Transkript, nicht aus Plaud.
+
+    Der bisherige Text bleibt bis zur Lieferung stehen — geht der Agent-Lauf
+    schief, ist das alte Protokoll noch da.
+    """
+    protocol = _protocols_db.get_by_id(draft_id)
+    if not protocol:
+        raise HTTPException(status_code=404, detail="Protokoll nicht gefunden")
+    if not protocol.get("transcript"):
+        raise HTTPException(
+            status_code=409,
+            detail="Ohne gespeichertes Transkript kann nicht neu gefasst werden",
+        )
+    if protocol["status"] in ("approved", "finalized"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Protokoll ist bereits freigegeben (status={protocol['status']}) — "
+                f"Neufassen würde eine veröffentlichte Fassung ersetzen"
+            ),
+        )
+
+    issue = _create_mara_rewrite_issue(protocol)
+    if not issue:
+        raise HTTPException(status_code=502, detail="Mara konnte nicht beauftragt werden")
+    return {"status": "rewrite_requested", "draft_id": draft_id, "mara_issue": issue}
 
 
 @app.put("/api/protocols/{draft_id}/transcript", status_code=200)

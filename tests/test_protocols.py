@@ -864,6 +864,102 @@ class TestTranscriptArchiv:
         assert resp.status_code in (401, 403)
 
 
+class TestRewrite:
+    """
+    Bestehende Protokolle ins neue Format bringen.
+
+    Quelle ist das archivierte Transkript, nicht Plaud — sonst scheitert es
+    an geloeschten Aufnahmen, und genau eine davon gibt es bereits.
+    """
+
+    @pytest.fixture
+    def rewrites(self, api_env, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            api_env["api"], "_create_mara_rewrite_issue",
+            lambda protocol: calls.append(protocol) or "HBE-7777",
+        )
+        return calls
+
+    def _mit_transkript(self, api_env, **kw):
+        draft = _create_draft(api_env, **kw)
+        api_env["client"].put(
+            f"/api/protocols/{draft['draft_id']}/transcript",
+            json={"transcript": "[00:00] Sven Herbert: Fangen wir an."},
+            headers=KEY_HEADER,
+        )
+        return draft
+
+    def test_transkript_abrufbar_fuer_mara(self, api_env):
+        draft = self._mit_transkript(api_env)
+        resp = api_env["client"].get(
+            f"/api/protocols/{draft['draft_id']}/transcript", headers=KEY_HEADER
+        )
+        assert resp.status_code == 200
+        assert "Fangen wir an" in resp.json()["transcript"]
+
+    def test_transkript_abruf_ohne_inhalt(self, api_env):
+        draft = _create_draft(api_env)
+        resp = api_env["client"].get(
+            f"/api/protocols/{draft['draft_id']}/transcript", headers=KEY_HEADER
+        )
+        assert resp.status_code == 404
+
+    def test_rewrite_beauftragt_mara(self, api_env, rewrites):
+        draft = self._mit_transkript(api_env)
+        resp = api_env["client"].post(
+            f"/api/protocols/{draft['draft_id']}/rewrite", headers=KEY_HEADER
+        )
+        assert resp.status_code == 202
+        assert resp.json()["mara_issue"] == "HBE-7777"
+        assert len(rewrites) == 1
+
+    def test_rewrite_ohne_transkript_abgelehnt(self, api_env, rewrites):
+        """Ohne Quelle gaebe es nur eine Umformulierung des alten Textes."""
+        draft = _create_draft(api_env)
+        resp = api_env["client"].post(
+            f"/api/protocols/{draft['draft_id']}/rewrite", headers=KEY_HEADER
+        )
+        assert resp.status_code == 409
+        assert rewrites == []
+
+    def test_rewrite_schuetzt_freigegebene_protokolle(self, api_env, rewrites):
+        """
+        Ein finalisiertes Protokoll liegt als PDF in Outlook und als Aufgabe
+        in Asana. Es neu zu fassen wuerde eine veroeffentlichte Fassung
+        stillschweigend ersetzen.
+        """
+        draft = self._mit_transkript(api_env)
+        api_env["db"].set_approved(draft["draft_id"], "ev", "b", "s")
+        api_env["db"].set_finalized(draft["draft_id"])
+
+        resp = api_env["client"].post(
+            f"/api/protocols/{draft['draft_id']}/rewrite", headers=KEY_HEADER
+        )
+        assert resp.status_code == 409
+        assert rewrites == []
+
+    def test_alter_text_bleibt_bis_zur_lieferung(self, api_env, rewrites):
+        """Scheitert Maras Lauf, darf das bisherige Protokoll nicht weg sein."""
+        draft = self._mit_transkript(api_env)
+        api_env["client"].post(
+            f"/api/protocols/{draft['draft_id']}/rewrite", headers=KEY_HEADER
+        )
+        stored = api_env["db"].get_by_id(draft["draft_id"])
+        assert stored["current_markdown"].startswith("# Test")
+
+    def test_rewrite_unbekannte_id(self, api_env):
+        resp = api_env["client"].post(
+            "/api/protocols/gibtsnicht/rewrite", headers=KEY_HEADER
+        )
+        assert resp.status_code == 404
+
+    def test_rewrite_braucht_api_key(self, api_env):
+        draft = self._mit_transkript(api_env)
+        resp = api_env["client"].post(f"/api/protocols/{draft['draft_id']}/rewrite")
+        assert resp.status_code in (401, 403)
+
+
 class TestDiscardRecording:
     """
     Fehlaufnahmen verwerfen — versehentlich angestoßene Mitschnitte, die nie
