@@ -521,7 +521,18 @@ def api_env(tmp_path, monkeypatch):
     )
 
     client = TestClient(api.app)
-    return {"api": api, "client": client, "db": db, "asana": fake_agent}
+    # Zweiter Client, der sich als vertrauenswürdiger Proxy ausgibt. Ohne ihn
+    # lässt sich der Authentik-Pfad nicht testen: der Standard-TestClient
+    # meldet sich als Host "testclient", und der steht zu Recht nicht in
+    # TRUSTED_PROXIES.
+    trusted_client = TestClient(api.app, client=("127.0.0.1", 50000))
+    return {
+        "api": api,
+        "client": client,
+        "trusted_client": trusted_client,
+        "db": db,
+        "asana": fake_agent,
+    }
 
 
 def _create_draft(api_env, **overrides):
@@ -1012,10 +1023,29 @@ class TestAsanaEndpoints:
         assert resp.status_code == 401
 
     def test_asana_boards_authentik_header(self, api_env):
-        resp = api_env["client"].get(
+        """Authentik-Header von nginx (vertrauenswürdige IP) wird akzeptiert."""
+        resp = api_env["trusted_client"].get(
             "/api/asana/boards", headers={"X-Authentik-Username": "sven"}
         )
         assert resp.status_code == 200
+
+    def test_authentik_header_rejected_from_untrusted_source(self, api_env):
+        """
+        Derselbe Header von beliebiger Quelle muss scheitern.
+
+        Sonst genuegte ein selbst gesetzter Header, um an Asana-Daten zu
+        kommen — nginx setzt ihn nur nach bestandener SSO-Anmeldung.
+        """
+        resp = api_env["client"].get(
+            "/api/asana/boards", headers={"X-Authentik-Username": "angreifer"}
+        )
+        assert resp.status_code == 401
+
+    def test_forwarded_email_rejected_from_untrusted_source(self, api_env):
+        resp = api_env["client"].get(
+            "/api/asana/boards", headers={"X-Forwarded-Email": "wer@auch.immer"}
+        )
+        assert resp.status_code == 401
 
 
 class TestCalendarDualAuth:
