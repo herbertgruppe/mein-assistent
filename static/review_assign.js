@@ -23,6 +23,7 @@
     var sectionField  = document.getElementById('section-field');
     var asanaCheckbox = document.getElementById('asana-checkbox');
     var assignBtn     = document.getElementById('assign-btn');
+    var discardBtn    = document.getElementById('discard-btn');
     var assignInfo    = document.getElementById('assign-info');
     var attendeeHint  = document.getElementById('attendee-hint');
 
@@ -243,6 +244,57 @@
     }
 
     // ------------------------------------------------------------------
+    // Verwerfen
+    // ------------------------------------------------------------------
+    function discard() {
+        // Bewusst ein natives confirm() statt eines Modals: eine destruktive
+        // Ja/Nein-Frage braucht keinen eigenen DOM-Zustand, und der Editor
+        // hatte genau damit schon Ärger (hidden vs. display:flex).
+        var name = ctx.recordingTitle || ctx.meetingName || 'diese Aufnahme';
+        if (!window.confirm(
+            'Aufnahme verwerfen?\n\n' + name + '\n\n' +
+            'Es wird kein Protokoll erstellt und du wirst nicht mehr erinnert. ' +
+            'Die Aufnahme selbst bleibt in Plaud erhalten.'
+        )) {
+            return;
+        }
+
+        discardBtn.disabled = true;
+        assignBtn.disabled = true;
+        assignInfo.textContent = 'Wird verworfen …';
+
+        fetch('/api/protocols/' + encodeURIComponent(ctx.draftId) +
+              '/discard?' + tokenParam, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason: 'Fehlaufnahme' }),
+        })
+            .then(function (r) {
+                if (r.ok) return r.json();
+                return r.json()
+                    .catch(function () { return {}; })
+                    .then(function (body) {
+                        throw new Error(body.detail || ('HTTP ' + r.status));
+                    });
+            })
+            .then(function () {
+                document.querySelector('.hg-main').innerHTML =
+                    '<section class="hg-recording-card">' +
+                    '<div class="hg-recording-title">🗑 Verworfen</div>' +
+                    '<div class="hg-recording-meta">Zu dieser Aufnahme wird kein ' +
+                    'Protokoll erstellt. In Plaud bleibt sie erhalten — dort kannst ' +
+                    'du sie bei Bedarf löschen.</div>' +
+                    '</section>';
+            })
+            .catch(function (err) {
+                assignInfo.textContent = '⚠️ ' + err.message;
+                discardBtn.disabled = false;
+                updateAssignState();
+                console.error('Verwerfen-Fehler:', err);
+            });
+    }
+
+    // ------------------------------------------------------------------
     // Verdrahtung
     // ------------------------------------------------------------------
     boardSelect.addEventListener('change', function () {
@@ -261,6 +313,7 @@
     sectionSelect.addEventListener('change', updateAssignState);
     asanaCheckbox.addEventListener('change', updateAsanaFieldState);
     assignBtn.addEventListener('click', assign);
+    discardBtn.addEventListener('click', discard);
 
     updateAsanaFieldState();
     loadEvents();

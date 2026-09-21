@@ -1362,6 +1362,8 @@ _PROTO_STATUS_MAP: dict = {
     "approved":  "review_ready",   # BackgroundTask kann scheitern; nur finalized = done
     "finalized": "done",
     "rejected":  "review_ready",
+    # Fehlaufnahme — bewusst kein Protokoll, nichts mehr zu tun
+    "discarded": "cancelled",
 }
 
 
@@ -3422,6 +3424,44 @@ def assign_protocol(
         "mara_issue": issue,
         "eingeladene": req.eingeladene,
     }
+
+
+class ProtocolDiscardRequest(BaseModel):
+    reason: str = Field("Fehlaufnahme", description="Warum kein Protokoll entstehen soll")
+
+
+@app.post("/api/protocols/{draft_id}/discard", status_code=200)
+def discard_protocol(
+    draft_id: str,
+    req: Optional[ProtocolDiscardRequest] = None,
+    token: Optional[str] = None,
+    _user: str = Depends(get_authenticated_user),
+):
+    """
+    Verwirft eine Aufnahme, zu der kein Protokoll entstehen soll.
+
+    Kurze Fehlmitschnitte entstehen regelmäßig — angestoßene Aufnahmen, die
+    nie ein Meeting waren. Ohne diesen Weg blieben sie in der Zuordnungs-Stufe
+    liegen und würden alle drei Tage angemahnt.
+
+    Erlaubt, solange kein Protokoll existiert. Ab 'draft' ist der Editor
+    zuständig, dort gibt es „Ablehnen".
+    """
+    protocol = _get_protocol_for_token(draft_id, token)
+
+    if protocol["status"] not in ("pending_assignment", "assigned"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Nur Aufnahmen in der Zuordnungs-Stufe können verworfen werden "
+                f"(status={protocol['status']}). Für fertige Entwürfe bitte Ablehnen nutzen."
+            ),
+        )
+
+    reason = (req.reason if req else None) or "Fehlaufnahme"
+    _protocols_db.discard(draft_id, reason=reason)
+    logger.info("[protocols] %s verworfen (%s)", draft_id, reason)
+    return {"status": "discarded", "draft_id": draft_id, "reason": reason}
 
 
 @app.patch("/api/protocols/{draft_id}/draft-markdown", status_code=200)
