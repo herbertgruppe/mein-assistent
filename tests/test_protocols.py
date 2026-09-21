@@ -755,6 +755,74 @@ class TestAssignmentEndpoints:
         assert api_env["db"].get_by_id(created["draft_id"])["status"] == "pending_assignment"
 
 
+class TestAssignmentPage:
+    """Die Zuordnungsseite — Stufe 1 im Browser."""
+
+    def test_renders_assignment_view_not_editor(self, api_env):
+        created = _create_assignment(api_env)
+        token = _token_of(api_env, created["draft_id"])
+        html = api_env["client"].get(f"/review/{token}").text
+
+        assert "review_assign.js" in html
+        # Kein Editor: es gibt noch keinen Protokolltext
+        assert "markdown-editor" not in html
+        assert "simplemde" not in html.lower()
+        assert "approve-btn" not in html
+
+    def test_shows_plaud_recording_name_prominently(self, api_env):
+        """Ohne den Plaud-Namen ist die Aufnahme in der App nicht auffindbar."""
+        created = _create_assignment(
+            api_env, recording_title="09-18 Abstimmung: TGA-Entwicklung"
+        )
+        token = _token_of(api_env, created["draft_id"])
+        html = api_env["client"].get(f"/review/{token}").text
+
+        assert "09-18 Abstimmung: TGA-Entwicklung" in html
+        assert "Aufnahme in Plaud" in html
+        assert "47m04s" in html
+
+    def test_explains_why_order_matters(self, api_env):
+        """Der Hinweis zur Sprecherkorrektur ist der Zweck der Seite."""
+        created = _create_assignment(api_env)
+        token = _token_of(api_env, created["draft_id"])
+        html = api_env["client"].get(f"/review/{token}").text
+
+        assert "Sprecherzuordnung" in html
+        assert "erst nach deiner Freigabe" in html.lower() or "Freigabe" in html
+
+    def test_editor_view_after_mara_delivered(self, api_env, mara_issues):
+        """Nach Maras Lieferung zeigt derselbe Link den gewohnten Editor."""
+        created = _create_assignment(api_env)
+        token = _token_of(api_env, created["draft_id"])
+        api_env["client"].post(
+            f"/api/protocols/{created['draft_id']}/assign?token={token}",
+            json={"event_id": "ev", "create_asana_task": False},
+        )
+        api_env["client"].patch(
+            f"/api/protocols/{created['draft_id']}/draft-markdown",
+            json={"markdown": "# Protokoll\n## TOP 1", "teilnehmer": ["Sven Herbert"]},
+            headers=KEY_HEADER,
+        )
+        html = api_env["client"].get(f"/review/{token}").text
+
+        assert "markdown-editor" in html
+        assert "review_assign.js" not in html
+        assert "Sven Herbert" in html
+
+    def test_assigned_state_still_shows_assignment_page(self, api_env, mara_issues):
+        """Solange Mara arbeitet, bleibt die Zuordnung korrigierbar."""
+        created = _create_assignment(api_env)
+        token = _token_of(api_env, created["draft_id"])
+        api_env["client"].post(
+            f"/api/protocols/{created['draft_id']}/assign?token={token}",
+            json={"event_id": "ev", "create_asana_task": False},
+        )
+        html = api_env["client"].get(f"/review/{token}").text
+
+        assert "review_assign.js" in html
+        assert "bereits freigegeben" in html
+
+
 class TestDraftEndpoint:
     def test_draft_create(self, api_env):
         """POST /api/protocols/draft gibt draft_id und reviewer_url zurück."""
