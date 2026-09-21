@@ -46,43 +46,108 @@ def api_key(env_file: str = "/opt/mein-assistent/.env") -> str:
     sys.exit("API_SECRET_KEY nicht in .env gefunden")
 
 
+# Plaud weist den Default-User-Agent von urllib mit HTTP 403 ab — mit curl
+# liefert derselbe Aufruf 200. Ohne diesen Header scheitert jeder Abruf, und
+# zwar mit einem Statuscode, der nach fehlender Berechtigung aussieht statt
+# nach Client-Filterung.
+USER_AGENT = "herbert-backfill/1.0"
+
+
 def http(url: str, headers: dict, method: str = "GET", body: dict = None):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    req = urllib.request.Request(
+        url, data=data, headers={**headers, "User-Agent": USER_AGENT}, method=method
+    )
     with urllib.request.urlopen(req, timeout=120) as resp:
         raw = resp.read()
         return json.loads(raw) if raw else {}
+
+
+def id_kandidaten(recording_id: str) -> list:
+    """
+    Schreibweisen, unter denen eine Aufnahme in Plaud zu finden sein kann.
+
+    Protokolle aus der Zeit vor September 2026 haben die Recording-ID als
+    nacktes 32-Hex gespeichert. Plaud loest seit dem Formatwechsel aber nur
+    noch die praefigierte Form auf (`of_<32hex>`) — ein Abruf mit der alten
+    Schreibweise scheitert mit 403/404. Von 30 Bestandsprotokollen betrifft
+    das 29.
+
+    Zuerst die gespeicherte Form (falls Plaud das Format erneut dreht),
+    danach mit Praefix.
+    """
+    kandidaten = [recording_id]
+    if "_" not in recording_id:
+        kandidaten.append("of_" + recording_id)
+    return kandidaten
+
+
+def _zeit(ms) -> str:
+    """Millisekunden als [mm:ss]."""
+    try:
+        s = int(ms) // 1000
+        return "[%02d:%02d]" % (s // 60, s % 60)
+    except (TypeError, ValueError):
+        return ""
 
 
 def transkript_text(datei: dict) -> str:
     """
     Baut aus source_list den lesbaren Transkripttext.
 
-    Plaud liefert das Transkript als verschachtelte Struktur; Aufbau und
-    Feldnamen sind nicht dokumentiert und haben sich schon geaendert (die
-    Recording-IDs bekamen im September ein Praefix). Deshalb defensiv: erst
-    die bekannten Textfelder versuchen, sonst die Rohstruktur als JSON
-    ablegen. Lieber unformatiert archiviert als gar nicht.
+    Aufbau der Plaud-Antwort (nicht dokumentiert, empirisch ermittelt):
+
+        source_list[] mit data_type
+          "transaction"        -> das Transkript, data_content ist ein
+                                  JSON-Array von Segmenten
+          "transaction_polish" -> geglaettete Fassung, oft leer
+          "outline"            -> Themengliederung, kein Volltext
+        Segment: {content, speaker, original_speaker, start_time, end_time}
+
+    `speaker` traegt den KORRIGIERTEN Namen (z. B. "Dr. Sven Herbert"),
+    `original_speaker` die Rohzuordnung ("Speaker 1"). Wir nehmen die
+    korrigierte Fassung — sie ist der Grund, warum im zweistufigen Workflow
+    erst nach Svens Korrektur gezogen wird.
+
+    Defensiv, weil sich das Format schon geaendert hat: laesst sich die
+    Struktur nicht lesen, wird die Rohform als JSON abgelegt. Unformatiert
+    archiviert schlaegt nicht archiviert.
     """
-    teile = []
-    for eintrag in datei.get("source_list") or []:
-        daten = eintrag.get("data")
-        if isinstance(daten, str):
-            teile.append(daten)
-            continue
-        if isinstance(daten, list):
-            for segment in daten:
-                if isinstance(segment, dict):
-                    sprecher = segment.get("speaker") or segment.get("speaker_name") or ""
-                    text = segment.get("text") or segment.get("content") or ""
-                    if text:
-                        teile.append(f"{sprecher}: {text}" if sprecher else text)
-                elif isinstance(segment, str):
-                    teile.append(segment)
-            continue
-        if daten is not None:
-            teile.append(json.dumps(daten, ensure_ascii=False))
-    return "\n".join(t for t in teile if t).strip()
+    eintraege = datei.get("source_list") or []
+    roh = None
+
+    for bevorzugt in ("transaction_polish", "transaction"):
+        for eintrag in eintraege:
+            if eintrag.get("data_type") != bevorzugt:
+                continue
+            inhalt = eintrag.get("data_content")
+            if not inhalt:
+                continue
+            try:
+                segmente = json.loads(inhalt) if isinstance(inhalt, str) else inhalt
+            except (TypeError, ValueError):
+                roh = roh or str(inhalt)
+                continue
+            if not isinstance(segmente, list):
+                roh = roh or json.dumps(segmente, ensure_ascii=False)
+                continue
+
+            zeilen = []
+            for seg in segmente:
+                if not isinstance(seg, dict):
+                    zeilen.append(str(seg))
+                    continue
+                text = (seg.get("content") or "").strip()
+                if not text:
+                    continue
+                sprecher = (seg.get("speaker") or "").strip()
+                marke = _zeit(seg.get("start_time"))
+                kopf = " ".join(x for x in (marke, sprecher) if x)
+                zeilen.append(f"{kopf}: {text}" if kopf else text)
+            if zeilen:
+                return "\n".join(zeilen).strip()
+
+    return (roh or "").strip()
 
 
 def main() -> int:
@@ -112,17 +177,23 @@ def main() -> int:
     for i, prot in enumerate(protokolle, 1):
         rid = prot["recording_id"]
         name = (prot.get("meeting_name") or "")[:45]
-        try:
-            datei = http(PLAUD_BASE + rid, plaud_headers)
-            text = transkript_text(datei)
-        except urllib.error.HTTPError as exc:
-            print(f"{i:3}. FEHLER {exc.code:3}  {rid[:24]}  {name}")
+        datei = None
+        letzter_fehler = ""
+        for kandidat in id_kandidaten(rid):
+            try:
+                datei = http(PLAUD_BASE + kandidat, plaud_headers)
+                break
+            except urllib.error.HTTPError as exc:
+                letzter_fehler = f"HTTP {exc.code}"
+            except Exception as exc:
+                letzter_fehler = type(exc).__name__
+
+        if datei is None:
+            print(f"{i:3}. FEHLER {letzter_fehler:9} {rid[:26]}  {name}")
             fehler += 1
             continue
-        except Exception as exc:
-            print(f"{i:3}. FEHLER      {rid[:24]}  {name} — {type(exc).__name__}")
-            fehler += 1
-            continue
+
+        text = transkript_text(datei)
 
         if not text:
             print(f"{i:3}. LEER        {rid[:24]}  {name}")
