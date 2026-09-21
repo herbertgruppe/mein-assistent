@@ -504,6 +504,39 @@ def _create_assignment(
     return f"assignment:{data.get('draft_id', '?')}"
 
 
+def _trigger_assignment_reminders() -> None:
+    """
+    Stoesst das Nachfassen fuer offene Zuordnungen an.
+
+    Die Faelligkeitspruefung steckt in der API (Schwelle plus Zeitpunkt der
+    letzten Erinnerung), deshalb ist der Aufruf in jedem Zyklus unschaedlich —
+    er ist fast immer ein No-Op. Fehler bleiben folgenlos: eine verpasste
+    Erinnerung wird beim naechsten Zyklus nachgeholt.
+    """
+    if not MA_API_KEY:
+        return
+    try:
+        resp = requests.post(
+            f"{MA_API_URL}/api/protocols/assignment-reminders",
+            headers={"X-API-Key": MA_API_KEY},
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("reminded"):
+                logger.info(
+                    "Erinnerungen an offene Zuordnungen verschickt: %d",
+                    len(data["reminded"]),
+                )
+        else:
+            logger.warning(
+                "Erinnerungs-Lauf abgelehnt: HTTP %s %s",
+                resp.status_code, resp.text[:200],
+            )
+    except Exception as exc:
+        logger.warning("Erinnerungs-Lauf fehlgeschlagen: %s", exc)
+
+
 # ── Telegram ───────────────────────────────────────────────────────────────────
 def _tg_alert(text: str) -> None:
     if not TG_BOT_TOKEN or not TG_ADMIN_CHAT:
@@ -938,6 +971,9 @@ def main() -> None:
             _clear_alert(db, "silence")
         else:
             _check_silence(db)
+
+        if TWO_STAGE:
+            _trigger_assignment_reminders()
 
         audit = {
             "timestamp":       cycle_start,

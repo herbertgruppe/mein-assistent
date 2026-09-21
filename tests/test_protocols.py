@@ -755,6 +755,124 @@ class TestAssignmentEndpoints:
         assert api_env["db"].get_by_id(created["draft_id"])["status"] == "pending_assignment"
 
 
+class TestAssignmentReminders:
+    """
+    Nachfassen bei offenen Zuordnungen.
+
+    Ohne das versandet die Stufe: eine liegengebliebene Aufnahme wird nie zum
+    Protokoll, und die urspruengliche Meldung rutscht im Telegram-Verlauf
+    nach oben.
+    """
+
+    @pytest.fixture
+    def tg(self, api_env, monkeypatch):
+        """Faengt Telegram-Nachrichten ab und meldet Erfolg."""
+        sent = []
+        monkeypatch.setattr(api_env["api"], "_TG_BOT_TOKEN", "tok")
+        monkeypatch.setattr(api_env["api"], "_TG_ADMIN_CHAT_ID", "chat-1")
+        monkeypatch.setattr(
+            api_env["api"], "_tg_send_message",
+            lambda chat, text, **kw: sent.append(text) or 4711,
+        )
+        return sent
+
+    def _age(self, api_env, draft_id, hours):
+        stamp = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        with api_env["db"]._get_connection() as conn:
+            conn.execute(
+                "UPDATE protocols SET created_at = ? WHERE id = ?", (stamp, draft_id)
+            )
+            conn.commit()
+
+    def test_fresh_assignment_is_not_nagged(self, api_env, tg):
+        _create_assignment(api_env)
+        resp = api_env["client"].post(
+            "/api/protocols/assignment-reminders", headers=KEY_HEADER
+        )
+        assert resp.status_code == 200
+        assert resp.json()["reminded"] == []
+        assert tg == []
+
+    def test_overdue_assignment_is_reminded(self, api_env, tg):
+        created = _create_assignment(api_env)
+        self._age(api_env, created["draft_id"], 80)
+
+        resp = api_env["client"].post(
+            "/api/protocols/assignment-reminders", headers=KEY_HEADER
+        )
+        assert resp.status_code == 200
+        assert resp.json()["reminded"] == [created["draft_id"]]
+        assert len(tg) == 1
+        # Der Link ist der Zweck der Nachricht
+        assert "/review/" in tg[0]
+        assert "09-18 Abstimmung: TGA-Entwicklung" in tg[0]
+
+    def test_reminder_not_repeated_immediately(self, api_env, tg):
+        """Zweiter Lauf direkt danach darf nicht erneut melden."""
+        created = _create_assignment(api_env)
+        self._age(api_env, created["draft_id"], 80)
+        api_env["client"].post("/api/protocols/assignment-reminders", headers=KEY_HEADER)
+        resp = api_env["client"].post(
+            "/api/protocols/assignment-reminders", headers=KEY_HEADER
+        )
+        assert resp.json()["reminded"] == []
+        assert len(tg) == 1
+
+    def test_reminder_repeats_after_another_interval(self, api_env, tg):
+        created = _create_assignment(api_env)
+        self._age(api_env, created["draft_id"], 80)
+        api_env["client"].post("/api/protocols/assignment-reminders", headers=KEY_HEADER)
+
+        # Letzte Erinnerung kuenstlich altern lassen
+        stamp = (datetime.now(timezone.utc) - timedelta(hours=80)).isoformat()
+        with api_env["db"]._get_connection() as conn:
+            conn.execute(
+                "UPDATE protocols SET reminder_sent_at = ? WHERE id = ?",
+                (stamp, created["draft_id"]),
+            )
+            conn.commit()
+
+        api_env["client"].post("/api/protocols/assignment-reminders", headers=KEY_HEADER)
+        assert len(tg) == 2
+        assert "(2. Erinnerung)" in tg[1]
+
+    def test_assigned_protocol_is_not_reminded(self, api_env, tg, mara_issues):
+        """Nach der Freigabe gibt es nichts mehr zu erinnern."""
+        created = _create_assignment(api_env)
+        self._age(api_env, created["draft_id"], 80)
+        token = _token_of(api_env, created["draft_id"])
+        api_env["client"].post(
+            f"/api/protocols/{created['draft_id']}/assign?token={token}",
+            json={"event_id": "ev", "create_asana_task": False},
+        )
+        resp = api_env["client"].post(
+            "/api/protocols/assignment-reminders", headers=KEY_HEADER
+        )
+        assert resp.json()["reminded"] == []
+        assert tg == []
+
+    def test_failed_send_is_not_marked_as_reminded(self, api_env, monkeypatch):
+        """
+        Sonst gilt eine nie zugestellte Erinnerung als erledigt und der
+        naechste Lauf ueberspringt sie fuer weitere drei Tage.
+        """
+        monkeypatch.setattr(api_env["api"], "_TG_BOT_TOKEN", "tok")
+        monkeypatch.setattr(api_env["api"], "_TG_ADMIN_CHAT_ID", "chat-1")
+        monkeypatch.setattr(api_env["api"], "_tg_send_message", lambda *a, **kw: None)
+
+        created = _create_assignment(api_env)
+        self._age(api_env, created["draft_id"], 80)
+        resp = api_env["client"].post(
+            "/api/protocols/assignment-reminders", headers=KEY_HEADER
+        )
+        assert resp.json()["reminded"] == []
+        assert api_env["db"].get_by_id(created["draft_id"])["reminder_count"] == 0
+
+    def test_requires_api_key(self, api_env):
+        resp = api_env["client"].post("/api/protocols/assignment-reminders")
+        assert resp.status_code in (401, 403)
+
+
 class TestAssignmentPage:
     """Die Zuordnungsseite — Stufe 1 im Browser."""
 

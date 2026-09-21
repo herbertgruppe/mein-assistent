@@ -308,6 +308,10 @@ _MARA_AGENT_ID = os.getenv(
     "PAPERCLIP_PROTOKOLL_AGENT_ID", "ed26f194-f0a9-4f70-a52d-6e39be9013e3"
 ).strip()
 
+# Nachfass-Rhythmus fuer offene Zuordnungen. Drei Tage, weil eine Aufnahme vom
+# Freitag nicht schon am Samstag mahnen soll.
+ASSIGNMENT_REMINDER_HOURS = float(os.getenv("ASSIGNMENT_REMINDER_HOURS", "72"))
+
 # ---------------------------------------------------------------------------
 # Backward-compat module-level globals (derived from registry; used by speaker
 # endpoints and tests that patch these names directly).
@@ -3451,6 +3455,71 @@ def attach_protocol_markdown(
         "draft_id": draft_id,
         "reviewer_url": f"{_PUBLIC_BASE_URL}/review/{protocol['reviewer_token']}",
     }
+
+
+@app.post("/api/protocols/assignment-reminders", status_code=200)
+def send_assignment_reminders(
+    older_than_hours: Optional[float] = None,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Erinnert an Aufnahmen, die auf Svens Zuordnung warten.
+
+    Ohne Nachfassen versandet die Zuordnungs-Stufe: eine Aufnahme, die
+    liegenbleibt, wird nie zum Protokoll — und niemand merkt es, weil die
+    ursprüngliche Meldung längst im Telegram-Verlauf nach oben gerutscht ist.
+
+    Der Rhythmus ergibt sich aus reminder_sent_at: erinnert wird, wenn die
+    letzte Meldung (ersatzweise die Anlage) länger als die Schwelle zurück
+    liegt. Der Endpoint ist dadurch idempotent und kann beliebig oft
+    aufgerufen werden — der Poller tut das alle zehn Minuten.
+    """
+    hours = older_than_hours if older_than_hours is not None else ASSIGNMENT_REMINDER_HOURS
+    due = _protocols_db.list_pending_assignments(older_than_hours=hours)
+    if not due:
+        return {"checked": 0, "reminded": []}
+
+    if not _TG_BOT_TOKEN or not _TG_ADMIN_CHAT_ID:
+        logger.warning(
+            "[protocols] %d Zuordnungen ueberfaellig, aber Telegram nicht konfiguriert",
+            len(due),
+        )
+        raise HTTPException(status_code=503, detail="Telegram nicht konfiguriert.")
+
+    reminded: List[str] = []
+    for protocol in due:
+        title = protocol.get("recording_title") or protocol.get("meeting_name") or "Aufnahme"
+        try:
+            created = datetime.fromisoformat(protocol["created_at"])
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            days = max(1, int((datetime.now(timezone.utc) - created).total_seconds() // 86400))
+            age = f"seit {days} Tag{'en' if days != 1 else ''}"
+        except (KeyError, TypeError, ValueError):
+            age = "seit laengerem"
+
+        nth = int(protocol.get("reminder_count") or 0) + 1
+        text = (
+            f"⏳ Aufnahme wartet {age} auf Zuordnung\n"
+            f"{title}\n\n"
+            f"Sprecher in Plaud pruefen, dann zuordnen:\n"
+            f"{_PUBLIC_BASE_URL}/review/{protocol['reviewer_token']}\n\n"
+            f"Ohne Zuordnung wird kein Protokoll erstellt."
+            + (f"\n\n({nth}. Erinnerung)" if nth > 1 else "")
+        )
+        if _tg_send_message(_TG_ADMIN_CHAT_ID, text):
+            _protocols_db.mark_reminder_sent(protocol["id"])
+            reminded.append(protocol["id"])
+        else:
+            # Ohne erfolgreichen Versand nicht markieren — sonst gilt die
+            # Erinnerung als zugestellt und der naechste Lauf ueberspringt sie.
+            logger.warning(
+                "[protocols] Erinnerung fuer %s konnte nicht gesendet werden",
+                protocol["id"],
+            )
+
+    logger.info("[protocols] %d von %d Erinnerungen versendet", len(reminded), len(due))
+    return {"checked": len(due), "reminded": reminded}
 
 
 # WICHTIG: /finalized muss VOR /{draft_id} deklariert sein (Routing-Reihenfolge)
