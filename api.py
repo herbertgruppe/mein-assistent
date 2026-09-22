@@ -3560,7 +3560,11 @@ def attach_protocol_markdown(
     protocol = _protocols_db.get_by_id(draft_id)
     if not protocol:
         raise HTTPException(status_code=404, detail="Protokoll nicht gefunden")
-    if protocol["status"] != "assigned":
+    # 'assigned' ist der Erstauftrag, 'draft'/'in_review' die Neufassung eines
+    # bestehenden Protokolls. Gesperrt bleiben nur freigegebene Fassungen: die
+    # liegen als PDF in Outlook und als Aufgabe in Asana und duerfen nicht
+    # stillschweigend ersetzt werden.
+    if protocol["status"] not in ("assigned", "draft", "in_review"):
         raise HTTPException(
             status_code=409,
             detail=f"Protokoll erwartet keinen Text (status={protocol['status']})",

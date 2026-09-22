@@ -738,6 +738,44 @@ class TestAssignmentEndpoints:
         )
         assert resp.status_code == 409
 
+    def test_draft_markdown_erlaubt_neufassung(self, api_env):
+        """
+        Die Neufassung eines bestehenden Protokolls liefert in den Status
+        'draft' — nicht 'assigned'. Ohne diese Erlaubnis lehnt der Endpoint
+        jede Neufassung mit 409 ab und Maras Arbeit verfaellt.
+        """
+        draft = _create_draft(api_env)
+        resp = api_env["client"].patch(
+            f"/api/protocols/{draft['draft_id']}/draft-markdown",
+            json={"markdown": "# Neu gefasst", "teilnehmer": ["Sven Herbert"]},
+            headers=KEY_HEADER,
+        )
+        assert resp.status_code == 200
+        stored = api_env["db"].get_by_id(draft["draft_id"])
+        assert stored["current_markdown"] == "# Neu gefasst"
+
+    def test_draft_markdown_erlaubt_neufassung_in_review(self, api_env):
+        draft = _create_draft(api_env)
+        api_env["db"].set_status(draft["draft_id"], "in_review")
+        resp = api_env["client"].patch(
+            f"/api/protocols/{draft['draft_id']}/draft-markdown",
+            json={"markdown": "# Neu gefasst"},
+            headers=KEY_HEADER,
+        )
+        assert resp.status_code == 200
+
+    def test_draft_markdown_sperrt_freigegebene(self, api_env):
+        """Eine finalisierte Fassung liegt in Outlook und Asana — unantastbar."""
+        draft = _create_draft(api_env)
+        api_env["db"].set_approved(draft["draft_id"], "ev", "b", "s")
+        api_env["db"].set_finalized(draft["draft_id"])
+        resp = api_env["client"].patch(
+            f"/api/protocols/{draft['draft_id']}/draft-markdown",
+            json={"markdown": "# Ersetzt heimlich"},
+            headers=KEY_HEADER,
+        )
+        assert resp.status_code == 409
+
     def test_draft_markdown_unknown_id(self, api_env):
         resp = api_env["client"].patch(
             "/api/protocols/gibtsnicht/draft-markdown",
