@@ -3309,6 +3309,21 @@ def create_protocol_assignment(
     )
 
 
+def _kurzdatum(iso: Optional[str]) -> str:
+    """
+    TT.MM.JJJJ aus einem ISO-Zeitstempel, für Issue-Titel.
+
+    Macht Auftragstitel bei Serienterminen unterscheidbar — ohne das teilen
+    sich alle "1:1 KNE/SH" ein Issue.
+    """
+    if not iso:
+        return "ohne Datum"
+    try:
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).strftime("%d.%m.%Y")
+    except (ValueError, AttributeError):
+        return str(iso)[:10]
+
+
 def _create_mara_issue(protocol: Dict[str, Any]) -> Optional[str]:
     """
     Beauftragt Mara mit Stufe 2: Transkript ziehen und Protokoll verfassen.
@@ -3367,7 +3382,11 @@ def _create_mara_issue(protocol: Dict[str, Any]) -> Optional[str]:
             f"{_PC_API_URL}/api/companies/{_PC_COMPANY_ID}/issues",
             headers={"Authorization": f"Bearer {_PC_API_KEY}", "Content-Type": "application/json"},
             json={
-                "title": f"📄 Protokoll erstellen: {protocol.get('meeting_name')}",
+                # Datum im Titel — siehe Begruendung in _create_mara_rewrite_issue
+                "title": (
+                    f"📄 Protokoll erstellen: {protocol.get('meeting_name')} "
+                    f"({_kurzdatum(protocol.get('meeting_datetime'))})"
+                ),
                 "description": description,
                 "assigneeAgentId": _MARA_AGENT_ID,
                 "priority": "medium",
@@ -3433,7 +3452,15 @@ def _create_mara_rewrite_issue(protocol: Dict[str, Any]) -> Optional[str]:
             f"{_PC_API_URL}/api/companies/{_PC_COMPANY_ID}/issues",
             headers={"Authorization": f"Bearer {_PC_API_KEY}", "Content-Type": "application/json"},
             json={
-                "title": f"🔄 Protokoll neu fassen: {protocol.get('meeting_name')}",
+                # Datum im Titel, weil Paperclip bei gleichem Titel das
+                # BESTEHENDE offene Issue zurueckgibt statt ein neues
+                # anzulegen. Ohne das teilen sich Serientermine wie
+                # "1:1 KNE/SH" einen Auftrag — und alle bis auf einen
+                # bleiben unbearbeitet, ohne Fehlermeldung.
+                "title": (
+                    f"🔄 Protokoll neu fassen: {protocol.get('meeting_name')} "
+                    f"({_kurzdatum(protocol.get('meeting_datetime'))})"
+                ),
                 "description": description,
                 "assigneeAgentId": _MARA_AGENT_ID,
                 "priority": "low",

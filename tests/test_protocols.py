@@ -1035,6 +1035,45 @@ class TestRewrite:
         resp = api_env["client"].post(f"/api/protocols/{draft['draft_id']}/rewrite")
         assert resp.status_code in (401, 403)
 
+    def test_serientermine_bekommen_unterscheidbare_titel(self, api_env, monkeypatch):
+        """
+        Paperclip gibt bei gleichem Titel das BESTEHENDE offene Issue zurück.
+        Ohne Datum im Titel teilen sich alle „1:1 KNE/SH" einen Auftrag — und
+        alle bis auf einen bleiben unbearbeitet, ohne Fehlermeldung. Genau das
+        ist beim ersten Serienlauf passiert.
+        """
+        titel = []
+
+        class _Resp:
+            status_code = 201
+
+            @staticmethod
+            def json():
+                return {"identifier": "HBE-1"}
+
+        def fake_post(url, **kwargs):
+            titel.append((kwargs.get("json") or {}).get("title", ""))
+            return _Resp()
+
+        monkeypatch.setattr(api_env["api"], "_PC_API_KEY", "k")
+        monkeypatch.setattr(api_env["api"]._http, "post", fake_post)
+
+        for datum in ("2026-05-12T13:15:00+02:00", "2026-05-19T13:15:00+02:00"):
+            d = _create_draft(api_env, meeting_name="1:1 KNE/SH", meeting_datetime=datum)
+            api_env["client"].put(
+                f"/api/protocols/{d['draft_id']}/transcript",
+                json={"transcript": "[00:00] Sven Herbert: Text"},
+                headers=KEY_HEADER,
+            )
+            api_env["client"].post(
+                f"/api/protocols/{d['draft_id']}/rewrite", headers=KEY_HEADER
+            )
+
+        assert len(titel) == 2
+        assert titel[0] != titel[1], f"Titel identisch: {titel}"
+        assert "12.05.2026" in titel[0]
+        assert "19.05.2026" in titel[1]
+
 
 class TestDiscardRecording:
     """
