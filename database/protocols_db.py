@@ -430,6 +430,24 @@ class ProtocolsDB:
             )
             return [self._row_to_dict(row) for row in cursor.fetchall()]
 
+    def list_with_recording(self) -> List[Dict[str, Any]]:
+        """
+        Alle Protokolle mit Plaud-Aufnahme, unabhängig davon, ob schon ein
+        Transkript gespeichert ist.
+
+        Für das erneute Ziehen nach einer Sprecherkorrektur in Plaud: die
+        archivierten Transkripte tragen dann die alte Zuordnung und sind
+        wertlos — schlimmer noch, sie sehen brauchbar aus.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM protocols"
+                " WHERE recording_id IS NOT NULL AND recording_id != ''"
+                "   AND status NOT IN ('discarded', 'rejected')"
+                " ORDER BY meeting_datetime"
+            )
+            return [self._row_to_dict(row) for row in cursor.fetchall()]
+
     def list_pending_assignments(
         self, older_than_hours: Optional[float] = None
     ) -> List[Dict[str, Any]]:

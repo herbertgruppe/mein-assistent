@@ -3652,15 +3652,27 @@ def send_assignment_reminders(
 
 
 @app.get("/api/protocols/missing-transcripts")
-def list_missing_transcripts(_key: str = Security(verify_api_key)):
+def list_missing_transcripts(
+    include_existing: bool = False,
+    _key: str = Security(verify_api_key),
+):
     """
     Protokolle mit Plaud-Aufnahme, aber ohne gespeichertes Transkript.
 
     Grundlage für das Nachtragen der Bestandsprotokolle: das Skript holt sich
     hier die Liste, zieht die Transkripte aus Plaud und schickt sie an den
     PUT-Endpoint unten.
+
+    Mit include_existing=True kommen auch die bereits archivierten mit. Das
+    wird gebraucht, wenn in Plaud die Sprecherzuordnung korrigiert wurde: die
+    gespeicherten Transkripte tragen dann noch die alte, falsche Zuordnung und
+    müssen neu geholt werden.
     """
-    rows = _protocols_db.list_without_transcript()
+    rows = (
+        _protocols_db.list_with_recording()
+        if include_existing
+        else _protocols_db.list_without_transcript()
+    )
     return {
         "count": len(rows),
         "protocols": [

@@ -901,6 +901,44 @@ class TestTranscriptArchiv:
         resp = api_env["client"].get("/api/protocols/missing-transcripts")
         assert resp.status_code in (401, 403)
 
+    def test_include_existing_liefert_auch_archivierte(self, api_env):
+        """
+        Nach einer Sprecherkorrektur in Plaud müssen ALLE Transkripte neu
+        gezogen werden — die archivierten tragen die alte Zuordnung und sehen
+        dabei brauchbar aus.
+        """
+        mit = _create_draft(api_env, recording_id="of_hat_schon")
+        api_env["client"].put(
+            f"/api/protocols/{mit['draft_id']}/transcript",
+            json={"transcript": "alte Zuordnung"},
+            headers=KEY_HEADER,
+        )
+        ohne = _create_draft(api_env, recording_id="of_hat_noch_nicht")
+
+        normal = api_env["client"].get(
+            "/api/protocols/missing-transcripts", headers=KEY_HEADER
+        ).json()
+        alle = api_env["client"].get(
+            "/api/protocols/missing-transcripts?include_existing=true", headers=KEY_HEADER
+        ).json()
+
+        normal_ids = {p["draft_id"] for p in normal["protocols"]}
+        alle_ids = {p["draft_id"] for p in alle["protocols"]}
+
+        assert mit["draft_id"] not in normal_ids
+        assert mit["draft_id"] in alle_ids
+        assert ohne["draft_id"] in normal_ids and ohne["draft_id"] in alle_ids
+
+    def test_include_existing_ueberspringt_verworfene(self, api_env):
+        """Verworfene Aufnahmen brauchen kein frisches Transkript."""
+        weg = _create_draft(api_env, recording_id="of_verworfen")
+        api_env["db"].discard(weg["draft_id"], reason="Fehlaufnahme")
+
+        alle = api_env["client"].get(
+            "/api/protocols/missing-transcripts?include_existing=true", headers=KEY_HEADER
+        ).json()
+        assert weg["draft_id"] not in {p["draft_id"] for p in alle["protocols"]}
+
 
 class TestRewrite:
     """
