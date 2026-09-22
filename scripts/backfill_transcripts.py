@@ -154,6 +154,12 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--dry-run", action="store_true", help="nur anzeigen, nichts schreiben")
     p.add_argument("--limit", type=int, default=0, help="hoechstens N Protokolle")
+    p.add_argument(
+        "--force", action="store_true",
+        help="auch bereits archivierte Transkripte neu holen — noetig nach einer "
+             "Sprecherkorrektur in Plaud, weil die gespeicherte Fassung sonst die "
+             "alte Zuordnung konserviert",
+    )
     p.add_argument("--api", default=os.getenv("MEIN_ASSISTENT_API_URL", DEFAULT_API))
     p.add_argument("--token-file", default=os.getenv("PLAUD_TOKEN_FILE", DEFAULT_TOKEN_FILE))
     args = p.parse_args()
@@ -163,12 +169,18 @@ def main() -> int:
     plaud_headers = {"Authorization": f"Bearer {tok}"}
     api_headers = {"X-API-Key": key, "Content-Type": "application/json"}
 
-    offen = http(f"{args.api}/api/protocols/missing-transcripts", api_headers)
+    url = f"{args.api}/api/protocols/missing-transcripts"
+    if args.force:
+        url += "?include_existing=true"
+    offen = http(url, api_headers)
     protokolle = offen.get("protocols", [])
     if args.limit:
         protokolle = protokolle[: args.limit]
 
-    print(f"Protokolle ohne Transkript: {offen.get('count', 0)}")
+    if args.force:
+        print(f"Protokolle mit Aufnahme (alle, auch archivierte): {offen.get('count', 0)}")
+    else:
+        print(f"Protokolle ohne Transkript: {offen.get('count', 0)}")
     if args.limit:
         print(f"Bearbeite davon: {len(protokolle)}")
     print()
