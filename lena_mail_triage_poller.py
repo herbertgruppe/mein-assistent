@@ -1089,6 +1089,11 @@ ASANA_API = "https://app.asana.com/api/1.0"
 # bisher entstandenen Mail-Aufgaben landeten dadurch ausgerechnet im
 # dringendsten Bereich.
 ASANA_SECTION_NAME = os.getenv("LENA_MAIL_TRIAGE_ASANA_SECTION", "📬 Aus Mails")
+# Empfaenger der erzeugten Aufgaben. Ohne Zuweisung erscheinen sie
+# nicht in Asanas "Meine Aufgaben" — nur im Board selbst. Default ist Sven
+# (s.herbert@herbert.de), weil das Board sein persoenliches ist. Leer setzen
+# laesst die Aufgaben unzugewiesen.
+ASANA_ASSIGNEE = os.getenv("LENA_MAIL_TRIAGE_ASANA_ASSIGNEE", "1202563118654849").strip()
 
 # Rueckfragen: wenn eine Konsequenz nicht vollstaendig ausgefuehrt werden kann,
 # fragt Lena nach — statt stillschweigend nichts zu tun. Eigenes Tageslimit,
@@ -1827,6 +1832,11 @@ def _asana_aufgabe(betreff: str, sender_name: str, sender_email: str,
              f"— angelegt von Lena aus der Mail-Triage")
     kopf = {"Authorization": f"Bearer {ASANA_TOKEN}", "Content-Type": "application/json"}
     daten: Dict[str, Any] = {"name": name, "notes": notes, "projects": [ASANA_BOARD_GID]}
+    # Ohne assignee taucht die Aufgabe in Asanas "Meine Aufgaben"
+    # nicht auf — sie existiert nur im Projekt-Board. 23 Aufgaben lagen so
+    # unsichtbar herum, waehrend Sven sie in seiner Aufgabenliste suchte.
+    if ASANA_ASSIGNEE:
+        daten["assignee"] = ASANA_ASSIGNEE
     # HBE-3061: Faelligkeit NUR wenn die Mail eine nennt. Ein erfundenes Datum
     # sieht aus wie Information und wird zu Rauschen — das Board zeigt zehn
     # ueberfaellige Aufgaben mit Daten aus Januar bis August.
@@ -1839,8 +1849,13 @@ def _asana_aufgabe(betreff: str, sender_name: str, sender_email: str,
             logger.warning("Asana HTTP %d: %s", resp.status_code, resp.text[:200])
             return None
         gid = resp.json().get("data", {}).get("gid")
-        if gid and norm:
-            _asana_cache["titel"].add(norm)  # sofort merken, gegen Dubletten im selben Lauf
+        if gid:
+            # Beide Schluessel sofort merken — gegen Dubletten im selben Lauf,
+            # bevor der Cache das naechste Mal vom Board geholt wird.
+            for frisch in (betreff, name):
+                n = _titel_normalisieren(frisch or "")
+                if n:
+                    _asana_cache.setdefault("titel", set()).add(n)
 
         # In die eigene Section verschieben, sonst landet die Aufgabe in "Heute".
         sec = _asana_section_gid()
