@@ -584,16 +584,26 @@ class ProtocolsDB:
         Hier kommen auch die Teilnehmer an: Mara hat sie aus der korrigierten
         Sprecherzuordnung ermittelt. Erst ab diesem Moment sind sie bekannt.
         teilnehmer=None lässt einen vorhandenen Stand unangetastet.
+
+        Die Review-Frist beginnt neu. Ohne das wäre ein neu gefasstes
+        Protokoll nicht aufrufbar, sobald der ursprüngliche Token älter als
+        TOKEN_TTL_DAYS ist — bei den Altprotokollen von Juni betraf das 35
+        von 41. Der Link führte dann auf „abgelaufen", obwohl der Inhalt
+        frisch war.
         """
         now = _utcnow_iso()
+        neu_bis = (
+            datetime.now(timezone.utc) + timedelta(days=TOKEN_TTL_DAYS)
+        ).isoformat()
         fields = [
             "draft_markdown = ?",
             "current_markdown = ?",
             "status = 'draft'",
+            "expires_at = ?",
             "last_modified = ?",
             "last_modified_by = ?",
         ]
-        params: List[Any] = [markdown, markdown, now, modified_by]
+        params: List[Any] = [markdown, markdown, neu_bis, now, modified_by]
         if teilnehmer is not None:
             fields.insert(2, "teilnehmer = ?")
             params.insert(2, json.dumps(teilnehmer, ensure_ascii=False))
