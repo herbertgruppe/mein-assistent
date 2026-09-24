@@ -379,6 +379,49 @@ class TestAssignmentStage:
         assert stored["teilnehmer"] == ["Sven Herbert", "Lev Keimes"]
         assert stored["eingeladene"] == ["Sven Herbert", "Nie Erschienen"]
 
+    def test_attach_draft_markdown_verlaengert_die_frist(self, db):
+        """
+        Ein neu gefasstes Protokoll muss aufrufbar sein. Ohne Verlängerung
+        führt der Link auf „abgelaufen", obwohl der Inhalt frisch ist — bei
+        den Altprotokollen von Juni betraf das 35 von 41.
+        """
+        result = db.create_assignment(
+            meeting_name="M", meeting_datetime="2026-09-18T10:00:00+02:00", source="plaud-poller"
+        )
+        db.confirm_assignment(result["id"], event_id="ev")
+        # Frist künstlich in die Vergangenheit setzen
+        alt = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+        with db._get_connection() as conn:
+            conn.execute("UPDATE protocols SET expires_at = ? WHERE id = ?", (alt, result["id"]))
+            conn.commit()
+        assert ProtocolsDB.is_expired(db.get_by_id(result["id"])) is True
+
+        db.attach_draft_markdown(result["id"], "# Neu gefasst", teilnehmer=["Sven Herbert"])
+        assert ProtocolsDB.is_expired(db.get_by_id(result["id"])) is False
+
+    def test_attach_draft_markdown_feldreihenfolge(self, db):
+        """
+        Die SQL-Felder werden dynamisch zusammengesetzt; Feld- und
+        Parameterliste müssen deckungsgleich bleiben. Dieser Test prüft die
+        Variante mit allen optionalen Feldern.
+        """
+        result = db.create_assignment(
+            meeting_name="M", meeting_datetime="2026-09-18T10:00:00+02:00", source="plaud-poller"
+        )
+        db.confirm_assignment(result["id"], event_id="ev")
+        db.attach_draft_markdown(
+            result["id"], "# Text",
+            teilnehmer=["Sven Herbert"],
+            transcript="[00:00] Sven Herbert: Hallo",
+        )
+        stored = db.get_by_id(result["id"])
+        assert stored["current_markdown"] == "# Text"
+        assert stored["teilnehmer"] == ["Sven Herbert"]
+        assert stored["transcript"].startswith("[00:00]")
+        assert stored["transcript_saved_at"]
+        assert stored["status"] == "draft"
+        assert ProtocolsDB.is_expired(stored) is False
+
     def test_attach_draft_markdown_without_teilnehmer_keeps_existing(self, db):
         result = db.create_assignment(
             meeting_name="M", meeting_datetime="2026-09-18T10:00:00+02:00", source="plaud-poller"
