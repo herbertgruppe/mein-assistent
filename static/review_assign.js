@@ -24,6 +24,8 @@
     var asanaCheckbox = document.getElementById('asana-checkbox');
     var assignBtn     = document.getElementById('assign-btn');
     var discardBtn    = document.getElementById('discard-btn');
+    var speakerList   = document.getElementById('speaker-list');
+    var speakerReload = document.getElementById('speaker-reload');
     var assignInfo    = document.getElementById('assign-info');
     var attendeeHint  = document.getElementById('attendee-hint');
 
@@ -155,6 +157,7 @@
                 fillSelect(boardSelect, boards.map(function (b) {
                     return { value: b.gid, label: b.name };
                 }), '– Board wählen –');
+                wendeVorschlagAn();
                 updateAssignState();
             })
             .catch(function (err) {
@@ -163,7 +166,7 @@
             });
     }
 
-    function loadSections(boardGid) {
+    function loadSections(boardGid, wunschSection) {
         sectionSelect.disabled = true;
         fillSelect(sectionSelect, [], 'Lade Abschnitte …');
         fetch('/api/asana/boards/' + encodeURIComponent(boardGid) +
@@ -178,10 +181,18 @@
                 }), '– Abschnitt wählen –');
                 sectionSelect.disabled = false;
 
-                var proto = sections.find(function (s) {
-                    return normalize(s.name) === 'protokolle';
+                // Vorschlag aus der Historie schlaegt die Namensheuristik
+                var gewuenscht = wunschSection && sections.some(function (s) {
+                    return s.gid === wunschSection;
                 });
-                if (proto) sectionSelect.value = proto.gid;
+                if (gewuenscht) {
+                    sectionSelect.value = wunschSection;
+                } else {
+                    var proto = sections.find(function (s) {
+                        return normalize(s.name) === 'protokolle';
+                    });
+                    if (proto) sectionSelect.value = proto.gid;
+                }
                 updateAssignState();
             })
             .catch(function (err) {
@@ -241,6 +252,83 @@
                 assignBtn.disabled = false;
                 console.error('Freigabe-Fehler:', err);
             });
+    }
+
+    // ------------------------------------------------------------------
+    // Sprecher aus Plaud — Kontrolle vor der Freigabe
+    // ------------------------------------------------------------------
+    function ladeSprecher() {
+        speakerList.textContent = 'Wird geladen …';
+        fetch('/api/protocols/' + encodeURIComponent(ctx.draftId) +
+              '/plaud-speakers?' + tokenParam)
+            .then(function (r) {
+                if (!r.ok) {
+                    return r.json().catch(function () { return {}; })
+                        .then(function (b) { throw new Error(b.detail || ('HTTP ' + r.status)); });
+                }
+                return r.json();
+            })
+            .then(function (d) {
+                var liste = d.sprecher || [];
+                if (!liste.length) {
+                    speakerList.textContent = 'Noch kein Transkript in Plaud.';
+                    return;
+                }
+                var html = '<ul class="hg-speaker-ul">';
+                liste.forEach(function (s) {
+                    var anteil = d.segmente ? Math.round(100 * s.segmente / d.segmente) : 0;
+                    var unbenannt = /^speaker/i.test(s.name) || s.name === '(ohne Namen)';
+                    html += '<li' + (unbenannt ? ' class="hg-speaker-offen"' : '') + '>' +
+                        escapeHtml(s.name) + ' <span class="hg-speaker-anteil">' +
+                        s.segmente + ' Beiträge, ' + anteil + ' %</span></li>';
+                });
+                html += '</ul>';
+                if (d.unbenannt) {
+                    html += '<p class="hg-speaker-hinweis">' + d.unbenannt +
+                        ' von ' + d.segmente + ' Beiträgen ohne Namen. ' +
+                        'In Plaud ergänzen, dann hier neu laden.</p>';
+                }
+                speakerList.innerHTML = html;
+            })
+            .catch(function (err) {
+                speakerList.textContent = '⚠️ ' + err.message;
+            });
+    }
+
+    function escapeHtml(s) {
+        var d = document.createElement('div');
+        d.textContent = s || '';
+        return d.innerHTML;
+    }
+
+    // ------------------------------------------------------------------
+    // Asana-Board aus der Historie vorschlagen
+    // ------------------------------------------------------------------
+    var vorschlag = null;
+
+    function ladeBoardVorschlag() {
+        return fetch('/api/protocols/' + encodeURIComponent(ctx.draftId) +
+                     '/board-suggestion?' + tokenParam)
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) {
+                if (d && d.gefunden) vorschlag = d;
+            })
+            .catch(function () { /* Vorschlag ist Komfort, kein Muss */ });
+    }
+
+    function wendeVorschlagAn() {
+        // Nur setzen, wenn der Nutzer noch nichts gewaehlt hat.
+        if (!vorschlag || boardSelect.value) return;
+        var da = Array.prototype.some.call(boardSelect.options, function (o) {
+            return o.value === vorschlag.asana_board_gid;
+        });
+        if (!da) return;
+        boardSelect.value = vorschlag.asana_board_gid;
+        loadSections(vorschlag.asana_board_gid, vorschlag.asana_section_gid);
+        if (vorschlag.quelle && vorschlag.quelle.meeting_datetime) {
+            assignInfo.textContent = 'Board übernommen vom ' +
+                vorschlag.quelle.meeting_datetime.slice(0, 10);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -314,8 +402,11 @@
     asanaCheckbox.addEventListener('change', updateAsanaFieldState);
     assignBtn.addEventListener('click', assign);
     discardBtn.addEventListener('click', discard);
+    speakerReload.addEventListener('click', ladeSprecher);
 
     updateAsanaFieldState();
     loadEvents();
-    loadBoards();
+    ladeSprecher();
+    // Vorschlag vor den Boards holen, damit er beim Befuellen schon vorliegt
+    ladeBoardVorschlag().then(loadBoards);
 })();
