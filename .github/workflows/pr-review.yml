@@ -235,11 +235,18 @@ jobs:
 
           # Idempotency fingerprint matches the one set when the issue was created
           REPO_NAME=$(echo "$PR_REPO" | cut -d'/' -f2)
-          FINGERPRINT="${REPO_NAME}-pr-${PR_NUMBER}"
+          # Zwei verifizierte Defekte (2026-09-24), die diesen Job wirkungslos machten:
+          #  1. originFingerprint wird von der Paperclip-API weder persistiert (kommt immer
+          #     als "default" zurueck) noch als Query-Parameter ausgewertet.
+          #  2. Die API liefert ein flaches Array; (.issues // .) bricht darauf mit
+          #     "Cannot index array with string" ab. Der Fehler wurde von 2>/dev/null
+          #     verschluckt, der Job meldete "nichts zu tun" und endete gruen.
+          # Erkennung laeuft deshalb ueber die PR-URL in Titel/Beschreibung.
+          PR_URL_PATTERN="github[.]com/${PR_REPO}/pull/${PR_NUMBER}([^0-9]|$)"
 
           # Fetch open/blocked Code Reviewer issues and match by originFingerprint client-side
           SEARCH_RESP=$(curl -sS -w "\n%{http_code}" \
-            "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/issues?assigneeAgentId=$CODE_REVIEWER_AGENT_ID&status=todo,in_progress,in_review,blocked" \
+            "$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/issues" \
             -H "Authorization: Bearer $PAPERCLIP_API_KEY")
           SEARCH_HTTP=$(echo "$SEARCH_RESP" | tail -1)
           SEARCH_BODY=$(echo "$SEARCH_RESP" | head -n -1)
@@ -250,8 +257,14 @@ jobs:
           fi
 
           ISSUE_IDS=$(echo "$SEARCH_BODY" | jq -r \
-            --arg fp "$FINGERPRINT" \
-            '(.issues // .) | map(select(.originFingerprint == $fp)) | .[].id' \
+            --arg pat "$PR_URL_PATTERN" \
+            '(if type == "array" then . else (.issues // []) end)
+             | map(select(
+                 (.status != "done" and .status != "cancelled")
+                 and ((.title // "") | test("PR Review"; "i"))
+                 and (((.description // "") + " " + (.title // "")) | test($pat))
+               ))
+             | .[].id' \
             2>/dev/null || echo "")
 
           if [ -z "$ISSUE_IDS" ]; then
