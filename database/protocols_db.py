@@ -430,6 +430,35 @@ class ProtocolsDB:
             )
             return [self._row_to_dict(row) for row in cursor.fetchall()]
 
+    def find_previous_board(
+        self, meeting_name: str, exclude_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Sucht die letzte Asana-Zuordnung für denselben Termin.
+
+        Serientermine landen immer auf demselben Board; statt einer
+        gepflegten Tabelle wird die eigene Historie befragt. Das bleibt
+        aktuell, wenn sich Boards ändern, und braucht keine Wartung.
+
+        Bevorzugt werden freigegebene Protokolle — dort ist die Zuordnung
+        durch die Freigabe bestätigt und nicht bloß vorgeschlagen.
+        """
+        if not meeting_name:
+            return None
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM protocols"
+                " WHERE meeting_name = ?"
+                "   AND asana_board_gid IS NOT NULL AND asana_board_gid != ''"
+                "   AND id != COALESCE(?, '')"
+                " ORDER BY"
+                "   CASE status WHEN 'finalized' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END,"
+                "   meeting_datetime DESC"
+                " LIMIT 1",
+                (meeting_name, exclude_id),
+            ).fetchall()
+            return self._row_to_dict(rows[0]) if rows else None
+
     def list_with_recording(self) -> List[Dict[str, Any]]:
         """
         Alle Protokolle mit Plaud-Aufnahme, unabhängig davon, ob schon ein
