@@ -1142,8 +1142,13 @@ def _strip_obsidian_syntax(md: str) -> str:
 _PLAUD_CLIENT_ID = "client_f9e0b214-c11f-434b-8b95-c4497d1feb81"
 _PLAUD_TOKEN_URL = "https://platform.plaud.ai/developer/api/oauth/third-party/access-token"
 _PLAUD_REFRESH_URL = "https://platform.plaud.ai/developer/api/oauth/third-party/access-token/refresh"
-_PLAUD_HOME = Path(os.getenv("PLAUD_HOME", "/opt/mein-assistent/data/.plaud"))
+# Im Container liegt das Token-Verzeichnis unter /app/.plaud — read-only vom
+# Host gemountet (docker-compose). Der Default zeigte lange auf den Host-Pfad,
+# den es im Container nicht gibt; /plaud/auth/status meldete deshalb
+# durchgaengig authenticated=false, obwohl der Token gueltig war.
+_PLAUD_HOME = Path(os.getenv("PLAUD_HOME", "/app/.plaud"))
 _PLAUD_TOKEN_FILE = _PLAUD_HOME / "tokens.json"
+_PLAUD_FILES_URL = "https://platform.plaud.ai/developer/api/open/third-party/files"
 
 
 def _read_plaud_tokens() -> dict:
@@ -3676,6 +3681,133 @@ def send_assignment_reminders(
 
     logger.info("[protocols] %d von %d Erinnerungen versendet", len(reminded), len(due))
     return {"checked": len(due), "reminded": reminded}
+
+
+def _plaud_id_kandidaten(recording_id: str) -> List[str]:
+    """Schreibweisen, unter denen eine Aufnahme in Plaud zu finden ist."""
+    kandidaten = [recording_id]
+    if "_" not in recording_id:
+        kandidaten.append("of_" + recording_id)
+    return kandidaten
+
+
+@app.get("/api/protocols/{draft_id}/plaud-speakers")
+def get_plaud_speakers(
+    draft_id: str,
+    token: Optional[str] = None,
+    _user: str = Depends(get_authenticated_user),
+):
+    """
+    Liefert die Sprecher, die aktuell in Plaud hinterlegt sind.
+
+    Zweck: vor der Freigabe sichtbar machen, ob eine Sprecherkorrektur
+    angekommen ist. Plaud übernimmt Änderungen nicht immer sofort — am
+    22.09. waren beim ersten Durchgang zwei von vier Korrekturen
+    gespeichert. Ohne diese Anzeige merkt man das erst am fertigen
+    Protokoll, und dann ist das Transkript schon gezogen.
+
+    Bewusst live aus Plaud, nicht aus dem Archiv: das Archiv zeigt den
+    Stand des letzten Abrufs und damit genau das, was hier überprüft
+    werden soll.
+    """
+    protocol = _get_protocol_for_token(draft_id, token)
+    recording_id = protocol.get("recording_id")
+    if not recording_id:
+        raise HTTPException(status_code=404, detail="Keine Plaud-Aufnahme zugeordnet")
+
+    tokens = _read_plaud_tokens()
+    if not tokens or not tokens.get("access_token"):
+        raise HTTPException(status_code=503, detail="Plaud-Zugang nicht verfügbar")
+
+    headers = {
+        "Authorization": f"Bearer {tokens['access_token']}",
+        # Plaud weist Default-User-Agents mit 403 ab
+        "User-Agent": "herbert-mein-assistent/1.0",
+    }
+    datei = None
+    for kandidat in _plaud_id_kandidaten(recording_id):
+        try:
+            resp = _http.get(f"{_PLAUD_FILES_URL}/{kandidat}", headers=headers, timeout=30)
+            if resp.status_code == 200:
+                datei = resp.json()
+                break
+        except Exception as exc:
+            logger.warning("[plaud] Sprecher-Abruf fehlgeschlagen: %s", type(exc).__name__)
+
+    if datei is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Aufnahme in Plaud nicht gefunden — möglicherweise gelöscht",
+        )
+
+    sprecher: dict = {}
+    for bevorzugt in ("transaction_polish", "transaction"):
+        for eintrag in datei.get("source_list") or []:
+            if eintrag.get("data_type") != bevorzugt or not eintrag.get("data_content"):
+                continue
+            try:
+                segmente = json.loads(eintrag["data_content"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(segmente, list):
+                continue
+            for seg in segmente:
+                if not isinstance(seg, dict) or not (seg.get("content") or "").strip():
+                    continue
+                name = (seg.get("speaker") or "").strip() or "(ohne Namen)"
+                sprecher[name] = sprecher.get(name, 0) + 1
+            if sprecher:
+                break
+        if sprecher:
+            break
+
+    geordnet = sorted(sprecher.items(), key=lambda x: -x[1])
+    gesamt = sum(sprecher.values())
+    unbenannt = sum(
+        n for k, n in sprecher.items()
+        if k.lower().startswith("speaker") or k == "(ohne Namen)"
+    )
+    return {
+        "recording_title": protocol.get("recording_title"),
+        "segmente": gesamt,
+        "unbenannt": unbenannt,
+        "sprecher": [{"name": k, "segmente": n} for k, n in geordnet],
+    }
+
+
+@app.get("/api/protocols/{draft_id}/board-suggestion")
+def suggest_asana_board(
+    draft_id: str,
+    token: Optional[str] = None,
+    _user: str = Depends(get_authenticated_user),
+):
+    """
+    Schlägt Asana-Board und -Abschnitt aus der Historie vor.
+
+    Serientermine wie „1:1 LK / SH" landen immer auf demselben Board.
+    Statt einer gepflegten Zuordnungstabelle wird geschaut, wohin dasselbe
+    Meeting zuletzt zugeordnet wurde — das lernt von selbst mit und geht
+    nicht veraltet, wenn sich Boards ändern.
+
+    Bevorzugt werden abgeschlossene Protokolle: dort ist die Zuordnung
+    durch die Freigabe bestätigt.
+    """
+    protocol = _get_protocol_for_token(draft_id, token)
+    treffer = _protocols_db.find_previous_board(
+        protocol["meeting_name"], exclude_id=draft_id
+    )
+    if not treffer:
+        return {"gefunden": False}
+    return {
+        "gefunden": True,
+        "asana_board_gid": treffer["asana_board_gid"],
+        "asana_section_gid": treffer["asana_section_gid"],
+        "quelle": {
+            "meeting_name": treffer["meeting_name"],
+            "meeting_datetime": treffer["meeting_datetime"],
+            "status": treffer["status"],
+        },
+    }
 
 
 @app.get("/api/protocols/missing-transcripts")

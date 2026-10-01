@@ -42,6 +42,11 @@ services:
       - /opt/vault-mirror:/opt/vault-mirror
       # Plaud-Poller state.db (HBE-1527)
       - /var/lib/plaud-poller:/var/lib/plaud-poller:ro
+      # Plaud-Token, read-only. Der Poller haelt ihn frisch (Refresh alle
+      # 10 Min); die API liest nur mit, um die aktuelle Sprecherzuordnung
+      # einer Aufnahme anzuzeigen. Ohne dieses Mount meldet
+      # /plaud/auth/status dauerhaft authenticated=false.
+      - /opt/mein-assistent/data/.plaud:/app/.plaud:ro
     depends_on:
       - assistent
     healthcheck:

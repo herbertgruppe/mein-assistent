@@ -8,6 +8,7 @@ Ausführen:
     pytest tests/test_protocols.py -v
 """
 
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1320,6 +1321,143 @@ class TestAssignmentReminders:
     def test_requires_api_key(self, api_env):
         resp = api_env["client"].post("/api/protocols/assignment-reminders")
         assert resp.status_code in (401, 403)
+
+
+class TestBoardVorschlag:
+    """
+    Serientermine landen immer auf demselben Asana-Board. Der Vorschlag
+    kommt aus der eigenen Historie — das lernt mit und braucht keine
+    gepflegte Zuordnungstabelle.
+    """
+
+    def test_vorschlag_aus_vorherigem_termin(self, api_env, mara_issues):
+        alt = _create_draft(api_env, meeting_name="1:1 LK / SH")
+        api_env["db"].set_approved(alt["draft_id"], "ev", "board-42", "section-7")
+        api_env["db"].set_finalized(alt["draft_id"])
+
+        neu = _create_assignment(api_env, meeting_name="1:1 LK / SH")
+        token = _token_of(api_env, neu["draft_id"])
+        resp = api_env["client"].get(
+            f"/api/protocols/{neu['draft_id']}/board-suggestion?token={token}"
+        )
+        assert resp.status_code == 200
+        d = resp.json()
+        assert d["gefunden"] is True
+        assert d["asana_board_gid"] == "board-42"
+        assert d["asana_section_gid"] == "section-7"
+
+    def test_kein_vorschlag_bei_neuem_termin(self, api_env):
+        neu = _create_assignment(api_env, meeting_name="Noch nie dagewesen")
+        token = _token_of(api_env, neu["draft_id"])
+        resp = api_env["client"].get(
+            f"/api/protocols/{neu['draft_id']}/board-suggestion?token={token}"
+        )
+        assert resp.json()["gefunden"] is False
+
+    def test_freigegebene_zuordnung_schlaegt_entwurf(self, api_env):
+        """
+        Ein finalisiertes Protokoll trägt eine bestätigte Zuordnung, ein
+        Entwurf nur eine vorgeschlagene. Die bestätigte gewinnt.
+        """
+        entwurf = _create_draft(
+            api_env, meeting_name="BL-Besprechung HRN",
+            meeting_datetime="2026-09-01T09:00:00+02:00",
+        )
+        api_env["db"].set_approved(entwurf["draft_id"], "ev", "board-entwurf", "s1")
+
+        fertig = _create_draft(
+            api_env, meeting_name="BL-Besprechung HRN",
+            meeting_datetime="2026-08-01T09:00:00+02:00",
+        )
+        api_env["db"].set_approved(fertig["draft_id"], "ev", "board-fertig", "s2")
+        api_env["db"].set_finalized(fertig["draft_id"])
+
+        neu = _create_assignment(api_env, meeting_name="BL-Besprechung HRN")
+        token = _token_of(api_env, neu["draft_id"])
+        d = api_env["client"].get(
+            f"/api/protocols/{neu['draft_id']}/board-suggestion?token={token}"
+        ).json()
+        assert d["asana_board_gid"] == "board-fertig"
+
+    def test_vorschlag_ignoriert_sich_selbst(self, api_env):
+        """Ein Protokoll darf sich nicht selbst als Quelle vorschlagen."""
+        d = _create_draft(api_env, meeting_name="Einziger Termin")
+        api_env["db"].set_approved(d["draft_id"], "ev", "board-x", "s")
+        token = _token_of(api_env, d["draft_id"])
+        resp = api_env["client"].get(
+            f"/api/protocols/{d['draft_id']}/board-suggestion?token={token}"
+        )
+        assert resp.json()["gefunden"] is False
+
+
+class TestPlaudSprecher:
+    """
+    Zeigt die aktuell in Plaud hinterlegten Sprecher — damit vor der
+    Freigabe sichtbar ist, ob eine Korrektur angekommen ist. Plaud
+    übernimmt Änderungen nicht immer sofort.
+    """
+
+    def _plaud_antwort(self, segmente):
+        return {
+            "source_list": [
+                {"data_type": "transaction", "data_content": json.dumps(segmente)}
+            ]
+        }
+
+    def test_sprecher_werden_gezaehlt(self, api_env, monkeypatch):
+        created = _create_assignment(api_env)
+        token = _token_of(api_env, created["draft_id"])
+
+        class _R:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {
+                    "source_list": [{
+                        "data_type": "transaction",
+                        "data_content": json.dumps([
+                            {"content": "a", "speaker": "Sven Herbert"},
+                            {"content": "b", "speaker": "Sven Herbert"},
+                            {"content": "c", "speaker": "Speaker 2"},
+                        ]),
+                    }]
+                }
+
+        monkeypatch.setattr(api_env["api"], "_read_plaud_tokens", lambda: {"access_token": "t"})
+        monkeypatch.setattr(api_env["api"]._http, "get", lambda *a, **k: _R())
+
+        d = api_env["client"].get(
+            f"/api/protocols/{created['draft_id']}/plaud-speakers?token={token}"
+        ).json()
+        assert d["segmente"] == 3
+        assert d["unbenannt"] == 1
+        assert d["sprecher"][0] == {"name": "Sven Herbert", "segmente": 2}
+
+    def test_ohne_plaud_zugang(self, api_env, monkeypatch):
+        created = _create_assignment(api_env)
+        token = _token_of(api_env, created["draft_id"])
+        monkeypatch.setattr(api_env["api"], "_read_plaud_tokens", lambda: None)
+        resp = api_env["client"].get(
+            f"/api/protocols/{created['draft_id']}/plaud-speakers?token={token}"
+        )
+        assert resp.status_code == 503
+
+    def test_geloeschte_aufnahme(self, api_env, monkeypatch):
+        created = _create_assignment(api_env)
+        token = _token_of(api_env, created["draft_id"])
+
+        class _R:
+            status_code = 404
+
+        monkeypatch.setattr(api_env["api"], "_read_plaud_tokens", lambda: {"access_token": "t"})
+        monkeypatch.setattr(api_env["api"]._http, "get", lambda *a, **k: _R())
+
+        resp = api_env["client"].get(
+            f"/api/protocols/{created['draft_id']}/plaud-speakers?token={token}"
+        )
+        assert resp.status_code == 404
+        assert "gelöscht" in resp.json()["detail"]
 
 
 class TestAssignmentPage:
