@@ -127,6 +127,42 @@ body {
 .hg-status-pending_assignment { background: #eef3fa; border-color: #9db8d6; }
 .hg-status-assigned { background: #eef3fa; border-color: #6f93bd; }
 
+/* Sprecher-Kontrolle: zeigt, was aktuell in Plaud steht */
+.hg-speakers {
+    background: var(--hg-bg);
+    border: 1px solid var(--hg-border);
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin-bottom: 18px;
+    font-size: 14px;
+}
+.hg-speakers-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 6px;
+}
+.hg-btn-link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--hg-blue, #1F4E79);
+    text-decoration: underline;
+    cursor: pointer;
+    font-size: 13px;
+}
+.hg-speaker-ul {
+    margin: 0;
+    padding-left: 20px;
+}
+.hg-speaker-ul li { margin-bottom: 2px; }
+.hg-speaker-offen { color: #b45309; }
+.hg-speaker-anteil { color: #666; font-size: 13px; }
+.hg-speaker-hinweis {
+    margin: 8px 0 0;
+    color: #b45309;
+}
+
 /* Metadaten */
 .hg-metadata {
     background: var(--hg-bg);
