@@ -1,4 +1,4 @@
-﻿"""
+"""
 FastAPI REST-Endpunkt für den Meeting-Protokoll-Workflow der Herbert Gruppe.
 
 Wird vom Cowork-Skill `meeting-protokoll` aufgerufen, sobald Sven ein Protokoll
@@ -42,7 +42,7 @@ from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import requests as _http
 from dotenv import load_dotenv
@@ -65,7 +65,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
 
-from database.protocols_db import ProtocolsDB
+from database.protocols_db import ASSIGNMENT_STATUSES, ProtocolsDB
 
 load_dotenv()
 
@@ -302,6 +302,16 @@ _PC_COMPANY_ID = os.getenv("PAPERCLIP_COMPANY_ID_MA", "").strip()
 # MARA_SPEAKER_FALLBACK_DEFAULT: ask | continue | pause
 _MARA_SPEAKER_FALLBACK_DEFAULT = os.getenv("MARA_SPEAKER_FALLBACK_DEFAULT", "ask").strip()
 
+# Mara — Protokoll-Agentin. Bekommt in Stufe 2 den Auftrag, das Transkript zu
+# ziehen, nachdem Sven Termin, Board und Teilnehmer bestaetigt hat.
+_MARA_AGENT_ID = os.getenv(
+    "PAPERCLIP_PROTOKOLL_AGENT_ID", "ed26f194-f0a9-4f70-a52d-6e39be9013e3"
+).strip()
+
+# Nachfass-Rhythmus fuer offene Zuordnungen. Drei Tage, weil eine Aufnahme vom
+# Freitag nicht schon am Samstag mahnen soll.
+ASSIGNMENT_REMINDER_HOURS = float(os.getenv("ASSIGNMENT_REMINDER_HOURS", "72"))
+
 # ---------------------------------------------------------------------------
 # Backward-compat module-level globals (derived from registry; used by speaker
 # endpoints and tests that patch these names directly).
@@ -455,6 +465,14 @@ def _tg_agent_send(
         )
         if resp.ok:
             return resp.json().get("result", {}).get("message_id")
+        # HBE-3107: Diese Zeile fehlte. Telegram lehnte 105 von 130 Sendungen ab,
+        # ohne dass irgendwo eine Spur davon blieb. Die Fehlerbeschreibung von
+        # Telegram nennt das Problem praezise ("Character '-' is reserved") und
+        # gehoert deshalb ins Log. Sie enthaelt kein Token.
+        logger.warning(
+            "[telegram] sendMessage abgelehnt: HTTP %s %s",
+            resp.status_code, resp.text[:300],
+        )
         return None
     except _http.exceptions.RequestException as exc:
         # Use type name only — str(exc) would include the full URL with the BOT_TOKEN
@@ -1335,11 +1353,17 @@ PLAUD_STATE_DB = _PLAUD_DB_PATH
 _PROTOCOLS_DB_PATH = str(_BASE_DIR / "data" / "protocols.db")
 # protocols.status → tracking_status mapping (module-level constant, not per-request)
 _PROTO_STATUS_MAP: dict = {
+    # Stufe 1: wartet auf Svens Zuordnung, es gibt noch kein Protokoll zu lesen
+    "pending_assignment": "assignment_pending",
+    # Stufe 1 bestaetigt, Mara zieht das Transkript
+    "assigned":  "processing",
     "draft":     "review_ready",
     "in_review": "review_ready",
     "approved":  "review_ready",   # BackgroundTask kann scheitern; nur finalized = done
     "finalized": "done",
     "rejected":  "review_ready",
+    # Fehlaufnahme — bewusst kein Protokoll, nichts mehr zu tun
+    "discarded": "cancelled",
 }
 
 
@@ -1729,7 +1753,15 @@ class TelegramSendRequest(BaseModel):
 class LenaTelegramSendRequest(BaseModel):
     chat_id: str = Field(..., description="Telegram Chat-ID (Empfänger)")
     text: str = Field(..., description="Nachrichtentext")
-    parse_mode: str = Field("MarkdownV2", description="Telegram parse_mode (MarkdownV2 empfohlen)")
+    # HBE-3107: KEIN Default. MarkdownV2 als Vorbelegung hat jeden unescapten
+    # Bindestrich, Punkt oder Klammerausdruck zu einem HTTP 400 gemacht — und
+    # der Fehler war fuer den Aufrufer unsichtbar. Wer Formatierung will,
+    # fordert sie ausdruecklich an und escapet selbst.
+    parse_mode: Optional[str] = Field(
+        None,
+        description="Telegram parse_mode. Leer = unformatierter Text (sicher). "
+                    "Bei 'MarkdownV2' muessen _ * [ ] ( ) ~ ` > # + - = | { } . ! escapet sein.",
+    )
     issue_id: Optional[str] = Field(None, description="Paperclip Issue-ID für outbound_messages Tracking")
     comment_id: Optional[str] = Field(None, description="Paperclip Comment-ID für outbound_messages Tracking")
     reply_markup: Optional[dict] = Field(None, description="Telegram reply_markup (Inline-Keyboard, ReplyKeyboard, etc.)")
@@ -2906,6 +2938,79 @@ class ProtocolDraftResponse(BaseModel):
     expires_at: str
 
 
+class ProtocolAssignmentRequest(BaseModel):
+    """Stufe 1: der Poller meldet eine Aufnahme, bevor ein Transkript existiert."""
+
+    meeting_name: str = Field(..., description="Plaud-Aufnahmename als vorläufiger Titel")
+    meeting_datetime: str = Field(..., description="ISO-8601, Aufnahmezeitpunkt")
+    source: str = "plaud-poller"
+    recording_id: Optional[str] = None
+    recording_title: Optional[str] = Field(
+        None, description="Name der Aufnahme in Plaud — zum Wiederfinden in der App"
+    )
+    recording_duration: Optional[str] = None
+
+
+class ProtocolAssignmentResponse(BaseModel):
+    draft_id: str
+    assignment_url: str
+    expires_at: str
+    created: bool = Field(
+        True, description="False, wenn zu dieser recording_id bereits eine Zuordnung lief"
+    )
+
+
+class ProtocolAssignRequest(BaseModel):
+    """
+    Svens bestätigte Zuordnung — gibt die Aufnahme für Mara frei.
+
+    Teilnehmer werden hier NICHT erfasst. Sie ergeben sich erst aus der
+    Sprecherzuordnung, die Sven unmittelbar vor dieser Freigabe in Plaud
+    korrigiert hat — vorher sind sie schlicht noch nicht bekannt.
+    """
+
+    event_id: Optional[str] = Field(None, description="Outlook-Event-ID")
+    eingeladene: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Eingeladene laut Outlook-Termin. Gegenprobe für Mara, KEINE "
+            "Teilnehmerliste — eingeladen ist nicht anwesend."
+        ),
+    )
+    asana_board_gid: Optional[str] = None
+    asana_section_gid: Optional[str] = None
+    create_asana_task: bool = True
+    ablageort: Optional[str] = None
+    meeting_name: Optional[str] = Field(None, description="Übersteuert den Plaud-Titel")
+    meeting_datetime: Optional[str] = None
+
+
+class ProtocolDraftMarkdownRequest(BaseModel):
+    """Maras Lieferung aus Stufe 2: Protokolltext, Teilnehmer, Rohtranskript."""
+
+    markdown: str
+    teilnehmer: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Aus der korrigierten Sprecherzuordnung ermittelt. None lässt einen "
+            "vorhandenen Stand unangetastet."
+        ),
+    )
+    transcript: Optional[str] = Field(
+        None,
+        description=(
+            "Rohtranskript aus Plaud. Wird mitgespeichert, damit das Protokoll "
+            "später gegen die Quelle prüfbar bleibt."
+        ),
+    )
+
+
+class ProtocolTranscriptRequest(BaseModel):
+    """Nachtrag eines Transkripts zu einem bestehenden Protokoll."""
+
+    transcript: str
+
+
 class ProtocolPatchRequest(BaseModel):
     markdown: str
 
@@ -3155,6 +3260,552 @@ def create_protocol_draft(
     )
 
 
+@app.post(
+    "/api/protocols/assignment",
+    response_model=ProtocolAssignmentResponse,
+    status_code=201,
+)
+def create_protocol_assignment(
+    req: ProtocolAssignmentRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Stufe 1 des zweistufigen Workflows: der Poller meldet eine neue Aufnahme.
+
+    Hier wird noch kein Transkript geholt. Erst nach Svens Zuordnung (und der
+    Gelegenheit, die Sprecher in Plaud zu korrigieren) übernimmt Mara — vorher
+    war die Reihenfolge umgekehrt, wodurch jede Sprecherkorrektur zu spät kam.
+
+    Idempotent über recording_id: ein zweiter Aufruf für dieselbe Aufnahme gibt
+    die bestehende Zuordnung zurück, statt eine zweite anzulegen.
+    """
+    if req.recording_id:
+        existing = _protocols_db.get_by_recording_id(req.recording_id)
+        if existing:
+            logger.info(
+                "[protocols] Zuordnung zu recording_id=%s existiert bereits (%s, status=%s)",
+                req.recording_id, existing["id"], existing["status"],
+            )
+            return ProtocolAssignmentResponse(
+                draft_id=existing["id"],
+                assignment_url=f"{_PUBLIC_BASE_URL}/review/{existing['reviewer_token']}",
+                expires_at=existing["expires_at"],
+                created=False,
+            )
+
+    result = _protocols_db.create_assignment(
+        meeting_name=req.meeting_name,
+        meeting_datetime=req.meeting_datetime,
+        source=req.source,
+        recording_id=req.recording_id,
+        recording_title=req.recording_title or req.meeting_name,
+        recording_duration=req.recording_duration,
+    )
+    return ProtocolAssignmentResponse(
+        draft_id=result["id"],
+        assignment_url=f"{_PUBLIC_BASE_URL}/review/{result['reviewer_token']}",
+        expires_at=result["expires_at"],
+        created=True,
+    )
+
+
+def _kurzdatum(iso: Optional[str]) -> str:
+    """
+    TT.MM.JJJJ aus einem ISO-Zeitstempel, für Issue-Titel.
+
+    Macht Auftragstitel bei Serienterminen unterscheidbar — ohne das teilen
+    sich alle "1:1 KNE/SH" ein Issue.
+    """
+    if not iso:
+        return "ohne Datum"
+    try:
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).strftime("%d.%m.%Y")
+    except (ValueError, AttributeError):
+        return str(iso)[:10]
+
+
+def _create_mara_issue(protocol: Dict[str, Any]) -> Optional[str]:
+    """
+    Beauftragt Mara mit Stufe 2: Transkript ziehen und Protokoll verfassen.
+
+    Der entscheidende Unterschied zum bisherigen Ablauf: das Transkript wird
+    erst jetzt geholt, nachdem Sven die Sprecherzuordnung in Plaud korrigiert
+    hat. Die Sprecherzuordnung ist damit eine verlaessliche Quelle geworden —
+    vorher war sie es nicht, weil der Text schon gezogen war, bevor Sven sie
+    anfassen konnte.
+    """
+    if not _PC_API_KEY:
+        logger.warning("[protocols] PAPERCLIP_API_KEY_MA nicht gesetzt — kein Mara-Issue")
+        return None
+
+    eingeladene = protocol.get("eingeladene") or []
+    eingeladene_block = (
+        "\n".join(f"- {name}" for name in eingeladene)
+        if eingeladene
+        else "_Kein Termin zugeordnet — es gibt keine Gegenprobe._"
+    )
+    recording_id = protocol.get("recording_id") or "?"
+
+    description = (
+        f"Sven hat die Zuordnung bestätigt und **unmittelbar davor die Sprecher in "
+        f"Plaud korrigiert**. Das Transkript kann jetzt gezogen werden.\n\n"
+        f"**Draft-ID:** `{protocol['id']}`\n"
+        f"**Recording-ID:** `{recording_id}`\n"
+        f"**Aufnahme in Plaud:** {protocol.get('recording_title') or '—'}\n"
+        f"**Termin:** {protocol.get('meeting_name')} ({protocol.get('meeting_datetime')})\n"
+        f"**Outlook-Event:** `{protocol.get('event_id') or '—'}`\n"
+        f"**Asana-Board:** `{protocol.get('asana_board_gid') or '—'}` / "
+        f"Section `{protocol.get('asana_section_gid') or '—'}`\n\n"
+        f"### Teilnehmer ermitteln — verbindliche Reihenfolge\n\n"
+        f"1. **Die korrigierte Sprecherzuordnung im Transkript ist die Quelle.** "
+        f"Wer dort als sprechende Person gefuehrt wird, war anwesend. Sven hat sie "
+        f"gerade geprueft, also ist sie belastbar.\n"
+        f"2. **Die Eingeladenen unten sind nur die Gegenprobe**, keine Quelle. "
+        f"Eingeladen ist nicht anwesend.\n"
+        f"3. **Niemals** aus Termintitel oder Niederlassungs-Kuerzel ableiten. "
+        f"„BL HRN\" heisst nicht, dass Dragan dabei war.\n"
+        f"4. Wer im Transkript nur **erwaehnt** wird, ist kein Teilnehmer.\n"
+        f"5. Bleibt jemand unklar, vermerke das als offene Frage im Protokoll, "
+        f"statt zu raten.\n\n"
+        f"### Eingeladene laut Outlook (Gegenprobe)\n{eingeladene_block}\n\n"
+        f"### Ablauf\n"
+        f"1. Transkript und Zusammenfassung zur Recording-ID holen\n"
+        f"2. Teilnehmer nach obiger Reihenfolge ermitteln\n"
+        f"3. Protokoll verfassen\n"
+        f"4. Text und ermittelte Teilnehmer an "
+        f"`PATCH /api/protocols/{protocol['id']}/draft-markdown` uebergeben\n"
+        f"5. Sven den Reviewer-Link schicken"
+    )
+
+    try:
+        resp = _http.post(
+            f"{_PC_API_URL}/api/companies/{_PC_COMPANY_ID}/issues",
+            headers={"Authorization": f"Bearer {_PC_API_KEY}", "Content-Type": "application/json"},
+            json={
+                # Datum im Titel — siehe Begruendung in _create_mara_rewrite_issue
+                "title": (
+                    f"📄 Protokoll erstellen: {protocol.get('meeting_name')} "
+                    f"({_kurzdatum(protocol.get('meeting_datetime'))})"
+                ),
+                "description": description,
+                "assigneeAgentId": _MARA_AGENT_ID,
+                "priority": "medium",
+            },
+            timeout=15,
+        )
+        if resp.status_code not in (200, 201):
+            logger.error(
+                "[protocols] Mara-Issue fehlgeschlagen: %s — %s",
+                resp.status_code, resp.text[:200],
+            )
+            return None
+        identifier = str(resp.json().get("identifier") or "?")
+        logger.info("[protocols] Mara beauftragt: %s (draft=%s)", identifier, protocol["id"])
+        return identifier
+    except Exception as exc:
+        logger.error("[protocols] Mara-Issue fehlgeschlagen: %s", exc)
+        return None
+
+
+def _create_mara_rewrite_issue(protocol: Dict[str, Any]) -> Optional[str]:
+    """
+    Beauftragt Mara, ein bestehendes Protokoll neu zu fassen.
+
+    Anders als beim Erstauftrag gibt es hier nichts zu recherchieren: Termin,
+    Board und Teilnehmer stehen fest, das Transkript liegt im Archiv. Es geht
+    ausschliesslich um die Form.
+    """
+    if not _PC_API_KEY:
+        logger.warning("[protocols] PAPERCLIP_API_KEY_MA nicht gesetzt — kein Mara-Issue")
+        return None
+
+    teilnehmer = protocol.get("teilnehmer") or []
+    teilnehmer_zeile = ", ".join(teilnehmer) if teilnehmer else "_nicht erfasst_"
+
+    description = (
+        f"Dieses Protokoll existiert bereits, entspricht aber noch dem alten "
+        f"Format. Fasse es nach der aktuellen Vorgabe neu.\n\n"
+        f"**Draft-ID:** `{protocol['id']}`\n"
+        f"**Termin:** {protocol.get('meeting_name')} ({protocol.get('meeting_datetime')})\n"
+        f"**Bisher erfasste Teilnehmer:** {teilnehmer_zeile}\n\n"
+        f"### Quelle\n\n"
+        f"Das Transkript liegt im Archiv, **nicht** in Plaud holen:\n\n"
+        f"```\nGET {_PUBLIC_BASE_URL}/api/protocols/{protocol['id']}/transcript\n```\n\n"
+        f"Es enthält die Sprecherzuordnung im Format `[mm:ss] Name: Text`. "
+        f"Ermittle die Teilnehmer daraus — nicht aus der Liste oben, die "
+        f"stammt teils aus Outlook-Einladungen und ist der Grund für die "
+        f"Neufassung.\n\n"
+        f"### Was zu tun ist\n\n"
+        f"1. Transkript abrufen\n"
+        f"2. Protokoll nach dem Format aus SKILL_STAGE2 Schritt 4 schreiben — "
+        f"Summary mit Kernentscheidungen, nummerierte Themen mit Entscheidung "
+        f"und Aufgaben, offene Punkte am Schluss, KI-Hinweis darunter\n"
+        f"3. Text und ermittelte Teilnehmer an "
+        f"`PATCH /api/protocols/{protocol['id']}/draft-markdown` uebergeben — "
+        f"**ohne** `transcript`, das ist bereits gespeichert\n\n"
+        f"**Kein Telegram an Sven.** Diese Protokolle werden gesammelt "
+        f"abgearbeitet; einzelne Meldungen waeren nur Laerm."
+    )
+
+    try:
+        resp = _http.post(
+            f"{_PC_API_URL}/api/companies/{_PC_COMPANY_ID}/issues",
+            headers={"Authorization": f"Bearer {_PC_API_KEY}", "Content-Type": "application/json"},
+            json={
+                # Datum im Titel, weil Paperclip bei gleichem Titel das
+                # BESTEHENDE offene Issue zurueckgibt statt ein neues
+                # anzulegen. Ohne das teilen sich Serientermine wie
+                # "1:1 KNE/SH" einen Auftrag — und alle bis auf einen
+                # bleiben unbearbeitet, ohne Fehlermeldung.
+                "title": (
+                    f"🔄 Protokoll neu fassen: {protocol.get('meeting_name')} "
+                    f"({_kurzdatum(protocol.get('meeting_datetime'))})"
+                ),
+                "description": description,
+                "assigneeAgentId": _MARA_AGENT_ID,
+                "priority": "low",
+            },
+            timeout=15,
+        )
+        if resp.status_code not in (200, 201):
+            logger.error(
+                "[protocols] Rewrite-Issue fehlgeschlagen: %s — %s",
+                resp.status_code, resp.text[:200],
+            )
+            return None
+        identifier = str(resp.json().get("identifier") or "?")
+        logger.info("[protocols] Neufassung beauftragt: %s (draft=%s)", identifier, protocol["id"])
+        return identifier
+    except Exception as exc:
+        logger.error("[protocols] Rewrite-Issue fehlgeschlagen: %s", exc)
+        return None
+
+
+@app.post("/api/protocols/{draft_id}/assign", status_code=202)
+def assign_protocol(
+    draft_id: str,
+    req: ProtocolAssignRequest,
+    token: Optional[str] = None,
+    _user: str = Depends(get_authenticated_user),
+):
+    """
+    Sven bestätigt die Zuordnung — das ist der Startschuss für Stufe 2.
+
+    Ab hier ist das Transkript eingefroren: was jetzt noch in Plaud geändert
+    wird, kommt zu spät. Deshalb steht der Hinweis zur Sprecherkorrektur im
+    Editor vor diesem Button, nicht danach.
+    """
+    protocol = _get_protocol_for_token(draft_id, token)
+
+    if protocol["status"] not in ("pending_assignment", "assigned"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Protokoll ist nicht mehr in der Zuordnungs-Stufe (status={protocol['status']})",
+        )
+    if req.create_asana_task and not (req.asana_board_gid and req.asana_section_gid):
+        raise HTTPException(
+            status_code=422,
+            detail="Asana-Board und -Abschnitt sind Pflicht, wenn eine Aufgabe angelegt werden soll",
+        )
+
+    already_assigned = protocol["status"] == "assigned"
+    _protocols_db.confirm_assignment(
+        draft_id,
+        event_id=req.event_id,
+        eingeladene=req.eingeladene,
+        asana_board_gid=req.asana_board_gid,
+        asana_section_gid=req.asana_section_gid,
+        create_asana_task=req.create_asana_task,
+        ablageort=req.ablageort,
+        meeting_name=req.meeting_name,
+        meeting_datetime=req.meeting_datetime,
+    )
+
+    # Ein zweiter Klick darf Mara nicht ein zweites Mal beauftragen.
+    issue = None if already_assigned else _create_mara_issue(_protocols_db.get_by_id(draft_id))
+
+    return {
+        "status": "assigned",
+        "draft_id": draft_id,
+        "mara_issue": issue,
+        "eingeladene": req.eingeladene,
+    }
+
+
+class ProtocolDiscardRequest(BaseModel):
+    reason: str = Field("Fehlaufnahme", description="Warum kein Protokoll entstehen soll")
+
+
+@app.post("/api/protocols/{draft_id}/discard", status_code=200)
+def discard_protocol(
+    draft_id: str,
+    req: Optional[ProtocolDiscardRequest] = None,
+    token: Optional[str] = None,
+    _user: str = Depends(get_authenticated_user),
+):
+    """
+    Verwirft eine Aufnahme, zu der kein Protokoll entstehen soll.
+
+    Kurze Fehlmitschnitte entstehen regelmäßig — angestoßene Aufnahmen, die
+    nie ein Meeting waren. Ohne diesen Weg blieben sie in der Zuordnungs-Stufe
+    liegen und würden alle drei Tage angemahnt.
+
+    Erlaubt, solange kein Protokoll existiert. Ab 'draft' ist der Editor
+    zuständig, dort gibt es „Ablehnen".
+    """
+    protocol = _get_protocol_for_token(draft_id, token)
+
+    if protocol["status"] not in ("pending_assignment", "assigned"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Nur Aufnahmen in der Zuordnungs-Stufe können verworfen werden "
+                f"(status={protocol['status']}). Für fertige Entwürfe bitte Ablehnen nutzen."
+            ),
+        )
+
+    reason = (req.reason if req else None) or "Fehlaufnahme"
+    _protocols_db.discard(draft_id, reason=reason)
+    logger.info("[protocols] %s verworfen (%s)", draft_id, reason)
+    return {"status": "discarded", "draft_id": draft_id, "reason": reason}
+
+
+@app.patch("/api/protocols/{draft_id}/draft-markdown", status_code=200)
+def attach_protocol_markdown(
+    draft_id: str,
+    req: ProtocolDraftMarkdownRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Mara liefert Protokolltext und ermittelte Teilnehmer nach und hebt die
+    Zeile auf 'draft'.
+
+    Die Teilnehmer entstehen erst hier: sie stammen aus der Sprecherzuordnung,
+    die Sven vor der Freigabe in Plaud korrigiert hat. Ab diesem Punkt
+    übernimmt der bestehende Review-Editor unverändert.
+    """
+    protocol = _protocols_db.get_by_id(draft_id)
+    if not protocol:
+        raise HTTPException(status_code=404, detail="Protokoll nicht gefunden")
+    # 'assigned' ist der Erstauftrag, 'draft'/'in_review' die Neufassung eines
+    # bestehenden Protokolls. Gesperrt bleiben nur freigegebene Fassungen: die
+    # liegen als PDF in Outlook und als Aufgabe in Asana und duerfen nicht
+    # stillschweigend ersetzt werden.
+    if protocol["status"] not in ("assigned", "draft", "in_review"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Protokoll erwartet keinen Text (status={protocol['status']})",
+        )
+
+    _protocols_db.attach_draft_markdown(
+        draft_id, req.markdown, teilnehmer=req.teilnehmer, transcript=req.transcript
+    )
+    if not req.transcript:
+        logger.warning(
+            "[protocols] %s ohne Transkript geliefert — Protokoll bleibt "
+            "ungeprüfbar, falls die Aufnahme in Plaud verschwindet",
+            draft_id,
+        )
+    return {
+        "status": "draft",
+        "draft_id": draft_id,
+        "reviewer_url": f"{_PUBLIC_BASE_URL}/review/{protocol['reviewer_token']}",
+    }
+
+
+@app.post("/api/protocols/assignment-reminders", status_code=200)
+def send_assignment_reminders(
+    older_than_hours: Optional[float] = None,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Erinnert an Aufnahmen, die auf Svens Zuordnung warten.
+
+    Ohne Nachfassen versandet die Zuordnungs-Stufe: eine Aufnahme, die
+    liegenbleibt, wird nie zum Protokoll — und niemand merkt es, weil die
+    ursprüngliche Meldung längst im Telegram-Verlauf nach oben gerutscht ist.
+
+    Der Rhythmus ergibt sich aus reminder_sent_at: erinnert wird, wenn die
+    letzte Meldung (ersatzweise die Anlage) länger als die Schwelle zurück
+    liegt. Der Endpoint ist dadurch idempotent und kann beliebig oft
+    aufgerufen werden — der Poller tut das alle zehn Minuten.
+    """
+    hours = older_than_hours if older_than_hours is not None else ASSIGNMENT_REMINDER_HOURS
+    due = _protocols_db.list_pending_assignments(older_than_hours=hours)
+    if not due:
+        return {"checked": 0, "reminded": []}
+
+    if not _TG_BOT_TOKEN or not _TG_ADMIN_CHAT_ID:
+        logger.warning(
+            "[protocols] %d Zuordnungen ueberfaellig, aber Telegram nicht konfiguriert",
+            len(due),
+        )
+        raise HTTPException(status_code=503, detail="Telegram nicht konfiguriert.")
+
+    reminded: List[str] = []
+    for protocol in due:
+        title = protocol.get("recording_title") or protocol.get("meeting_name") or "Aufnahme"
+        try:
+            created = datetime.fromisoformat(protocol["created_at"])
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            days = max(1, int((datetime.now(timezone.utc) - created).total_seconds() // 86400))
+            age = f"seit {days} Tag{'en' if days != 1 else ''}"
+        except (KeyError, TypeError, ValueError):
+            age = "seit laengerem"
+
+        nth = int(protocol.get("reminder_count") or 0) + 1
+        text = (
+            f"⏳ Aufnahme wartet {age} auf Zuordnung\n"
+            f"{title}\n\n"
+            f"Sprecher in Plaud pruefen, dann zuordnen:\n"
+            f"{_PUBLIC_BASE_URL}/review/{protocol['reviewer_token']}\n\n"
+            f"Ohne Zuordnung wird kein Protokoll erstellt."
+            + (f"\n\n({nth}. Erinnerung)" if nth > 1 else "")
+        )
+        if _tg_send_message(_TG_ADMIN_CHAT_ID, text):
+            _protocols_db.mark_reminder_sent(protocol["id"])
+            reminded.append(protocol["id"])
+        else:
+            # Ohne erfolgreichen Versand nicht markieren — sonst gilt die
+            # Erinnerung als zugestellt und der naechste Lauf ueberspringt sie.
+            logger.warning(
+                "[protocols] Erinnerung fuer %s konnte nicht gesendet werden",
+                protocol["id"],
+            )
+
+    logger.info("[protocols] %d von %d Erinnerungen versendet", len(reminded), len(due))
+    return {"checked": len(due), "reminded": reminded}
+
+
+@app.get("/api/protocols/missing-transcripts")
+def list_missing_transcripts(
+    include_existing: bool = False,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Protokolle mit Plaud-Aufnahme, aber ohne gespeichertes Transkript.
+
+    Grundlage für das Nachtragen der Bestandsprotokolle: das Skript holt sich
+    hier die Liste, zieht die Transkripte aus Plaud und schickt sie an den
+    PUT-Endpoint unten.
+
+    Mit include_existing=True kommen auch die bereits archivierten mit. Das
+    wird gebraucht, wenn in Plaud die Sprecherzuordnung korrigiert wurde: die
+    gespeicherten Transkripte tragen dann noch die alte, falsche Zuordnung und
+    müssen neu geholt werden.
+    """
+    rows = (
+        _protocols_db.list_with_recording()
+        if include_existing
+        else _protocols_db.list_without_transcript()
+    )
+    return {
+        "count": len(rows),
+        "protocols": [
+            {
+                "draft_id": r["id"],
+                "recording_id": r["recording_id"],
+                "meeting_name": r["meeting_name"],
+                "meeting_datetime": r["meeting_datetime"],
+                "status": r["status"],
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.get("/api/protocols/{draft_id}/transcript")
+def get_protocol_transcript(
+    draft_id: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Liefert das gespeicherte Rohtranskript.
+
+    Mara nutzt das beim Neufassen: sie arbeitet aus dem Archiv statt aus
+    Plaud. Das ist schneller, unabhängig von Plaud-Verfügbarkeit — und
+    funktioniert auch, wenn die Aufnahme dort inzwischen gelöscht wurde.
+    """
+    protocol = _protocols_db.get_by_id(draft_id)
+    if not protocol:
+        raise HTTPException(status_code=404, detail="Protokoll nicht gefunden")
+    if not protocol.get("transcript"):
+        raise HTTPException(
+            status_code=404,
+            detail="Für dieses Protokoll ist kein Transkript gespeichert",
+        )
+    return {
+        "draft_id": draft_id,
+        "meeting_name": protocol["meeting_name"],
+        "meeting_datetime": protocol["meeting_datetime"],
+        "recording_title": protocol.get("recording_title"),
+        "transcript": protocol["transcript"],
+    }
+
+
+@app.post("/api/protocols/{draft_id}/rewrite", status_code=202)
+def rewrite_protocol(
+    draft_id: str,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Beauftragt Mara, ein bestehendes Protokoll neu zu fassen.
+
+    Gedacht für Formatwechsel: der Inhalt ist richtig, nur die Struktur
+    entspricht nicht mehr der Vorgabe. Mara arbeitet aus dem gespeicherten
+    Transkript, nicht aus Plaud.
+
+    Der bisherige Text bleibt bis zur Lieferung stehen — geht der Agent-Lauf
+    schief, ist das alte Protokoll noch da.
+    """
+    protocol = _protocols_db.get_by_id(draft_id)
+    if not protocol:
+        raise HTTPException(status_code=404, detail="Protokoll nicht gefunden")
+    if not protocol.get("transcript"):
+        raise HTTPException(
+            status_code=409,
+            detail="Ohne gespeichertes Transkript kann nicht neu gefasst werden",
+        )
+    if protocol["status"] in ("approved", "finalized"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Protokoll ist bereits freigegeben (status={protocol['status']}) — "
+                f"Neufassen würde eine veröffentlichte Fassung ersetzen"
+            ),
+        )
+
+    issue = _create_mara_rewrite_issue(protocol)
+    if not issue:
+        raise HTTPException(status_code=502, detail="Mara konnte nicht beauftragt werden")
+    return {"status": "rewrite_requested", "draft_id": draft_id, "mara_issue": issue}
+
+
+@app.put("/api/protocols/{draft_id}/transcript", status_code=200)
+def save_protocol_transcript(
+    draft_id: str,
+    req: ProtocolTranscriptRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Trägt ein Rohtranskript nach — unabhängig vom Protokollstatus.
+
+    Bewusst auch für bereits finalisierte Protokolle erlaubt: dort ist die
+    Quelle genauso wertvoll, und der Protokolltext wird dabei nicht berührt.
+    """
+    protocol = _protocols_db.get_by_id(draft_id)
+    if not protocol:
+        raise HTTPException(status_code=404, detail="Protokoll nicht gefunden")
+
+    _protocols_db.save_transcript(draft_id, req.transcript)
+    return {
+        "status": "saved",
+        "draft_id": draft_id,
+        "characters": len(req.transcript),
+    }
+
+
 # WICHTIG: /finalized muss VOR /{draft_id} deklariert sein (Routing-Reihenfolge)
 @app.get("/api/protocols/finalized")
 def list_finalized_protocols(
@@ -3356,9 +4007,14 @@ def review_page(
             request, "review_error.html", {"reason": "expired"}, status_code=410
         )
 
+    # Nur ein fertiger Entwurf wandert beim Öffnen auf 'in_review'. Die
+    # Zuordnungs-Stufe behält ihren Status — sonst überschriebe der erste
+    # Seitenaufruf den Zustand, auf den der Nachfass-Lauf schaut.
     if protocol["status"] == "draft":
         _protocols_db.set_status(protocol["id"], "in_review")
         protocol["status"] = "in_review"
+
+    assignment_only = protocol["status"] in ASSIGNMENT_STATUSES
 
     meeting_dt_fmt = protocol["meeting_datetime"]
     try:
@@ -3372,7 +4028,11 @@ def review_page(
 
     return templates.TemplateResponse(
         request,
-        "review.html",
+        # Zwei Seiten, ein Link: vor dem Transkript die Zuordnung, danach der
+        # gewohnte Editor. Bewusst getrennte Templates — im Zuordnungs-Modus
+        # gibt es keinen Protokolltext, und ein halb ausgeblendeter Editor
+        # waere fehleranfaellig (review.js greift hart auf seine DOM-IDs zu).
+        "review_assign.html" if assignment_only else "review.html",
         {
             "draft_id": protocol["id"],
             "token": token,
@@ -3386,6 +4046,12 @@ def review_page(
             "create_asana_task": protocol["create_asana_task"],
             "finalization_error": protocol["finalization_error"],
             "reviewer_name": x_authentik_username or "",
+            # Zuordnungs-Modus: kein Protokolltext, dafür Teilnehmer-Pflege und
+            # der Plaud-Aufnahmename zum Wiederfinden in der App.
+            "assignment_only": assignment_only,
+            "recording_title": protocol.get("recording_title") or "",
+            "recording_duration": protocol.get("recording_duration") or "",
+            "recording_id": protocol.get("recording_id") or "",
         },
     )
 
@@ -3442,6 +4108,20 @@ class LenaDraftRequest(BaseModel):
     body_html: str = ""
     body_text: str = ""
     reply_to_message_id: Optional[str] = None
+    # HBE-3048: "reply" (Standard) oder "forward" fuer Weiterleitungs-Entwuerfe.
+    # Nur wirksam zusammen mit reply_to_message_id.
+    mode: str = "reply"
+    # Outlook-Kategorie auf dem Entwurf, damit Svens eigene Entwuerfe und die
+    # von Lena vorbereiteten im selben Ordner unterscheidbar bleiben.
+    category: Optional[str] = None
+
+    @field_validator("mode")
+    @classmethod
+    def _vid_mode(cls, v: str) -> str:
+        v = (v or "reply").strip().lower()
+        if v not in ("reply", "forward"):
+            raise ValueError("mode muss 'reply' oder 'forward' sein.")
+        return v
 
 
 class LenaDraftResponse(BaseModel):
@@ -3562,7 +4242,20 @@ def lena_mail_draft(
     body_content = req.body_html if req.body_html else req.body_text
     body_type = "HTML" if req.body_html else "Text"
 
-    if req.reply_to_message_id:
+    if req.reply_to_message_id and req.mode == "forward":
+        # HBE-3048: Weiterleitungs-Entwurf. createForward uebernimmt den
+        # Originaltext und die Anhaenge — genau das, was beim Weiterleiten
+        # gebraucht wird. Der Entwurf wird NICHT gesendet.
+        url = f"https://graph.microsoft.com/v1.0/me/messages/{req.reply_to_message_id}/createForward"
+        payload = {
+            "message": {
+                "subject": req.subject,
+                "body": {"contentType": body_type, "content": body_content},
+                "toRecipients": _recipients(req.to),
+                "ccRecipients": _recipients(req.cc),
+            }
+        }
+    elif req.reply_to_message_id:
         # Create reply draft linked to original message for proper threading
         url = f"https://graph.microsoft.com/v1.0/me/messages/{req.reply_to_message_id}/createReply"
         payload = {
@@ -3590,8 +4283,29 @@ def lena_mail_draft(
         )
 
     draft = resp.json()
+    draft_id = draft.get("id", "")
+
+    # HBE-3048: Entwurf kennzeichnen, damit er im Entwuerfe-Ordner als von Lena
+    # vorbereitet erkennbar ist. Schlaegt das fehl, ist der Entwurf trotzdem da —
+    # deshalb nur eine Warnung, kein Fehler.
+    if req.category and draft_id:
+        try:
+            cat_resp = _rq.patch(
+                f"https://graph.microsoft.com/v1.0/me/messages/{draft_id}",
+                headers=headers,
+                json={"categories": [req.category]},
+                timeout=30,
+            )
+            if cat_resp.status_code not in (200, 201):
+                logger.warning(
+                    "[draft] Kategorie '%s' konnte nicht gesetzt werden: HTTP %s",
+                    req.category, cat_resp.status_code,
+                )
+        except Exception as _exc:
+            logger.warning("[draft] Kategorie setzen fehlgeschlagen: %s", _exc)
+
     return LenaDraftResponse(
-        draft_id=draft.get("id", ""),
+        draft_id=draft_id,
         subject=draft.get("subject", req.subject),
         created_at=draft.get("createdDateTime", "") or "",
     )
@@ -3881,6 +4595,10 @@ def _check_lena_importance(v: str) -> str:
 class LenaCategorizeRequest(BaseModel):
     message_id: str
     action: str
+    # HBE-Mail-Konzept 2026-09: Bei action="ablegen" das automatische Archivieren
+    # unterdruecken. Die Mail bekommt die Kategorie, bleibt aber im Posteingang.
+    # Genutzt fuer "Ablegen (Vorschlag)" — Sven bestaetigt per Sammelmeldung.
+    skip_archive: bool = False
 
     @field_validator("message_id")
     @classmethod
@@ -3935,6 +4653,12 @@ class LenaTriageInboxMail(BaseModel):
     received_at: str
     body_preview: str
     has_attachments: bool
+    # HBE-3044: Fuer die mechanischen Pruefungen der Triage.
+    #   conversation_id -> Mails eines Vorgangs zusammen entscheiden
+    #   to/cc_emails    -> wer bereits im Verteiler steht, braucht keine Weiterleitung
+    conversation_id: str = ""
+    to_emails: List[str] = []
+    cc_emails: List[str] = []
 
 
 class LenaTriageInboxResponse(BaseModel):
@@ -4544,8 +5268,15 @@ def lena_mail_categorize(
         )
 
     # HBE-1603: Wenn action="ablegen", Mail sofort archivieren — keine zweite API-Call-Runde notwendig
+    # HBE-Mail-Konzept 2026-09: ausser skip_archive=True ("Ablegen (Vorschlag)").
     moved_to_archive: Optional[bool] = None
-    if req.action == "ablegen":
+    if req.action == "ablegen" and req.skip_archive:
+        logger.info(
+            "[categorize] action=ablegen mit skip_archive=True — Mail bleibt im Posteingang (%s)",
+            req.message_id[:24],
+        )
+        moved_to_archive = False
+    elif req.action == "ablegen":
         try:
             archive_folder_id = _resolve_folder_id("archive", headers)
             # HBE-1616: POST /move statt PATCH parentFolderId
@@ -4659,6 +5390,7 @@ def lena_mail_inbox_for_triage(
         f"?$filter=receivedDateTime ge {since}"
         f"&$top={over_fetch}"
         "&$select=id,subject,from,receivedDateTime,bodyPreview,hasAttachments,categories"
+        ",conversationId,toRecipients,ccRecipients"
         "&$orderby=receivedDateTime desc"
     )
 
@@ -4676,6 +5408,15 @@ def lena_mail_inbox_for_triage(
             if any(c.startswith("Lena: ") for c in cats):
                 continue
         sender = (m.get("from") or {}).get("emailAddress", {}) or {}
+
+        def _addrs(key: str) -> List[str]:
+            out: List[str] = []
+            for r in (m.get(key) or []):
+                a = ((r or {}).get("emailAddress") or {}).get("address") or ""
+                if a:
+                    out.append(a.lower())
+            return out
+
         mails.append(LenaTriageInboxMail(
             message_id=m.get("id", "") or "",
             subject=(m.get("subject") or ""),
@@ -4684,11 +5425,172 @@ def lena_mail_inbox_for_triage(
             received_at=(m.get("receivedDateTime") or ""),
             body_preview=(m.get("bodyPreview") or "")[:500],
             has_attachments=bool(m.get("hasAttachments")),
+            conversation_id=(m.get("conversationId") or ""),
+            to_emails=_addrs("toRecipients"),
+            cc_emails=_addrs("ccRecipients"),
         ))
         if len(mails) >= limit:
             break
 
     return LenaTriageInboxResponse(mails=mails)
+
+
+class LenaMailBodyResponse(BaseModel):
+    message_id: str
+    subject: str
+    body_text: str
+    truncated: bool
+
+
+@app.get("/api/lena/mail/{message_id}/body", response_model=LenaMailBodyResponse)
+def lena_mail_body(
+    message_id: str,
+    max_chars: int = 6000,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Liefert den vollstaendigen Text einer Mail (HBE-3048).
+
+    Hintergrund: `bodyPreview` ist auf 500 Zeichen begrenzt und schneidet mitten
+    im Satz ab. Fuer die Erstellung von Antwortentwuerfen ist das zu wenig — im
+    ersten Test verweigerte das Modell mehrfach mit der Begruendung, die Mail
+    breche ab. Dieser Endpoint liefert den Fliesstext ohne HTML.
+
+    Svens Freigabe zum Lesen von Mailinhalten liegt vor (2026-09-14).
+    """
+    import re as _re
+    import requests as _rq
+
+    message_id = _check_message_id(message_id)
+    tool = _get_outlook_tool()
+    if not tool.is_authenticated():
+        raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
+    if max_chars < 100 or max_chars > 50000:
+        raise HTTPException(status_code=400, detail="max_chars muss zwischen 100 und 50000 liegen.")
+
+    resp = _rq.get(
+        f"https://graph.microsoft.com/v1.0/me/messages/{message_id}",
+        headers={"Authorization": f"Bearer {tool.access_token}"},
+        params={"$select": "subject,body"},
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Graph API Fehler: HTTP {resp.status_code} — {resp.text[:200]}",
+        )
+    data = resp.json()
+    body = (data.get("body") or {})
+    inhalt = body.get("content", "") or ""
+
+    if (body.get("contentType") or "").lower() == "html":
+        inhalt = _re.sub(r"(?is)<(script|style).*?</\1>", " ", inhalt)
+        inhalt = _re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>", "\n", inhalt)
+        inhalt = _re.sub(r"<[^>]+>", " ", inhalt)
+        inhalt = (inhalt.replace("&nbsp;", " ").replace("&amp;", "&")
+                        .replace("&lt;", "<").replace("&gt;", ">")
+                        .replace("&quot;", '"').replace("&#39;", "'"))
+    inhalt = _re.sub(r"[ \t\r\f\v]+", " ", inhalt)
+    inhalt = _re.sub(r"\n\s*\n\s*\n+", "\n\n", inhalt).strip()
+
+    return LenaMailBodyResponse(
+        message_id=message_id,
+        subject=data.get("subject", "") or "",
+        body_text=inhalt[:max_chars],
+        truncated=len(inhalt) > max_chars,
+    )
+
+
+class LenaRegelRequest(BaseModel):
+    name: str = ""
+    absender: str = ""
+    betreff_enthaelt: str = ""
+    aktion: str
+    empfaenger: str = ""
+
+    @field_validator("aktion")
+    @classmethod
+    def _vid_aktion(cls, v: str) -> str:
+        return _check_lena_action(v)
+
+
+class LenaRegelResponse(BaseModel):
+    success: bool
+    anzahl: int
+    regel: dict
+
+
+@app.post("/api/lena/mail/rules", response_model=LenaRegelResponse)
+def lena_mail_regel_anlegen(
+    req: LenaRegelRequest,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Legt eine von Sven bestaetigte Triage-Regel an (HBE-3056).
+
+    Geschrieben wird nach /var/lib/mail-triage-poller/regeln.json — bewusst
+    ausserhalb des Repos, damit der naechste Deploy sie nicht ueberschreibt.
+    Feste Regeln stehen weiterhin in config/lena-mail-triage.yaml.
+
+    Mindestens einer der beiden Schluessel muss gesetzt sein:
+      absender          fuer stabile Absender mit wechselndem Betreff
+      betreff_enthaelt  fuer wechselnde Absender mit stabilem Betreff
+    """
+    import json as _json
+    import os as _os
+
+    absender = (req.absender or "").strip().lower()
+    betreff = (req.betreff_enthaelt or "").strip().lower()
+    if not absender and not betreff:
+        raise HTTPException(
+            status_code=400,
+            detail="Mindestens 'absender' oder 'betreff_enthaelt' muss gesetzt sein.",
+        )
+
+    pfad = _os.getenv("LENA_MAIL_TRIAGE_REGELN", "/var/lib/mail-triage-poller/regeln.json")
+    try:
+        _os.makedirs(_os.path.dirname(pfad), exist_ok=True)
+        bestand = []
+        if _os.path.exists(pfad):
+            with open(pfad, encoding="utf-8") as fh:
+                daten = _json.load(fh)
+            bestand = daten.get("regeln", []) if isinstance(daten, dict) else list(daten)
+
+        neu = {
+            "name": (req.name or "").strip() or (absender or betreff)[:40],
+            "absender": absender,
+            "betreff_enthaelt": betreff,
+            "aktion": req.aktion,
+            "empfaenger": (req.empfaenger or "").strip(),
+            "angelegt_am": datetime.now(timezone.utc).isoformat(),
+        }
+        # Dublette? Gleicher Schluessel und gleiche Aktion -> ersetzen statt anhaengen
+        bestand = [r for r in bestand
+                   if not (r.get("absender", "") == absender
+                           and r.get("betreff_enthaelt", "") == betreff)]
+        bestand.append(neu)
+
+        with open(pfad, "w", encoding="utf-8") as fh:
+            _json.dump({"regeln": bestand}, fh, ensure_ascii=False, indent=1)
+        logger.info("[rules] Regel angelegt: %s -> %s", neu["name"], neu["aktion"])
+        return LenaRegelResponse(success=True, anzahl=len(bestand), regel=neu)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Regel konnte nicht gespeichert werden: {exc}")
+
+
+@app.get("/api/lena/mail/rules", response_model=dict)
+def lena_mail_regeln_lesen(_key: str = Security(verify_api_key)):
+    """Listet die zur Laufzeit angelegten Regeln."""
+    import json as _json
+    import os as _os
+    pfad = _os.getenv("LENA_MAIL_TRIAGE_REGELN", "/var/lib/mail-triage-poller/regeln.json")
+    if not _os.path.exists(pfad):
+        return {"regeln": []}
+    with open(pfad, encoding="utf-8") as fh:
+        daten = _json.load(fh)
+    return daten if isinstance(daten, dict) else {"regeln": daten}
 
 
 @app.get("/api/lena/mail/triage-summary", response_model=LenaTriageSummaryResponse)
@@ -5534,6 +6436,20 @@ def telegram_agent_send(
         cfg.token, req.chat_id, req.text,
         reply_markup=req.reply_markup, parse_mode=req.parse_mode,
     )
+    # HBE-3107: Fehlschlag muss auch als Fehlschlag ankommen. Vorher gab es
+    # HTTP 200 mit success=false zurueck — fuer einen Agenten nicht von Erfolg
+    # zu unterscheiden. Lena hat daraufhin 130-mal gesendet und dabei 14 immer
+    # kuerzere Testnachrichten an Sven zugestellt, bis eine ohne reservierte
+    # Zeichen durchkam.
+    if not sent_msg_id:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Telegram hat die Nachricht abgelehnt. Haeufigste Ursache: parse_mode "
+                "gesetzt, aber Sonderzeichen nicht escapet. Ohne parse_mode erneut "
+                "versuchen — nicht mit anderem Text wiederholen."
+            ),
+        )
     # Always track in outbound_messages (HBE-1212: auch ohne issue_id für retroaktive Flood-Analyse)
     if sent_msg_id:
         import json as _json

@@ -576,15 +576,18 @@ class MaraTelegramSendTest(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row[0], "", "comment_id must default to '' not None (NOT NULL constraint)")
 
-    def test_returns_success_false_when_telegram_api_fails(self):
+    def test_raises_502_when_telegram_api_fails(self):
+        """HBE-3107: Mara laeuft ueber denselben Handler — auch sie darf einen
+        Fehlschlag nicht als HTTP 200 gemeldet bekommen."""
+        from fastapi import HTTPException as FHE
         with mock.patch.object(self.api, "_tg_agent_send", return_value=None), \
              mock.patch.object(self.api, "_tg_agent_db") as mock_db_factory:
             mock_db_factory.return_value.__enter__ = mock.MagicMock(return_value=mock.MagicMock())
             mock_db_factory.return_value.__exit__ = mock.MagicMock(return_value=False)
             req = self._make_request(issue_id="HBE-1205")
-            resp = self.api.mara_telegram_send(req, _key="test-key")
-        self.assertFalse(resp.success)
-        self.assertIsNone(resp.telegram_msg_id)
+            with self.assertRaises(FHE) as ctx:
+                self.api.mara_telegram_send(req, _key="test-key")
+        self.assertEqual(ctx.exception.status_code, 502)
 
     def test_mara_send_uses_mara_bot_token_not_lena(self):
         """_tg_mara_send_message must POST to Mara's bot URL, not Lena's TELEGRAM_BOT_TOKEN URL."""

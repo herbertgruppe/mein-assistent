@@ -55,12 +55,29 @@ PC_PROTOKOLL_AGENT_ID = os.getenv("PAPERCLIP_PROTOKOLL_AGENT_ID", "")
 TG_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN",    "")
 TG_ADMIN_CHAT = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
 
+# ── Zweistufiger Workflow ─────────────────────────────────────────────────────
+# Stufe 1 meldet die Aufnahme und wartet auf Svens Zuordnung; erst danach zieht
+# Mara das Transkript. Grund: eine Sprecherkorrektur in Plaud wirkt nur, solange
+# das Transkript noch nicht geholt ist. Mit TWO_STAGE=false laeuft der alte
+# einstufige Weg (Issue direkt an Mara) unveraendert weiter.
+TWO_STAGE        = os.getenv("PLAUD_TWO_STAGE", "false").strip().lower() in ("1", "true", "yes")
+MA_API_URL       = os.getenv("MEIN_ASSISTENT_API_URL", "http://127.0.0.1:8502").rstrip("/")
+MA_API_KEY       = os.getenv("API_SECRET_KEY", "")
+
 # Multi-Account-Format: "home_dir:agent_id,home_dir2:agent_id2"
 # home_dir ist das HOME-Verzeichnis fuer den jeweiligen plaud-Token (~/.plaud/tokens.json)
 PLAUD_ACCOUNTS_ENV = os.getenv("PLAUD_ACCOUNTS", f"/var/lib/plaud:{PC_PROTOKOLL_AGENT_ID}")
 
 MAX_BACKOFF_SEC = 300
 ALERT_THRESHOLD = 3  # consecutive errors before Telegram alert
+
+# ── Dead-man switch ───────────────────────────────────────────────────────────
+# The 2026-09 outage stayed invisible for four days because a broken parser and
+# a quiet week look identical from the outside: both report "0 recordings".
+# These three watchdogs make silence distinguishable from failure.
+SILENCE_ALERT_HOURS  = int(os.getenv("PLAUD_SILENCE_ALERT_HOURS", "72"))
+TOKEN_WARN_HOURS     = int(os.getenv("PLAUD_TOKEN_WARN_HOURS", "48"))
+ALERT_COOLDOWN_HOURS = int(os.getenv("PLAUD_ALERT_COOLDOWN_HOURS", "24"))
 
 # Demo/Tutorial-Aufnahmen überspringen (HBE-1212).
 # Pipe-separierte, case-insensitive Substring-Liste. Standard: Plaud-Tutorial-Video.
@@ -111,6 +128,13 @@ def _setup_logging() -> logging.Logger:
 logger = _setup_logging()
 
 
+# ── Recording-ID shapes ───────────────────────────────────────────────────────
+# Bare form (pre-2026-09-15):  cecd2ad55fff73d23ac083c1e2f7c646
+# Prefixed form (current):     of_cecd2ad55fff73d23ac083c1e2f7c646
+_RECORDING_ID_PREFIX_RE = re.compile(r'^[a-z]{1,8}_')
+_RECORDING_ID_RE = re.compile(r'^(?:[a-z]{1,8}_)?[0-9a-f]{32}$')
+
+
 # ── SQLite ─────────────────────────────────────────────────────────────────────
 def _init_db(db_path: str) -> sqlite3.Connection:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -141,21 +165,72 @@ def _init_db(db_path: str) -> sqlite3.Connection:
         conn.execute("ALTER TABLE plaud_processed_recordings ADD COLUMN tracking_notes TEXT")
     except sqlite3.OperationalError:
         pass
+    # Safe migration: recording_title is written by _mark_processed but was never
+    # part of CREATE TABLE — a freshly built state DB would crash on first write.
+    try:
+        conn.execute("ALTER TABLE plaud_processed_recordings ADD COLUMN recording_title TEXT")
+    except sqlite3.OperationalError:
+        pass
+    # Key/value scratch space for the dead-man switch (last alert timestamps).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS poller_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
     conn.commit()
     return conn
 
 
+def _meta_get(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    row = conn.execute("SELECT value FROM poller_meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def _meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO poller_meta (key, value) VALUES (?, ?)"
+        " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    conn.commit()
+
+
+def _id_variants(recording_id: str) -> List[str]:
+    """
+    All spellings under which a recording may appear in the state DB.
+
+    Plaud changed its CLI output format around 2026-09-15: IDs are now emitted
+    with a type prefix (``of_<32-hex>``) where they used to be bare 32-hex
+    strings. Rows written before that change carry the bare form, rows written
+    after it carry the prefixed form. Dedup must match across both so that a
+    format flip — in either direction — never re-processes an old recording.
+
+    The *raw* ID as emitted by the CLI stays authoritative for CLI calls and for
+    new DB writes; only the lookup is widened.
+    """
+    variants = [recording_id]
+    bare = _RECORDING_ID_PREFIX_RE.sub("", recording_id, count=1)
+    if bare != recording_id:
+        variants.append(bare)
+    return variants
+
+
 def _is_processed(conn: sqlite3.Connection, recording_id: str) -> bool:
+    variants = _id_variants(recording_id)
+    placeholders = ",".join("?" * len(variants))
     return conn.execute(
-        "SELECT 1 FROM plaud_processed_recordings WHERE recording_id = ?",
-        (recording_id,),
+        f"SELECT 1 FROM plaud_processed_recordings WHERE recording_id IN ({placeholders})",
+        variants,
     ).fetchone() is not None
 
 
 def _get_status(conn: sqlite3.Connection, recording_id: str) -> Optional[str]:
+    variants = _id_variants(recording_id)
+    placeholders = ",".join("?" * len(variants))
     row = conn.execute(
-        "SELECT status FROM plaud_processed_recordings WHERE recording_id = ?",
-        (recording_id,),
+        f"SELECT status FROM plaud_processed_recordings WHERE recording_id IN ({placeholders})",
+        variants,
     ).fetchone()
     return row[0] if row else None
 
@@ -228,19 +303,37 @@ def _parse_recent_ids(output: str) -> List[str]:
             pass
 
     # Line-by-line: first whitespace-separated token that looks like a Plaud file ID.
-    # Plaud file IDs are exactly 32 lowercase hex characters (UUID without dashes).
-    id_re = re.compile(r'^[0-9a-f]{32}$')
+    # Plaud file IDs are 32 lowercase hex characters (UUID without dashes), since
+    # ~2026-09-15 preceded by a short type prefix (e.g. "of_"). Both spellings are
+    # accepted; the ID is returned exactly as emitted, because the CLI only
+    # resolves the form it printed (`plaud file <bare-hex>` → NOT_FOUND).
     for line in stripped.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         first = line.split()[0] if line.split() else ""
-        if id_re.match(first):
+        if _RECORDING_ID_RE.match(first):
             ids.append(first)
         elif first:
             logger.debug("Ignoring non-ID token from plaud recent output: %r", first)
 
     return ids
+
+
+def _parse_reported_count(output: str) -> Optional[int]:
+    """
+    Read the recording count the CLI states in its own header.
+
+    `plaud recent` prints "Recordings in the last 7 days: 4" before the list.
+    Comparing that number against the number of IDs actually parsed turns a
+    silent parser failure into a loud one — had this existed in September 2026,
+    the prefixed-ID regression would have alerted within ten minutes instead of
+    going unnoticed for four days.
+
+    Returns None if the header is absent (format changed, nothing to compare).
+    """
+    match = re.search(r'Recordings\s+in\s+the\s+last\s+\d+\s+days?:\s*(\d+)', output, re.IGNORECASE)
+    return int(match.group(1)) if match else None
 
 
 def _parse_file_metadata(output: str) -> Dict[str, Any]:
@@ -267,7 +360,13 @@ def _parse_file_metadata(output: str) -> Dict[str, Any]:
 def _extract_duration_sec(meta: Dict[str, Any]) -> int:
     """
     Extract duration in seconds from metadata dict.
-    Handles: int seconds, "HH:MM:SS", "MM:SS", "Xs" strings.
+
+    Handles: int seconds, "1h32m", "47m04s", "3m21s", "HH:MM:SS", "MM:SS", "Xs".
+
+    The compound form ("1h32m") is what `plaud file` actually prints. It was
+    not covered, so every recording came back as 0 seconds — and because the
+    skip rule reads ``0 < duration < MIN``, the minimum-duration filter never
+    fired. Accidental ten-second recordings went through the whole pipeline.
     """
     raw = meta.get("duration") or meta.get("duration_sec") or meta.get("length") or ""
     if not raw:
@@ -277,6 +376,17 @@ def _extract_duration_sec(meta: Dict[str, Any]) -> int:
         return int(raw)
 
     raw_str = str(raw).strip()
+
+    # Compound form first — "1h32m", "47m04s", "3m21s", "90s".
+    # Checked before the plain-number branch below, which would otherwise
+    # swallow "90s" and leave the rest unparsed.
+    compound = re.fullmatch(
+        r'(?:(\d+)\s*h)?\s*(?:(\d+)\s*m(?:in)?)?\s*(?:(\d+)\s*s(?:ec)?)?',
+        raw_str, re.IGNORECASE,
+    )
+    if compound and any(compound.groups()):
+        h, m, s = (int(g) if g else 0 for g in compound.groups())
+        return h * 3600 + m * 60 + s
 
     # "123s" or "123" pure number
     if re.match(r'^\d+\.?\d*s?$', raw_str):
@@ -359,6 +469,91 @@ def _create_pc_issue(payload: dict) -> Optional[str]:
     return str(data.get("identifier") or data.get("id", "?"))
 
 
+# ── Zweistufiger Workflow: Stufe 1 ─────────────────────────────────────────────
+def _create_assignment(
+    recording_id: str,
+    title: str,
+    start_at: str,
+    duration_sec: int,
+) -> Optional[str]:
+    """
+    Meldet eine neue Aufnahme zur Zuordnung an und schickt Sven den Link.
+
+    Bewusst ohne Transkript und ohne Zusammenfassung: beides wuerde die
+    Sprecherkorrektur in Plaud wirkungslos machen, weil der Text dann schon
+    gezogen waere. Mara kommt erst zum Zug, wenn Sven bestaetigt hat.
+
+    Returns eine kurze Referenz fuer die state.db, oder None bei Fehlschlag.
+    """
+    if not MA_API_KEY:
+        logger.error("[assignment] API_SECRET_KEY fehlt — Zuordnung nicht moeglich")
+        return None
+
+    resp = requests.post(
+        f"{MA_API_URL}/api/protocols/assignment",
+        headers={"X-API-Key": MA_API_KEY, "Content-Type": "application/json"},
+        json={
+            "meeting_name": title,
+            "meeting_datetime": start_at,
+            "source": "plaud-poller",
+            "recording_id": recording_id,
+            "recording_title": title,
+            "recording_duration": _format_duration(duration_sec) if duration_sec else None,
+        },
+        timeout=20,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    if not data.get("created", True):
+        logger.info("[assignment] %s war bereits gemeldet — keine zweite Meldung", recording_id)
+        return f"assignment:{data.get('draft_id', '?')}"
+
+    _tg_alert(
+        f"🎙 <b>Neue Aufnahme wartet auf Zuordnung</b>\n"
+        f"<b>{title}</b>\n"
+        f"Dauer: {_format_duration(duration_sec) if duration_sec else 'unbekannt'}\n\n"
+        f"<b>Bitte zuerst in Plaud die Sprecher pruefen</b> — Aufnahme "
+        f"„{title}\". Danach hier zuordnen:\n"
+        f"{data.get('assignment_url', '')}\n\n"
+        f"Das Transkript wird erst nach deiner Bestaetigung gezogen."
+    )
+    return f"assignment:{data.get('draft_id', '?')}"
+
+
+def _trigger_assignment_reminders() -> None:
+    """
+    Stoesst das Nachfassen fuer offene Zuordnungen an.
+
+    Die Faelligkeitspruefung steckt in der API (Schwelle plus Zeitpunkt der
+    letzten Erinnerung), deshalb ist der Aufruf in jedem Zyklus unschaedlich —
+    er ist fast immer ein No-Op. Fehler bleiben folgenlos: eine verpasste
+    Erinnerung wird beim naechsten Zyklus nachgeholt.
+    """
+    if not MA_API_KEY:
+        return
+    try:
+        resp = requests.post(
+            f"{MA_API_URL}/api/protocols/assignment-reminders",
+            headers={"X-API-Key": MA_API_KEY},
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("reminded"):
+                logger.info(
+                    "Erinnerungen an offene Zuordnungen verschickt: %d",
+                    len(data["reminded"]),
+                )
+        else:
+            logger.warning(
+                "Erinnerungs-Lauf abgelehnt: HTTP %s %s",
+                resp.status_code, resp.text[:200],
+            )
+    except Exception as exc:
+        logger.warning("Erinnerungs-Lauf fehlgeschlagen: %s", exc)
+
+
 # ── Telegram ───────────────────────────────────────────────────────────────────
 def _tg_alert(text: str) -> None:
     if not TG_BOT_TOKEN or not TG_ADMIN_CHAT:
@@ -376,8 +571,87 @@ def _tg_alert(text: str) -> None:
         logger.error("Telegram alert failed: %s", exc)
 
 
+def _alert_throttled(conn: sqlite3.Connection, key: str, text: str) -> bool:
+    """
+    Send a Telegram alert at most once per ALERT_COOLDOWN_HOURS per key.
+
+    A watchdog that fires every 10 minutes trains the reader to ignore it, which
+    is the same failure mode as no alert at all. Returns True if sent.
+    """
+    now = time.time()
+    last_raw = _meta_get(conn, f"alert:{key}")
+    if last_raw:
+        try:
+            if now - float(last_raw) < ALERT_COOLDOWN_HOURS * 3600:
+                logger.debug("Alert %r suppressed (cooldown active)", key)
+                return False
+        except ValueError:
+            pass
+    _tg_alert(text)
+    _meta_set(conn, f"alert:{key}", str(now))
+    logger.warning("Dead-man alert sent: %s", key)
+    return True
+
+
+def _clear_alert(conn: sqlite3.Connection, key: str) -> None:
+    """Reset an alert's cooldown so a recurrence is reported immediately."""
+    if _meta_get(conn, f"alert:{key}") is not None:
+        conn.execute("DELETE FROM poller_meta WHERE key = ?", (f"alert:{key}",))
+        conn.commit()
+
+
 # ── Plaud Auth: Auto-Refresh ───────────────────────────────────────────────────
-def _auto_refresh_token(home_dir: str) -> None:
+def _jwt_expiry(token: str) -> Optional[float]:
+    """Unix timestamp from a JWT's exp claim, or None if unreadable."""
+    import base64 as _b64
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(_b64.urlsafe_b64decode(payload))
+        exp = claims.get("exp")
+        return float(exp) if exp else None
+    except Exception:
+        return None
+
+
+def _check_refresh_token_expiry(conn: sqlite3.Connection, home_dir: str, tokens: dict) -> None:
+    """
+    Watchdog 3: warn before the refresh token dies.
+
+    The access token renews itself; the refresh token lasts six days and only
+    survives while the poller keeps refreshing it. If the service is down over a
+    long holiday — or refreshes keep failing — it expires and only an
+    interactive `plaud login` can recover. Warning early keeps that from
+    becoming a discovery after the fact.
+    """
+    exp = _jwt_expiry(tokens.get("refresh_token", ""))
+    if exp is None:
+        return
+    hours_left = (exp - time.time()) / 3600
+    if hours_left > TOKEN_WARN_HOURS:
+        _clear_alert(conn, f"token_expiry:{home_dir}")
+        return
+    if hours_left <= 0:
+        headline = "🔴 <b>Plaud-Token abgelaufen</b>\nDer Poller kann keine Aufnahmen mehr abholen."
+    else:
+        headline = (
+            f"🟠 <b>Plaud-Token laeuft ab</b>\n"
+            f"Noch <b>{hours_left:.0f} Stunden</b> gueltig "
+            f"(bis {datetime.fromtimestamp(exp, timezone.utc):%d.%m. %H:%M} UTC)."
+        )
+    _alert_throttled(
+        conn,
+        f"token_expiry:{home_dir}",
+        f"{headline}\n\n"
+        f"<b>So erneuerst du ihn:</b>\n"
+        f"1. Lokal <code>plaud login</code> ausfuehren und im Browser bestaetigen\n"
+        f"2. Inhalt von <code>~/.plaud/tokens.json</code> an "
+        f"<code>POST /plaud/auth/upload-tokens</code> schicken\n\n"
+        f"Konto: <code>{home_dir}</code>",
+    )
+
+
+def _auto_refresh_token(home_dir: str, conn: Optional[sqlite3.Connection] = None) -> None:
     """Refresh Plaud access_token if it expires within the next hour."""
     import base64 as _b64
     token_file = Path(home_dir) / ".plaud" / "tokens.json"
@@ -390,6 +664,8 @@ def _auto_refresh_token(home_dir: str) -> None:
             return
     try:
         tokens = json.loads(token_file.read_text())
+        if conn is not None:
+            _check_refresh_token_expiry(conn, home_dir, tokens)
         expires_at_ms = tokens.get("expires_at", 0)
         now_ms = time.time() * 1000
         # Refresh if token expires within 60 minutes
@@ -415,8 +691,23 @@ def _auto_refresh_token(home_dir: str) -> None:
                 new_tokens["expires_at"] = int((time.time() + new_tokens["expires_in"]) * 1000)
             token_file.write_text(json.dumps(new_tokens, indent=2))
             logger.info("[plaud_auth] Token erfolgreich aktualisiert")
+            if conn is not None:
+                _clear_alert(conn, f"token_refresh_failed:{home_dir}")
         else:
             logger.error("[plaud_auth] Refresh fehlgeschlagen: %s %s", resp.status_code, resp.text[:200])
+            # A failing refresh is how a working poller quietly becomes a dead
+            # one: the access token simply runs out a few hours later.
+            if conn is not None:
+                _alert_throttled(
+                    conn,
+                    f"token_refresh_failed:{home_dir}",
+                    f"⚠️ <b>Plaud-Token-Refresh fehlgeschlagen</b>\n"
+                    f"HTTP {resp.status_code} — der Zugang laeuft in Kuerze aus.\n"
+                    f"Konto: <code>{home_dir}</code>\n\n"
+                    f"Wenn es sich nicht von selbst faengt: lokal <code>plaud login</code>, "
+                    f"dann <code>tokens.json</code> an "
+                    f"<code>POST /plaud/auth/upload-tokens</code>.",
+                )
     except Exception as exc:
         logger.error("[plaud_auth] Refresh-Fehler: %s", exc)
 
@@ -437,7 +728,7 @@ def _poll_account(
     errors: List[str] = []
 
     logger.info("Polling account home=%s", home_dir)
-    _auto_refresh_token(home_dir)
+    _auto_refresh_token(home_dir, db)
     try:
         recent_out = _run_plaud(["recent", "--days", str(RECENT_DAYS)], home_dir)
     except Exception as exc:
@@ -446,6 +737,29 @@ def _poll_account(
 
     ids = _parse_recent_ids(recent_out)
     logger.info("Found %d recording IDs in recent output", len(ids))
+
+    # Watchdog 1: the CLI says N, we parsed M. Any shortfall means the output
+    # format moved and we are dropping recordings on the floor.
+    reported = _parse_reported_count(recent_out)
+    if reported is not None and reported > len(ids):
+        sample = next(
+            (ln.strip() for ln in recent_out.splitlines()
+             if ln.strip() and not ln.strip().startswith(("-", "#", "Recordings"))),
+            "",
+        )
+        _alert_throttled(
+            db,
+            f"parse_mismatch:{home_dir}",
+            f"⚠️ <b>plaud-poller erkennt Aufnahmen nicht</b>\n"
+            f"Plaud meldet <b>{reported}</b> Aufnahmen, erkannt wurden <b>{len(ids)}</b>.\n"
+            f"Das Ausgabeformat hat sich vermutlich geaendert.\n"
+            f"Nicht erkannte Zeile: <code>{sample[:120]}</code>\n"
+            f"Pruefen: <code>journalctl -u plaud-poller -n 50</code>",
+        )
+    elif reported is not None:
+        _clear_alert(db, f"parse_mismatch:{home_dir}")
+    else:
+        logger.debug("No count header in `plaud recent` output — skipping parse check")
 
     for recording_id in ids:
         if _is_processed(db, recording_id):
@@ -490,6 +804,25 @@ def _poll_account(
             _mark_processed(db, recording_id, meta.get("start_at", ""), "skipped:demo_recording", home_dir, recording_title=_title)
             continue
 
+        _title = meta.get("name") or meta.get("title") or recording_id
+        _start = meta.get("start_at") or meta.get("date") or meta.get("created_at") or ""
+
+        if TWO_STAGE:
+            # Stufe 1: nur melden. Kein Transkript, keine Zusammenfassung — beides
+            # wuerde die Sprecherkorrektur in Plaud wirkungslos machen, weil der
+            # Text dann schon gezogen waere.
+            try:
+                ref = _create_assignment(recording_id, _title, _start, duration_sec)
+            except Exception as exc:
+                logger.error("Assignment creation failed for %s: %s", recording_id, exc)
+                errors.append(recording_id)
+                continue
+            if ref:
+                created_issues.append(ref)
+                _mark_processed(db, recording_id, _start, ref, home_dir, recording_title=_title)
+                logger.info("Zuordnung angelegt fuer %s (%s)", recording_id, ref)
+            continue
+
         # Get summary (best-effort — don't fail if unavailable)
         summary = ""
         try:
@@ -526,6 +859,36 @@ def _poll_account(
                     backoff = min(backoff * 2, MAX_BACKOFF_SEC)
 
     return new_ids, created_issues, skipped, errors
+
+
+def _check_silence(conn: sqlite3.Connection) -> None:
+    """
+    Watchdog 2: nothing processed for SILENCE_ALERT_HOURS.
+
+    The catch-all for failure modes the specific watchdogs miss. It cannot tell
+    a quiet week from a broken pipeline, so it is worded as a question rather
+    than an alarm, and fires at most once per cooldown.
+    """
+    last_raw = _meta_get(conn, "last_recording_seen")
+    if last_raw is None:
+        # First run after the upgrade: start the clock rather than alert on a
+        # history we never recorded.
+        _meta_set(conn, "last_recording_seen", str(time.time()))
+        return
+    try:
+        hours_quiet = (time.time() - float(last_raw)) / 3600
+    except ValueError:
+        _meta_set(conn, "last_recording_seen", str(time.time()))
+        return
+    if hours_quiet < SILENCE_ALERT_HOURS:
+        return
+    _alert_throttled(
+        conn,
+        "silence",
+        f"🔕 <b>plaud-poller seit {hours_quiet:.0f} Stunden ohne neue Aufnahme</b>\n"
+        f"Das kann eine ruhige Phase sein — oder die Kette steht.\n"
+        f"Kurz gegenpruefen, ob in Plaud Aufnahmen liegen, die hier nicht ankommen.",
+    )
 
 
 # ── Account config parser ──────────────────────────────────────────────────────
@@ -619,6 +982,15 @@ def main() -> None:
                         f"Letzter Fehler: {exc}\n"
                         f"Pruefen: <code>journalctl -u plaud-poller -n 50</code>"
                     )
+
+        if all_new:
+            _meta_set(db, "last_recording_seen", str(time.time()))
+            _clear_alert(db, "silence")
+        else:
+            _check_silence(db)
+
+        if TWO_STAGE:
+            _trigger_assignment_reminders()
 
         audit = {
             "timestamp":       cycle_start,

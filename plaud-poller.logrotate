@@ -1,11 +1,11 @@
-/var/log/plaud/plaud-poller.log {
+/var/log/plaud-poller/plaud-poller.log {
     daily
     rotate 14
     compress
     delaycompress
     missingok
     notifempty
-    create 0640 plaud plaud
+    create 0640 mein-assistent mein-assistent
     postrotate
         systemctl kill -s HUP plaud-poller.service 2>/dev/null || true
     endscript

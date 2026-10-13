@@ -117,15 +117,85 @@ class LenaTelegramSendEndpointTest(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row[0], "", "comment_id must be '' not None (NOT NULL constraint)")
 
-    def test_returns_success_false_when_telegram_fails(self):
+    def test_raises_502_when_telegram_fails(self):
+        """HBE-3107: Fehlschlag muss als Fehlschlag ankommen.
+
+        Frueher kam HTTP 200 mit success=false zurueck. Fuer einen Agenten war
+        das nicht von Erfolg zu unterscheiden — Lena hat am 16.09.2026 deshalb
+        130-mal gesendet und 14 Testnachrichten an Sven zugestellt, bis eine
+        ohne reservierte Zeichen durchkam.
+        """
+        from fastapi import HTTPException as FHE
         with mock.patch.object(self.api, "_tg_agent_send", return_value=None), \
              mock.patch.object(self.api, "_tg_agent_db") as mock_db_factory:
             mock_db_factory.return_value.__enter__ = mock.MagicMock(return_value=mock.MagicMock())
             mock_db_factory.return_value.__exit__ = mock.MagicMock(return_value=False)
             req = self._make_request(issue_id="HBE-999")
-            resp = self.api.lena_telegram_send(req, _key="test-key")
-        self.assertFalse(resp.success)
-        self.assertIsNone(resp.telegram_msg_id)
+            with self.assertRaises(FHE) as ctx:
+                self.api.lena_telegram_send(req, _key="test-key")
+        self.assertEqual(ctx.exception.status_code, 502)
+        self.assertIn("parse_mode", ctx.exception.detail,
+                      "Die Meldung muss die haeufigste Ursache nennen")
+        self.assertIn("nicht mit anderem Text wiederholen", ctx.exception.detail,
+                      "Die Meldung muss vom Nachsenden abraten — sonst folgt der naechste Loop")
+
+
+class TelegramParseModeDefaultTest(unittest.TestCase):
+    """HBE-3107: Der Default 'MarkdownV2' war die Ursache des Telegram-Sturms."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.api = _load_api("api_parsemode_default_test")
+
+    def test_kein_parse_mode_ohne_ausdrueckliche_angabe(self):
+        req = self.api.LenaTelegramSendRequest(chat_id="1", text="Text mit - . ( ) !")
+        self.assertIsNone(req.parse_mode,
+                          "Ohne Angabe darf kein parse_mode gesetzt werden")
+
+    def test_parse_mode_bleibt_auf_wunsch_erhalten(self):
+        req = self.api.LenaTelegramSendRequest(chat_id="1", text="x", parse_mode="MarkdownV2")
+        self.assertEqual(req.parse_mode, "MarkdownV2")
+
+    def test_alltagstext_erreicht_telegram_unformatiert(self):
+        """Der konkrete Text, an dem Lena gescheitert ist."""
+        text = '15 Mails mit "Lena: Ablegen" archiviert (archive-by-category, HTTP 200).'
+        mock_resp = mock.MagicMock()
+        mock_resp.ok = True
+        mock_resp.json.return_value = {"result": {"message_id": 42}}
+        with mock.patch.object(self.api._http, "post", return_value=mock_resp) as m_post:
+            msg_id = self.api._tg_agent_send("tok", "111", text)
+        self.assertEqual(msg_id, 42)
+        payload = m_post.call_args[1]["json"]
+        self.assertNotIn("parse_mode", payload,
+                         "Ohne parse_mode darf Telegram gar nicht erst parsen")
+        self.assertEqual(payload["text"], text, "Der Text darf nicht veraendert werden")
+
+    def test_ablehnung_wird_protokolliert(self):
+        """Die fehlende Log-Zeile hat 105 Fehlschlaege unsichtbar gemacht."""
+        mock_resp = mock.MagicMock()
+        mock_resp.ok = False
+        mock_resp.status_code = 400
+        mock_resp.text = ('{"ok":false,"error_code":400,"description":"Bad Request: '
+                          "can't parse entities: Character '-' is reserved\"}")
+        with mock.patch.object(self.api._http, "post", return_value=mock_resp), \
+             mock.patch.object(self.api, "logger") as m_log:
+            msg_id = self.api._tg_agent_send("tok", "111", "x", parse_mode="MarkdownV2")
+        self.assertIsNone(msg_id)
+        m_log.warning.assert_called_once()
+        gemeldet = " ".join(str(a) for a in m_log.warning.call_args[0])
+        self.assertIn("abgelehnt", gemeldet)
+
+    def test_log_enthaelt_kein_token(self):
+        """Die Fehlermeldung von Telegram ist unbedenklich — die URL waere es nicht."""
+        mock_resp = mock.MagicMock()
+        mock_resp.ok = False
+        mock_resp.status_code = 400
+        mock_resp.text = '{"description":"Bad Request"}'
+        with mock.patch.object(self.api._http, "post", return_value=mock_resp), \
+             mock.patch.object(self.api, "logger") as m_log:
+            self.api._tg_agent_send("geheimes-token", "111", "x")
+        gemeldet = " ".join(str(a) for a in m_log.warning.call_args[0])
+        self.assertNotIn("geheimes-token", gemeldet)
 
 
 class TgSendMessageParseModeTest(unittest.TestCase):
