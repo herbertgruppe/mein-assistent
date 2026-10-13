@@ -4243,29 +4243,41 @@ def lena_mail_draft(
     body_type = "HTML" if req.body_html else "Text"
 
     if req.reply_to_message_id and req.mode == "forward":
-        # HBE-3048: Weiterleitungs-Entwurf. createForward uebernimmt den
-        # Originaltext und die Anhaenge — genau das, was beim Weiterleiten
-        # gebraucht wird. Der Entwurf wird NICHT gesendet.
+        # HBE-3350: createForward legt den Entwurf mit dem zitierten Original
+        # und den Anhaengen an — ABER nur, wenn der eigene Text ueber das
+        # Feld "comment" uebergeben wird. Setzt man stattdessen "message.body"
+        # (wie vorher), ERSETZT das den kompletten Entwurfstext inklusive des
+        # automatisch eingefuegten Originals — die Anlage bleibt, der
+        # urspruengliche E-Mail-Text ist weg. Microsoft Graph erlaubt comment
+        # und message.body nicht gleichzeitig (dokumentiertes Verhalten).
+        # "comment" ist immer Klartext; body_html wird hier bewusst nicht
+        # verwendet, weil sonst HTML-Tags unverarbeitet im Text erschienen.
         url = f"https://graph.microsoft.com/v1.0/me/messages/{req.reply_to_message_id}/createForward"
-        payload = {
-            "message": {
-                "subject": req.subject,
-                "body": {"contentType": body_type, "content": body_content},
-                "toRecipients": _recipients(req.to),
-                "ccRecipients": _recipients(req.cc),
-            }
-        }
+        payload: Dict[str, Any] = {"comment": req.body_text or body_content}
+        msg_overrides: Dict[str, Any] = {}
+        if req.subject:
+            msg_overrides["subject"] = req.subject
+        if req.to:
+            msg_overrides["toRecipients"] = _recipients(req.to)
+        if req.cc:
+            msg_overrides["ccRecipients"] = _recipients(req.cc)
+        if msg_overrides:
+            payload["message"] = msg_overrides
     elif req.reply_to_message_id:
-        # Create reply draft linked to original message for proper threading
+        # HBE-3350: Derselbe Fehler wie beim Forward-Pfad oben — nicht von
+        # Sven gemeldet, aber identisch im Code. "comment" statt
+        # "message.body", sonst geht der zitierte Thread-Verlauf verloren.
         url = f"https://graph.microsoft.com/v1.0/me/messages/{req.reply_to_message_id}/createReply"
-        payload = {
-            "message": {
-                "subject": req.subject,
-                "body": {"contentType": body_type, "content": body_content},
-                "toRecipients": _recipients(req.to),
-                "ccRecipients": _recipients(req.cc),
-            }
-        }
+        payload = {"comment": req.body_text or body_content}
+        msg_overrides = {}
+        if req.subject:
+            msg_overrides["subject"] = req.subject
+        if req.to:
+            msg_overrides["toRecipients"] = _recipients(req.to)
+        if req.cc:
+            msg_overrides["ccRecipients"] = _recipients(req.cc)
+        if msg_overrides:
+            payload["message"] = msg_overrides
     else:
         url = "https://graph.microsoft.com/v1.0/me/messages"
         payload = {
