@@ -3852,6 +3852,98 @@ def _plaud_id_kandidaten(recording_id: str) -> List[str]:
     return kandidaten
 
 
+def _plaud_datei_holen(recording_id: str) -> Dict[str, Any]:
+    """
+    Holt eine Aufnahme samt Transkript-Quellen aus Plaud.
+
+    Wirft HTTPException — die Aufrufer sind Endpunkte, und die Unterscheidung
+    zwischen "kein Zugang" (503) und "Aufnahme weg" (404) ist für den
+    Anrufenden wichtig: das eine wartet man ab, das andere nie.
+    """
+    tokens = _read_plaud_tokens()
+    if not tokens or not tokens.get("access_token"):
+        raise HTTPException(status_code=503, detail="Plaud-Zugang nicht verfügbar")
+
+    headers = {
+        "Authorization": f"Bearer {tokens['access_token']}",
+        # Plaud weist Default-User-Agents mit 403 ab
+        "User-Agent": "herbert-mein-assistent/1.0",
+    }
+    letzter_status = None
+    for kandidat in _plaud_id_kandidaten(recording_id):
+        try:
+            resp = _http.get(f"{_PLAUD_FILES_URL}/{kandidat}", headers=headers, timeout=30)
+            if resp.status_code == 200:
+                return resp.json()
+            letzter_status = resp.status_code
+        except Exception as exc:
+            logger.warning("[plaud] Abruf fehlgeschlagen: %s", type(exc).__name__)
+
+    if letzter_status in (401, 403):
+        # Eigene Meldung, weil der Unterschied teuer war: Mara hat monatelang
+        # "Token abgelaufen" gemeldet, obwohl sie einen Weg versuchte, den es
+        # nicht mehr gab. Ein echter Auth-Fehler sieht so aus.
+        raise HTTPException(
+            status_code=503,
+            detail=f"Plaud lehnt den Zugang ab (HTTP {letzter_status}) — Token erneuern.",
+        )
+    raise HTTPException(
+        status_code=404,
+        detail="Aufnahme in Plaud nicht gefunden — möglicherweise gelöscht",
+    )
+
+
+def _plaud_segmente(datei: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
+    """
+    Liefert die Transkript-Segmente und die verwendete Quelle.
+
+    `transaction_polish` ist die nachbearbeitete Fassung und wird bevorzugt;
+    `transaction` ist der Rohschnitt. Fehlen beide, gibt es kein Transkript —
+    das ist bei frischen Aufnahmen normal, Plaud braucht einige Minuten.
+    """
+    for quelle in ("transaction_polish", "transaction"):
+        for eintrag in datei.get("source_list") or []:
+            if eintrag.get("data_type") != quelle or not eintrag.get("data_content"):
+                continue
+            try:
+                segmente = json.loads(eintrag["data_content"])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(segmente, list) and segmente:
+                return segmente, quelle
+    return [], ""
+
+
+def _plaud_zeit(ms: Any) -> str:
+    """Millisekunden als [mm:ss]."""
+    try:
+        s = int(ms) // 1000
+        return "[%02d:%02d]" % (s // 60, s % 60)
+    except (TypeError, ValueError):
+        return ""
+
+
+def _transkript_formatieren(segmente: List[Dict[str, Any]]) -> str:
+    """
+    Baut das Rohtranskript als `[mm:ss] Sprecher: Text`.
+
+    Die Sprecherzuordnung bleibt erhalten — sie ist der Grund, warum das
+    Transkript erst nach Svens Korrektur in Plaud gezogen wird.
+    """
+    zeilen: List[str] = []
+    for seg in segmente:
+        if not isinstance(seg, dict):
+            continue
+        text = (seg.get("content") or "").strip()
+        if not text:
+            continue
+        sprecher = (seg.get("speaker") or seg.get("original_speaker") or "").strip()
+        zeit = _plaud_zeit(seg.get("start_time"))
+        kopf = " ".join(x for x in (zeit, (sprecher + ":") if sprecher else "") if x)
+        zeilen.append(f"{kopf} {text}".strip())
+    return "\n".join(zeilen)
+
+
 @app.get("/api/protocols/{draft_id}/plaud-speakers")
 def get_plaud_speakers(
     draft_id: str,
@@ -3876,51 +3968,15 @@ def get_plaud_speakers(
     if not recording_id:
         raise HTTPException(status_code=404, detail="Keine Plaud-Aufnahme zugeordnet")
 
-    tokens = _read_plaud_tokens()
-    if not tokens or not tokens.get("access_token"):
-        raise HTTPException(status_code=503, detail="Plaud-Zugang nicht verfügbar")
+    datei = _plaud_datei_holen(recording_id)
+    segmente, _quelle = _plaud_segmente(datei)
 
-    headers = {
-        "Authorization": f"Bearer {tokens['access_token']}",
-        # Plaud weist Default-User-Agents mit 403 ab
-        "User-Agent": "herbert-mein-assistent/1.0",
-    }
-    datei = None
-    for kandidat in _plaud_id_kandidaten(recording_id):
-        try:
-            resp = _http.get(f"{_PLAUD_FILES_URL}/{kandidat}", headers=headers, timeout=30)
-            if resp.status_code == 200:
-                datei = resp.json()
-                break
-        except Exception as exc:
-            logger.warning("[plaud] Sprecher-Abruf fehlgeschlagen: %s", type(exc).__name__)
-
-    if datei is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Aufnahme in Plaud nicht gefunden — möglicherweise gelöscht",
-        )
-
-    sprecher: dict = {}
-    for bevorzugt in ("transaction_polish", "transaction"):
-        for eintrag in datei.get("source_list") or []:
-            if eintrag.get("data_type") != bevorzugt or not eintrag.get("data_content"):
-                continue
-            try:
-                segmente = json.loads(eintrag["data_content"])
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(segmente, list):
-                continue
-            for seg in segmente:
-                if not isinstance(seg, dict) or not (seg.get("content") or "").strip():
-                    continue
-                name = (seg.get("speaker") or "").strip() or "(ohne Namen)"
-                sprecher[name] = sprecher.get(name, 0) + 1
-            if sprecher:
-                break
-        if sprecher:
-            break
+    sprecher: Dict[str, int] = {}
+    for seg in segmente:
+        if not isinstance(seg, dict) or not (seg.get("content") or "").strip():
+            continue
+        name = (seg.get("speaker") or "").strip() or "(ohne Namen)"
+        sprecher[name] = sprecher.get(name, 0) + 1
 
     geordnet = sorted(sprecher.items(), key=lambda x: -x[1])
     gesamt = sum(sprecher.values())
@@ -3933,6 +3989,74 @@ def get_plaud_speakers(
         "segmente": gesamt,
         "unbenannt": unbenannt,
         "sprecher": [{"name": k, "segmente": n} for k, n in geordnet],
+    }
+
+
+@app.post("/api/protocols/{draft_id}/fetch-transcript")
+def fetch_transcript(
+    draft_id: str,
+    erneut: bool = False,
+    _key: str = Security(verify_api_key),
+):
+    """
+    Holt das Transkript aus Plaud, archiviert es und gibt es zurück.
+
+    Mara hatte dafür keinen funktionierenden Weg. In ihrem Gedächtnis stand
+    seit Juni ein CLI-Aufruf samt eigener Token-Datei im Paperclip-Container —
+    beides existiert dort nicht (mehr). Der Versuch scheiterte mit
+    `invalid auth header`, woraus sie auf einen abgelaufenen Token schloss und
+    den Auftrag blockierte. Siebzehn Aufträge hängen seit August an dieser
+    Fehldiagnose, während der Token durchgehend gültig war.
+
+    Dieser Endpunkt löst das strukturell: Es gibt **einen** Plaud-Zugang, hier,
+    automatisch erneuert. Mara ruft einen Dienst statt ein Werkzeug, das sie
+    nicht hat.
+
+    Ein bereits archiviertes Transkript wird zurückgegeben, ohne Plaud zu
+    behelligen — `erneut=true` erzwingt den frischen Abruf, etwa nach einer
+    Sprecherkorrektur.
+    """
+    protocol = _protocols_db.get_by_id(draft_id)
+    if not protocol:
+        raise HTTPException(status_code=404, detail="Protokoll nicht gefunden")
+
+    if not erneut and (protocol.get("transcript") or "").strip():
+        return {
+            "draft_id": draft_id,
+            "transcript": protocol["transcript"],
+            "quelle": "archiv",
+            "gespeichert_am": protocol.get("transcript_saved_at"),
+        }
+
+    recording_id = protocol.get("recording_id")
+    if not recording_id:
+        raise HTTPException(status_code=404, detail="Keine Plaud-Aufnahme zugeordnet")
+
+    datei = _plaud_datei_holen(recording_id)
+    segmente, quelle = _plaud_segmente(datei)
+    if not segmente:
+        # Kein Fehler, sondern ein Zustand: Plaud braucht nach der Aufnahme
+        # einige Minuten. Wer das als Fehler meldet, erzeugt Fehlalarme.
+        raise HTTPException(
+            status_code=409,
+            detail="In Plaud liegt noch kein Transkript zu dieser Aufnahme.",
+        )
+
+    text = _transkript_formatieren(segmente)
+    if not text.strip():
+        raise HTTPException(status_code=409, detail="Transkript ist leer.")
+
+    _protocols_db.save_transcript(draft_id, text)
+    logger.info(
+        "[plaud] Transkript fuer %s geholt (%d Segmente, Quelle %s, %d Zeichen)",
+        draft_id, len(segmente), quelle, len(text),
+    )
+    return {
+        "draft_id": draft_id,
+        "transcript": text,
+        "quelle": quelle,
+        "segmente": len(segmente),
+        "recording_title": datei.get("name") or protocol.get("recording_title"),
     }
 
 
