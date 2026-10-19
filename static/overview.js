@@ -34,7 +34,10 @@
     function eintrag(e, zeigeAlter) {
         var a = document.createElement("a");
         a.className = "hg-eintrag" + (zeigeAlter ? altersKlasse(e.alter_tage) : "");
-        a.href = e.link;
+        // Der Hinweis sorgt dafuer, dass der Vorgang nach dem Absenden hierher
+        // zurueckkehrt — beim Abarbeiten mehrerer Aufnahmen am Stueck ist die
+        // Sackgasse danach sonst das groesste Aergernis.
+        a.href = e.link + (e.link.indexOf("?") === -1 ? "?" : "&") + "weiter=uebersicht";
 
         var haupt = node("div", "hg-eintrag-haupt");
         var titel = node("div", "hg-eintrag-titel");

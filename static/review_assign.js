@@ -36,6 +36,34 @@
     // ------------------------------------------------------------------
     // Helfer
     // ------------------------------------------------------------------
+
+    /**
+     * Meldet den Abschluss und kehrt zur Uebersicht zurueck, sofern der
+     * Vorgang von dort aus geoeffnet wurde.
+     *
+     * Beim Abarbeiten mehrerer Aufnahmen am Stueck ist die Sackgasse nach dem
+     * Absenden das groesste Aergernis: man muss jedes Mal zurueckblaettern.
+     * Die kurze Pause ist Absicht — ohne sie bliebe unklar, ob es geklappt hat.
+     */
+    function fertigMelden(titel, text) {
+        var zurueck = new URLSearchParams(window.location.search).get('weiter') === 'uebersicht';
+        document.querySelector('.hg-main').innerHTML =
+            '<section class="hg-recording-card">' +
+            '<div class="hg-recording-title">' + titel + '</div>' +
+            '<div class="hg-recording-meta">' + text +
+            (zurueck ? '<br><br>Zurück zur Übersicht …' : '') +
+            '</div>' +
+            (zurueck ? '' :
+                '<div class="hg-recording-meta" style="margin-top:14px">' +
+                '<a href="/protokolle">Zur Übersicht aller Protokolle</a></div>') +
+            '</section>';
+        if (zurueck) {
+            window.setTimeout(function () {
+                window.location.href = '/protokolle';
+            }, 1200);
+        }
+    }
+
     function fillSelect(select, items, placeholder) {
         select.innerHTML = '';
         var opt = document.createElement('option');
@@ -239,13 +267,11 @@
                     });
             })
             .then(function () {
-                document.querySelector('.hg-main').innerHTML =
-                    '<section class="hg-recording-card">' +
-                    '<div class="hg-recording-title">✅ Freigegeben</div>' +
-                    '<div class="hg-recording-meta">Mara zieht jetzt das Transkript ' +
-                    'und erstellt den Protokollentwurf. Du bekommst den ' +
-                    'Review-Link, sobald er fertig ist.</div>' +
-                    '</section>';
+                fertigMelden(
+                    '✅ Freigegeben',
+                    'Mara zieht jetzt das Transkript und erstellt den ' +
+                    'Protokollentwurf. Du bekommst den Review-Link, sobald er fertig ist.'
+                );
             })
             .catch(function (err) {
                 assignInfo.textContent = '⚠️ ' + err.message;
@@ -366,13 +392,11 @@
                     });
             })
             .then(function () {
-                document.querySelector('.hg-main').innerHTML =
-                    '<section class="hg-recording-card">' +
-                    '<div class="hg-recording-title">🗑 Verworfen</div>' +
-                    '<div class="hg-recording-meta">Zu dieser Aufnahme wird kein ' +
-                    'Protokoll erstellt. In Plaud bleibt sie erhalten — dort kannst ' +
-                    'du sie bei Bedarf löschen.</div>' +
-                    '</section>';
+                fertigMelden(
+                    '🗑 Verworfen',
+                    'Zu dieser Aufnahme wird kein Protokoll erstellt. In Plaud ' +
+                    'bleibt sie erhalten — dort kannst du sie bei Bedarf löschen.'
+                );
             })
             .catch(function (err) {
                 assignInfo.textContent = '⚠️ ' + err.message;

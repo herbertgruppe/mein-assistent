@@ -284,8 +284,15 @@
                     });
                 }
                 dirty = false;
-                window.location.href = '/review/' +
-                    encodeURIComponent(ctx.token) + '/success';
+                // Wer die Freigaben am Stueck abarbeitet, will zurueck zur
+                // Liste statt auf eine Sackgassen-Seite. Die Erfolgsseite
+                // bleibt fuer alle anderen Wege erhalten.
+                if (new URLSearchParams(window.location.search).get('weiter') === 'uebersicht') {
+                    window.location.href = '/protokolle';
+                } else {
+                    window.location.href = '/review/' +
+                        encodeURIComponent(ctx.token) + '/success';
+                }
             })
             .catch(function (err) {
                 alert('Freigabe fehlgeschlagen: ' + err.message);
