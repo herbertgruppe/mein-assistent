@@ -5,7 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="robots" content="noindex, nofollow">
     <title>Protokoll freigegeben – Herbert Gruppe</title>
-    <link rel="stylesheet" href="/static/review.css">
+    <!-- Gemountet ist /review-static/ (nicht /static/, das gehoert Streamlit).
+         Mit dem alten Pfad kam die Seite ohne jede Formatierung. -->
+    <link rel="stylesheet" href="/review-static/review.css">
 </head>
 <body>
     <header class="hg-header">
@@ -21,7 +23,10 @@
                 PDF-Erstellung, Anhang am Outlook-Termin{% if create_asana_task %}
                 sowie Anlage der Asana-Aufgabe mit Unteraufgaben{% endif %}.
             </p>
-            <p class="hg-hint">Du kannst dieses Fenster jetzt schließen.</p>
+            <p class="hg-hint">
+                <a href="/protokolle">Zur Übersicht aller Protokolle</a>
+                — oder dieses Fenster schließen.
+            </p>
         </div>
     </main>
 </body>

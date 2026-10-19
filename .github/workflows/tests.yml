@@ -64,6 +64,12 @@ jobs:
       - name: Run Protokoll-Uebersicht tests
         run: python -m pytest tests/test_protokoll_uebersicht.py -v
 
+      # Rueckweg von einem Vorgang zur Liste. Faellt er weg, endet jede
+      # Freigabe wieder in einer Sackgasse — bei 21 offenen Vorgaengen
+      # 21 Mal derselbe Griff.
+      - name: Run Rueckkehr-Tests
+        run: python -m pytest tests/test_rueckkehr_uebersicht.py -v
+
       # Die gesamte Protokoll-Strecke — DB-Layer, Review-Editor, Zuordnungs-Stufe
       # — lief hier nie mit, obwohl sie seit Monaten im Repo liegt. Grund war ein
       # einzelner dauerhaft roter Test: er schickte den Authentik-Header ueber den
