@@ -1,0 +1,173 @@
+/* Übersichtsseite über den Protokoll-Workflow.
+   Ergänzt review.css, überschreibt nichts daraus. */
+
+.hg-kpis {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 18px;
+}
+
+.hg-kpi {
+    flex: 1 1 140px;
+    background: #fff;
+    border: 1px solid var(--hg-border);
+    border-radius: 6px;
+    padding: 14px 16px;
+}
+
+.hg-kpi-zahl {
+    font-size: 30px;
+    font-weight: 700;
+    line-height: 1.1;
+    color: var(--hg-blue);
+}
+
+.hg-kpi-text {
+    font-size: 13px;
+    color: #5a6b7d;
+    margin-top: 2px;
+}
+
+/* Reiter */
+.hg-tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 2px solid var(--hg-border);
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+
+.hg-tab {
+    background: none;
+    border: none;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -2px;
+    padding: 9px 16px;
+    font-size: 15px;
+    font-family: inherit;
+    color: #5a6b7d;
+    cursor: pointer;
+}
+
+.hg-tab:hover { color: var(--hg-blue); }
+
+.hg-tab.is-aktiv {
+    color: var(--hg-blue);
+    border-bottom-color: var(--hg-blue);
+    font-weight: 600;
+}
+
+.hg-tab-zahl {
+    display: inline-block;
+    min-width: 20px;
+    padding: 1px 6px;
+    margin-left: 4px;
+    border-radius: 10px;
+    background: var(--hg-border);
+    color: var(--hg-text);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.hg-panel { display: none; }
+.hg-panel.is-aktiv { display: block; }
+
+.hg-panel-hilfe {
+    font-size: 14px;
+    color: #5a6b7d;
+    margin: 0 0 14px;
+}
+
+/* Einträge */
+.hg-liste { display: flex; flex-direction: column; gap: 8px; }
+
+.hg-eintrag {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    background: #fff;
+    border: 1px solid var(--hg-border);
+    border-left: 4px solid var(--hg-blue);
+    border-radius: 5px;
+    padding: 12px 14px;
+    text-decoration: none;
+    color: inherit;
+}
+
+.hg-eintrag:hover {
+    border-color: var(--hg-blue-light);
+    border-left-color: var(--hg-blue-light);
+    background: #fbfdff;
+}
+
+/* Je länger etwas liegt, desto deutlicher — eine Aufnahme, die vier Wochen
+   wartet, darf nicht aussehen wie eine von gestern. */
+.hg-eintrag.ist-alt      { border-left-color: #b45309; }
+.hg-eintrag.ist-sehr-alt { border-left-color: #c0392b; }
+
+.hg-eintrag-haupt { flex: 1 1 auto; min-width: 0; }
+
+.hg-eintrag-titel {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.hg-eintrag-meta {
+    font-size: 13px;
+    color: #5a6b7d;
+    margin-top: 2px;
+}
+
+.hg-eintrag-alter {
+    flex: 0 0 auto;
+    text-align: right;
+    font-size: 13px;
+    color: #5a6b7d;
+    white-space: nowrap;
+}
+
+.hg-eintrag-alter strong { display: block; font-size: 17px; color: var(--hg-text); }
+.ist-alt      .hg-eintrag-alter strong { color: #b45309; }
+.ist-sehr-alt .hg-eintrag-alter strong { color: #c0392b; }
+
+.hg-marke {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .3px;
+    margin-right: 6px;
+    vertical-align: 1px;
+}
+
+.hg-marke-warn    { background: #fef3c7; color: #92400e; }
+.hg-marke-info    { background: #dbeafe; color: #1e40af; }
+.hg-marke-neutral { background: #eef2f7; color: #475569; }
+
+.hg-leer {
+    padding: 28px;
+    text-align: center;
+    color: #5a6b7d;
+    background: #fff;
+    border: 1px dashed var(--hg-border);
+    border-radius: 5px;
+}
+
+.hg-fehler {
+    margin-top: 16px;
+    padding: 12px 14px;
+    border-radius: 5px;
+    background: #fde8e8;
+    border: 1px solid #f5b5b5;
+    color: #8f2626;
+}
+
+@media (max-width: 560px) {
+    .hg-eintrag { flex-wrap: wrap; }
+    .hg-eintrag-alter { text-align: left; }
+}

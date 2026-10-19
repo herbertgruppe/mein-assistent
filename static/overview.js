@@ -1,0 +1,174 @@
+/* Übersicht über den Protokoll-Workflow.
+   Holt /api/protocols/overview und füllt die drei Reiter. */
+
+(function () {
+    "use strict";
+
+    var SEHR_ALT = 14;   // Tage — ab hier rot
+    var ALT = 7;         // Tage — ab hier orange
+
+    function el(id) { return document.getElementById(id); }
+
+    function text(inhalt) { return document.createTextNode(inhalt); }
+
+    function node(tag, klasse, inhalt) {
+        var n = document.createElement(tag);
+        if (klasse) { n.className = klasse; }
+        if (inhalt !== undefined && inhalt !== null) { n.appendChild(text(String(inhalt))); }
+        return n;
+    }
+
+    function marke(klasse, beschriftung) {
+        return node("span", "hg-marke " + klasse, beschriftung);
+    }
+
+    function altersKlasse(tage) {
+        if (tage === null || tage === undefined) { return ""; }
+        if (tage >= SEHR_ALT) { return " ist-sehr-alt"; }
+        if (tage >= ALT) { return " ist-alt"; }
+        return "";
+    }
+
+    /* Ein Eintrag ist ein Link auf seine Review-Seite. Bewusst ein <a>: so
+       funktionieren Mittelklick und "in neuem Tab öffnen" wie erwartet. */
+    function eintrag(e, zeigeAlter) {
+        var a = document.createElement("a");
+        a.className = "hg-eintrag" + (zeigeAlter ? altersKlasse(e.alter_tage) : "");
+        a.href = e.link;
+
+        var haupt = node("div", "hg-eintrag-haupt");
+        var titel = node("div", "hg-eintrag-titel");
+
+        if (e.ohne_namen) {
+            titel.appendChild(marke("hg-marke-warn", "ohne Titel"));
+        }
+        if (e.abgelaufen) {
+            titel.appendChild(marke("hg-marke-neutral", "Link abgelaufen"));
+        }
+        if (e.status === "assigned") {
+            titel.appendChild(marke("hg-marke-info", "bei Mara"));
+        }
+        titel.appendChild(text(e.titel));
+        haupt.appendChild(titel);
+
+        var meta = [];
+        if (e.datum) { meta.push(e.datum); }
+        if (e.dauer) { meta.push(e.dauer); }
+        if (e.termin && e.termin !== e.titel) { meta.push(e.termin); }
+        if (e.erinnerungen > 0) {
+            meta.push(e.erinnerungen + (e.erinnerungen === 1 ? " Erinnerung" : " Erinnerungen"));
+        }
+        if (e.hat_transkript) { meta.push("Transkript gesichert"); }
+        if (meta.length) {
+            haupt.appendChild(node("div", "hg-eintrag-meta", meta.join(" · ")));
+        }
+        a.appendChild(haupt);
+
+        if (zeigeAlter && e.alter_tage !== null && e.alter_tage !== undefined) {
+            var rechts = node("div", "hg-eintrag-alter");
+            rechts.appendChild(node("strong", null, e.alter_tage));
+            rechts.appendChild(text(e.alter_tage === 1 ? "Tag" : "Tage"));
+            a.appendChild(rechts);
+        }
+        return a;
+    }
+
+    function fertigEintrag(e) {
+        var wrap = node("div", "hg-eintrag");
+        var haupt = node("div", "hg-eintrag-haupt");
+        haupt.appendChild(node("div", "hg-eintrag-titel", e.titel));
+        if (e.datum) { haupt.appendChild(node("div", "hg-eintrag-meta", e.datum)); }
+        wrap.appendChild(haupt);
+        if (e.asana_url) {
+            var a = document.createElement("a");
+            a.className = "hg-eintrag-alter";
+            a.href = e.asana_url;
+            a.target = "_blank";
+            a.rel = "noopener";
+            a.appendChild(text("Asana"));
+            wrap.appendChild(a);
+        }
+        return wrap;
+    }
+
+    function fuellen(ziel, eintraege, bauer, leerText) {
+        var box = el(ziel);
+        box.textContent = "";
+        if (!eintraege.length) {
+            box.appendChild(node("div", "hg-leer", leerText));
+            return;
+        }
+        eintraege.forEach(function (e) { box.appendChild(bauer(e)); });
+    }
+
+    function reiterZahl(id, wert) {
+        var n = el(id);
+        if (!n) { return; }
+        n.textContent = wert > 0 ? String(wert) : "";
+        n.hidden = wert === 0;
+    }
+
+    function reiterWechsel(ziel) {
+        var tabs = document.querySelectorAll(".hg-tab");
+        var i;
+        for (i = 0; i < tabs.length; i++) {
+            tabs[i].classList.toggle("is-aktiv", tabs[i].dataset.ziel === ziel);
+        }
+        var panels = document.querySelectorAll(".hg-panel");
+        for (i = 0; i < panels.length; i++) {
+            panels[i].classList.toggle("is-aktiv", panels[i].id === "panel-" + ziel);
+        }
+    }
+
+    function fehler(meldung) {
+        var box = el("fehler");
+        box.textContent = meldung;
+        box.hidden = false;
+    }
+
+    function laden() {
+        fetch("/api/protocols/overview", { credentials: "same-origin" })
+            .then(function (r) {
+                if (r.status === 401 || r.status === 403) {
+                    throw new Error("Nicht angemeldet. Bitte die Seite neu laden.");
+                }
+                if (!r.ok) { throw new Error("Daten konnten nicht geladen werden (HTTP " + r.status + ")."); }
+                return r.json();
+            })
+            .then(function (d) {
+                var k = d.kennzahlen || {};
+                el("kpi-offen").textContent = k.offen;
+                el("kpi-review").textContent = k.im_review;
+                el("kpi-alt").textContent = k.aeltestes_tage;
+                el("kpis").hidden = false;
+
+                if (k.ohne_namen > 0) {
+                    var h = el("hinweis-ohne-namen");
+                    h.textContent = k.ohne_namen === 1
+                        ? "Eine Aufnahme trägt in Plaud keinen sprechenden Titel — sie ist nur über das Datum zuzuordnen."
+                        : k.ohne_namen + " Aufnahmen tragen in Plaud keinen sprechenden Titel — sie sind nur über das Datum zuzuordnen.";
+                    h.hidden = false;
+                }
+
+                reiterZahl("tab-zahl-zuordnung", (d.zuordnung || []).length);
+                reiterZahl("tab-zahl-freigabe", (d.freigabe || []).length);
+
+                fuellen("liste-zuordnung", d.zuordnung || [],
+                    function (e) { return eintrag(e, true); },
+                    "Nichts offen — alle Aufnahmen sind zugeordnet.");
+                fuellen("liste-freigabe", d.freigabe || [],
+                    function (e) { return eintrag(e, true); },
+                    "Kein Entwurf wartet auf Freigabe.");
+                fuellen("liste-fertig", d.fertig || [], fertigEintrag,
+                    "Noch kein Protokoll fertiggestellt.");
+            })
+            .catch(function (e) { fehler(e.message); });
+    }
+
+    document.addEventListener("click", function (ev) {
+        var tab = ev.target.closest ? ev.target.closest(".hg-tab") : null;
+        if (tab && tab.dataset.ziel) { reiterWechsel(tab.dataset.ziel); }
+    });
+
+    laden();
+}());

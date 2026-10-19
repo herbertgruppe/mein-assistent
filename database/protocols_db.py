@@ -510,6 +510,49 @@ class ProtocolsDB:
                 due.append(row)
         return due
 
+    def list_awaiting_review(self) -> List[Dict[str, Any]]:
+        """
+        Protokolle, bei denen Sven am Zug ist, nachdem die Zuordnung stand:
+        fertige Entwürfe, geöffnete Reviews und Aufnahmen, für die Mara
+        beauftragt ist, aber noch nicht geliefert hat.
+
+        'assigned' gehört bewusst dazu — hängt ein Auftrag fest, sieht man es
+        sonst nirgends. Genau das ist im Oktober zweimal passiert.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM protocols"
+                " WHERE status IN ('assigned', 'draft', 'in_review')"
+                " ORDER BY meeting_datetime DESC"
+            )
+            return [self._row_to_dict(row) for row in cursor.fetchall()]
+
+    def list_recently_finalized(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Die zuletzt fertiggestellten Protokolle — zum Nachschlagen."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM protocols WHERE status = 'finalized'"
+                " ORDER BY COALESCE(finalized_at, approved_at, created_at) DESC"
+                " LIMIT ?",
+                (max(1, min(int(limit), 200)),),
+            )
+            return [self._row_to_dict(row) for row in cursor.fetchall()]
+
+    def last_reminder_timestamp(self) -> Optional[str]:
+        """
+        Wann ging die letzte Erinnerung an eine offene Zuordnung raus?
+
+        Grundlage dafür, dass die Tagesübersicht höchstens einmal je Tag
+        verschickt wird — ohne eigene Tabelle, allein aus dem Bestand.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT MAX(reminder_sent_at) AS letzte FROM protocols"
+                " WHERE status = 'pending_assignment'"
+            )
+            row = cursor.fetchone()
+        return row["letzte"] if row and row["letzte"] else None
+
     # ------------------------------------------------------------------
     # Update
     # ------------------------------------------------------------------
