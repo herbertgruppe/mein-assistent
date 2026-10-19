@@ -12,6 +12,7 @@ ausgeführt — CREATE TABLE IF NOT EXISTS, manuelle Migration optional).
 
 import json
 import logging
+import re
 import secrets
 import sqlite3
 import uuid
@@ -43,6 +44,27 @@ VALID_STATUSES = {
 # Status, in denen noch kein Protokolltext existiert und die Review-Seite im
 # Zuordnungs-Modus rendert.
 ASSIGNMENT_STATUSES = {"pending_assignment", "assigned"}
+
+# Svens Vermerk zur Sprecherprüfung. Plaud bietet dafür kein Feld — seine
+# Third-Party-API kennt weder Kategorien noch Tags (geprüft 19.10.2026).
+#
+# "nicht_noetig" ist kein Ausweichen, sondern eine echte Lage: bei einem
+# Zweiergespräch ist die Zuordnung offensichtlich. "teilweise" hält fest,
+# dass bewusst nicht alle Sprecher benannt wurden — das ist später beim
+# Nachlesen des Transkripts wichtig.
+SPRECHER_STATUS = {
+    "offen",          # noch nicht angesehen (Vorgabe)
+    "geprueft",       # in Plaud geprüft, Zuordnung stimmt
+    "nicht_noetig",   # Sprecherzuordnung für dieses Gespräch nicht erforderlich
+    "teilweise",      # bewusst nur teilweise zugeordnet
+}
+
+SPRECHER_STATUS_TEXT = {
+    "offen": "noch nicht geprüft",
+    "geprueft": "Sprecher geprüft",
+    "nicht_noetig": "keine Sprechererkennung nötig",
+    "teilweise": "nur teilweise zugeordnet",
+}
 
 # Token-Gültigkeit für Reviewer-Links
 TOKEN_TTL_DAYS = 30
@@ -93,6 +115,26 @@ CREATE INDEX IF NOT EXISTS idx_protocols_finalized_at ON protocols(finalized_at)
 def _utcnow_iso() -> str:
     """Aktueller UTC-Zeitstempel als ISO-8601-String."""
     return datetime.now(timezone.utc).isoformat()
+
+
+# Plaud nennt eine frische Aufnahme zunächst nach ihrem Zeitpunkt
+# ("2026-09-18 09:33:46") und vergibt den sprechenden Titel erst später.
+# Beide Schreibweisen kommen vor — die lange beim Anlegen durch den Poller,
+# die kurze in der Plaud-Oberfläche.
+_ZEITSTEMPEL_TITEL = re.compile(
+    r"^\s*(?:\d{4}-\d{2}-\d{2}[ T]\d{2}[:.]\d{2}|\d{2}-\d{2}\s+\d{2}[:.]\d{2})"
+)
+
+
+def ist_zeitstempel_titel(titel: Optional[str]) -> bool:
+    """
+    Trägt die Aufnahme nur einen Zeitstempel als Namen?
+
+    Solche Einträge sind ohne Anhören niemandem zuzuordnen. Sie müssen
+    deshalb sichtbar sein und der Titel nachgezogen werden, sobald Plaud
+    einen besseren hat.
+    """
+    return bool(_ZEITSTEMPEL_TITEL.match(str(titel or "")))
 
 
 class ProtocolsDB:
@@ -164,6 +206,13 @@ class ProtocolsDB:
                 "reminder_count",
                 "ALTER TABLE protocols ADD COLUMN reminder_count INTEGER NOT NULL DEFAULT 0",
             ),
+            # Svens Vermerk, ob er die Sprecherzuordnung in Plaud geprüft hat.
+            # Plaud selbst bietet dafür kein Feld — die Third-Party-API kennt
+            # weder Kategorien noch Tags noch Status (geprüft 19.10.2026).
+            # Der Vermerk gehört ohnehin hierher: Er sagt etwas über Svens
+            # Prüfung, nicht über die Aufnahme.
+            ("sprecher_status", "ALTER TABLE protocols ADD COLUMN sprecher_status TEXT"),
+            ("sprecher_geprueft_am", "ALTER TABLE protocols ADD COLUMN sprecher_geprueft_am TEXT"),
         ):
             try:
                 conn.execute(ddl)
@@ -537,6 +586,67 @@ class ProtocolsDB:
                 (max(1, min(int(limit), 200)),),
             )
             return [self._row_to_dict(row) for row in cursor.fetchall()]
+
+    def set_sprecher_status(self, draft_id: str, status: str) -> bool:
+        """
+        Hält Svens Prüfvermerk zur Sprecherzuordnung fest.
+
+        Der Zeitstempel ist kein Beiwerk: Ändert Sven später in Plaud noch
+        etwas, lässt sich daran erkennen, dass der Vermerk älter ist als die
+        Korrektur.
+        """
+        if status not in SPRECHER_STATUS:
+            raise ValueError(
+                f"sprecher_status muss eines sein: {', '.join(sorted(SPRECHER_STATUS))}"
+            )
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE protocols SET sprecher_status = ?, sprecher_geprueft_am = ?,"
+                " last_modified = ? WHERE id = ?",
+                (status, _utcnow_iso() if status != "offen" else None,
+                 _utcnow_iso(), draft_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def update_recording_title(self, draft_id: str, titel: str) -> bool:
+        """
+        Zieht den Aufnahmenamen aus Plaud nach.
+
+        Plaud vergibt den sprechenden Titel erst einige Zeit nach der
+        Aufnahme. Wer zwischendurch liest, sieht einen blossen Zeitstempel —
+        und kann die Aufnahme ohne Anhören niemandem zuordnen. Am 19.10.2026
+        betraf das 14 von 74 Vorgaengen.
+        """
+        titel = (titel or "").strip()
+        if not titel:
+            return False
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE protocols SET recording_title = ?, last_modified = ?"
+                " WHERE id = ?",
+                (titel, _utcnow_iso(), draft_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def list_mit_zeitstempel_titel(self) -> List[Dict[str, Any]]:
+        """
+        Vorgänge, deren Aufnahmename nur ein Zeitstempel ist.
+
+        Grundlage für das Nachziehen der Titel aus Plaud. Bewusst ohne
+        Status-Filter — auch ein fertiges Protokoll liest sich später besser
+        mit sprechendem Namen.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM protocols"
+                " WHERE recording_id IS NOT NULL AND recording_id != ''"
+                "   AND status NOT IN ('discarded', 'rejected')"
+                " ORDER BY meeting_datetime DESC"
+            )
+            rows = [self._row_to_dict(r) for r in cursor.fetchall()]
+        return [r for r in rows if ist_zeitstempel_titel(r.get("recording_title"))]
 
     def last_reminder_timestamp(self) -> Optional[str]:
         """

@@ -83,23 +83,31 @@
 .hg-liste { display: flex; flex-direction: column; gap: 8px; }
 
 .hg-eintrag {
-    display: flex;
-    align-items: center;
-    gap: 14px;
     background: #fff;
     border: 1px solid var(--hg-border);
     border-left: 4px solid var(--hg-blue);
     border-radius: 5px;
-    padding: 12px 14px;
-    text-decoration: none;
     color: inherit;
 }
 
 .hg-eintrag:hover {
     border-color: var(--hg-blue-light);
     border-left-color: var(--hg-blue-light);
-    background: #fbfdff;
 }
+
+/* Der Hauptteil ist ein echtes <a>, damit Mittelklick funktioniert.
+   Der Pruefvermerk steht daneben, ausserhalb des Links. */
+.hg-eintrag-link {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 14px;
+    text-decoration: none;
+    color: inherit;
+    border-radius: 4px;
+}
+
+.hg-eintrag-link:hover { background: #fbfdff; }
 
 /* Je länger etwas liegt, desto deutlicher — eine Aufnahme, die vier Wochen
    wartet, darf nicht aussehen wie eine von gestern. */
@@ -148,6 +156,54 @@
 .hg-marke-warn    { background: #fef3c7; color: #92400e; }
 .hg-marke-info    { background: #dbeafe; color: #1e40af; }
 .hg-marke-neutral { background: #eef2f7; color: #475569; }
+
+/* Prüfvermerk zur Sprecherzuordnung */
+.hg-sprecher {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+    padding: 0 14px 11px 14px;
+    border-top: 1px dashed var(--hg-border);
+    margin-top: -2px;
+    padding-top: 9px;
+}
+
+.hg-sprecher::before {
+    content: "Sprecher:";
+    font-size: 12px;
+    color: #5a6b7d;
+    margin-right: 2px;
+}
+
+.hg-sprecher.ist-sendet { opacity: .5; pointer-events: none; }
+
+.hg-sprecher-knopf {
+    background: #fff;
+    border: 1px solid var(--hg-border);
+    border-radius: 11px;
+    padding: 2px 10px;
+    font-size: 12px;
+    font-family: inherit;
+    color: #5a6b7d;
+    cursor: pointer;
+}
+
+.hg-sprecher-knopf:hover {
+    border-color: var(--hg-blue-light);
+    color: var(--hg-blue);
+}
+
+.hg-sprecher-knopf.ist-gewaehlt {
+    background: var(--hg-blue);
+    border-color: var(--hg-blue);
+    color: #fff;
+    font-weight: 600;
+}
+
+/* "offen" ist der Normalfall und soll nicht wie ein Fehler aussehen —
+   aber sichtbar bleiben, solange niemand hingesehen hat. */
+.hg-sprecher.ist-offen::before { color: #b45309; font-weight: 600; }
 
 .hg-leer {
     padding: 28px;
