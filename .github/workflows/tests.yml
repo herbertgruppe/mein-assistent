@@ -53,6 +53,11 @@ jobs:
       - name: Run mail-triage tests (HBE-3044 ff. — 5-Schritte-Regel, Regeln, Konsequenzen)
         run: python -m pytest tests/test_mail_triage_*.py -v
 
+      # Mails, die Lena ungefragt archiviert, tragen eine eigene Kategorie.
+      # Faellt die weg, verschwindet Post unsichtbar im Archiv — deshalb im CI.
+      - name: Run Lena-Mail tests (Auto-Archiv-Kategorie, Forward-Entwuerfe)
+        run: python -m pytest tests/test_lena_mail_*.py -v
+
       # Die gesamte Protokoll-Strecke — DB-Layer, Review-Editor, Zuordnungs-Stufe
       # — lief hier nie mit, obwohl sie seit Monaten im Repo liegt. Grund war ein
       # einzelner dauerhaft roter Test: er schickte den Authentik-Header ueber den

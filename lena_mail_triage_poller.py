@@ -2131,6 +2131,12 @@ AKTION_ZU_KATEGORIE = {
     "weiterleiten": "Lena: Weiterleiten",
 }
 KATEGORIE_ZU_AKTION = {v: k for k, v in AKTION_ZU_KATEGORIE.items()}
+# Mails, die ohne Rueckfrage archiviert wurden, tragen eine eigene Kategorie
+# (api.py: LENA_AUTO_ARCHIVE_CATEGORY). Sie liegen im Archiv, nicht im
+# Posteingang — die Abbildung steht hier, damit eine zurueckgeholte Mail
+# trotzdem korrekt als "ablegen" gelesen wird.
+KATEGORIE_AUTO_ABGELEGT = "Lena: Automatisch abgelegt"
+KATEGORIE_ZU_AKTION[KATEGORIE_AUTO_ABGELEGT] = "ablegen"
 MAX_KORREKTUR_MERKER = 300
 
 
