@@ -29,11 +29,68 @@
         return "";
     }
 
-    /* Ein Eintrag ist ein Link auf seine Review-Seite. Bewusst ein <a>: so
-       funktionieren Mittelklick und "in neuem Tab öffnen" wie erwartet. */
+    var SPRECHER_WAHL = [
+        { wert: "geprueft",     text: "geprüft",        titel: "Sprecher in Plaud geprüft" },
+        { wert: "nicht_noetig", text: "nicht nötig",    titel: "Keine Sprechererkennung nötig" },
+        { wert: "teilweise",    text: "teilweise",      titel: "Nur teilweise zugeordnet" },
+        { wert: "offen",        text: "offen",          titel: "Noch nicht geprüft" }
+    ];
+
+    /* Der Vermerk sitzt bewusst in der Liste, nicht auf der Einzelseite:
+       Sven prüft die Sprecher in Plaud und will den Haken setzen, ohne den
+       Vorgang zu öffnen. Plaud selbst bietet dafür kein Feld. */
+    function sprecherSchalter(e) {
+        var box = node("div", "hg-sprecher" + (e.sprecher_status === "offen" ? " ist-offen" : ""));
+        SPRECHER_WAHL.forEach(function (w) {
+            var b = document.createElement("button");
+            b.type = "button";
+            b.className = "hg-sprecher-knopf" +
+                (e.sprecher_status === w.wert ? " ist-gewaehlt" : "");
+            b.title = w.titel;
+            b.dataset.id = e.id;
+            b.dataset.wert = w.wert;
+            b.appendChild(text(w.text));
+            box.appendChild(b);
+        });
+        return box;
+    }
+
+    function sprecherSetzen(knopf) {
+        var id = knopf.dataset.id;
+        var wert = knopf.dataset.wert;
+        var gruppe = knopf.parentNode;
+        gruppe.classList.add("ist-sendet");
+
+        fetch("/api/protocols/" + encodeURIComponent(id) + "/sprecher-status", {
+            method: "PATCH",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: wert })
+        })
+            .then(function (r) {
+                if (!r.ok) { throw new Error("HTTP " + r.status); }
+                return r.json();
+            })
+            .then(function () {
+                var knoepfe = gruppe.querySelectorAll(".hg-sprecher-knopf");
+                for (var i = 0; i < knoepfe.length; i++) {
+                    knoepfe[i].classList.toggle("ist-gewaehlt", knoepfe[i].dataset.wert === wert);
+                }
+                gruppe.classList.toggle("ist-offen", wert === "offen");
+            })
+            .catch(function (err) { fehler("Vermerk nicht gespeichert: " + err.message); })
+            .then(function () { gruppe.classList.remove("ist-sendet"); });
+    }
+
+    /* Der Eintrag ist ein <div> mit einem <a> darin, nicht umgekehrt: Der
+       Prüfvermerk braucht Schaltflächen, und die lösen in einem Link die
+       Navigation aus. Der Hauptteil bleibt ein echtes <a>, damit Mittelklick
+       und "in neuem Tab öffnen" weiter funktionieren. */
     function eintrag(e, zeigeAlter) {
+        var wrap = node("div", "hg-eintrag" + (zeigeAlter ? altersKlasse(e.alter_tage) : ""));
+
         var a = document.createElement("a");
-        a.className = "hg-eintrag" + (zeigeAlter ? altersKlasse(e.alter_tage) : "");
+        a.className = "hg-eintrag-link";
         // Der Hinweis sorgt dafuer, dass der Vorgang nach dem Absenden hierher
         // zurueckkehrt — beim Abarbeiten mehrerer Aufnahmen am Stueck ist die
         // Sackgasse danach sonst das groesste Aergernis.
@@ -73,7 +130,14 @@
             rechts.appendChild(text(e.alter_tage === 1 ? "Tag" : "Tage"));
             a.appendChild(rechts);
         }
-        return a;
+        wrap.appendChild(a);
+
+        // Der Vermerk nur dort, wo er etwas bewirkt: Ist das Transkript
+        // einmal gezogen, kommt jede Sprecherkorrektur zu spaet.
+        if (e.status === "pending_assignment") {
+            wrap.appendChild(sprecherSchalter(e));
+        }
+        return wrap;
     }
 
     function fertigEintrag(e) {
@@ -145,6 +209,10 @@
                 el("kpi-alt").textContent = k.aeltestes_tage;
                 el("kpis").hidden = false;
 
+                if (k.sprecher_offen !== undefined) {
+                    el("kpi-sprecher").textContent = k.sprecher_offen;
+                }
+
                 if (k.ohne_namen > 0) {
                     var h = el("hinweis-ohne-namen");
                     h.textContent = k.ohne_namen === 1
@@ -169,8 +237,15 @@
     }
 
     document.addEventListener("click", function (ev) {
-        var tab = ev.target.closest ? ev.target.closest(".hg-tab") : null;
-        if (tab && tab.dataset.ziel) { reiterWechsel(tab.dataset.ziel); }
+        if (!ev.target.closest) { return; }
+        var tab = ev.target.closest(".hg-tab");
+        if (tab && tab.dataset.ziel) { reiterWechsel(tab.dataset.ziel); return; }
+
+        var knopf = ev.target.closest(".hg-sprecher-knopf");
+        if (knopf) {
+            ev.preventDefault();
+            sprecherSetzen(knopf);
+        }
     });
 
     laden();

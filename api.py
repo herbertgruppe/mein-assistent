@@ -65,7 +65,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
 
-from database.protocols_db import ASSIGNMENT_STATUSES, ProtocolsDB
+from database.protocols_db import (
+    ASSIGNMENT_STATUSES,
+    SPRECHER_STATUS_TEXT,
+    ProtocolsDB,
+    ist_zeitstempel_titel,
+)
 
 load_dotenv()
 
@@ -4047,6 +4052,19 @@ def fetch_transcript(
         raise HTTPException(status_code=409, detail="Transkript ist leer.")
 
     _protocols_db.save_transcript(draft_id, text)
+
+    # Den Aufnahmenamen gleich mitnehmen: Plaud vergibt den sprechenden Titel
+    # erst spaeter, der Poller liest aber sofort. Ohne das traegt der Vorgang
+    # dauerhaft nur einen Zeitstempel und ist ohne Anhoeren nicht zuzuordnen.
+    plaud_name = (datei.get("name") or "").strip()
+    if (
+        plaud_name
+        and not ist_zeitstempel_titel(plaud_name)
+        and plaud_name != (protocol.get("recording_title") or "")
+    ):
+        _protocols_db.update_recording_title(draft_id, plaud_name)
+        logger.info("[plaud] Titel nachgezogen: %s", plaud_name[:60])
+
     logger.info(
         "[plaud] Transkript fuer %s geholt (%d Segmente, Quelle %s, %d Zeichen)",
         draft_id, len(segmente), quelle, len(text),
@@ -4057,6 +4075,101 @@ def fetch_transcript(
         "quelle": quelle,
         "segmente": len(segmente),
         "recording_title": datei.get("name") or protocol.get("recording_title"),
+    }
+
+
+class SprecherStatusRequest(BaseModel):
+    status: Literal["offen", "geprueft", "nicht_noetig", "teilweise"]
+
+
+@app.patch("/api/protocols/{draft_id}/sprecher-status")
+def set_sprecher_status(
+    draft_id: str,
+    req: SprecherStatusRequest,
+    _user: str = Depends(require_angemeldeter_nutzer),
+):
+    """
+    Hält fest, ob Sven die Sprecherzuordnung in Plaud geprüft hat.
+
+    Plaud bietet dafür kein Feld: Seine Third-Party-API kennt weder
+    Kategorien noch Tags noch Status (geprüft am 19.10.2026 — die Endpunkte
+    `/tags`, `/categories`, `/folders`, `/labels` antworten alle mit 404,
+    und in den Antwortobjekten taucht kein entsprechendes Feld auf).
+
+    Der Vermerk gehört ohnehin hierher, nicht dorthin: Er sagt etwas über
+    Svens Prüfung aus, nicht über die Aufnahme.
+    """
+    protocol = _protocols_db.get_by_id(draft_id)
+    if not protocol:
+        raise HTTPException(status_code=404, detail="Protokoll nicht gefunden")
+
+    _protocols_db.set_sprecher_status(draft_id, req.status)
+    logger.info(
+        "[protocols] Sprecher-Vermerk fuer %s: %s (durch %s)",
+        draft_id, req.status, _user,
+    )
+    return {
+        "draft_id": draft_id,
+        "sprecher_status": req.status,
+        "text": SPRECHER_STATUS_TEXT.get(req.status, req.status),
+    }
+
+
+@app.post("/api/protocols/refresh-titles")
+def refresh_recording_titles(
+    _key: str = Security(verify_api_key),
+):
+    """
+    Zieht Aufnahmenamen aus Plaud nach.
+
+    Plaud vergibt den sprechenden Titel erst einige Zeit nach der Aufnahme.
+    Wer zwischendurch liest — und der Poller liest sofort — sieht einen
+    blossen Zeitstempel. Solche Einträge sind ohne Anhören niemandem
+    zuzuordnen; am 19.10.2026 betraf das 14 von 74 Vorgängen, und bei sieben
+    von acht Stichproben hatte Plaud inzwischen einen brauchbaren Namen.
+
+    Läuft über alle Vorgänge mit Zeitstempel-Titel und ist gefahrlos
+    wiederholbar: Wo Plaud ebenfalls nur einen Zeitstempel führt, bleibt
+    alles, wie es ist.
+    """
+    kandidaten = _protocols_db.list_mit_zeitstempel_titel()
+    aktualisiert: List[Dict[str, str]] = []
+    unveraendert = 0
+    fehler: List[Dict[str, Any]] = []
+
+    for protocol in kandidaten:
+        try:
+            datei = _plaud_datei_holen(protocol["recording_id"])
+        except HTTPException as exc:
+            fehler.append({
+                "id": protocol["id"],
+                "titel": protocol.get("recording_title"),
+                "status": exc.status_code,
+                "detail": exc.detail,
+            })
+            continue
+
+        name = (datei.get("name") or "").strip()
+        if not name or ist_zeitstempel_titel(name):
+            unveraendert += 1
+            continue
+
+        _protocols_db.update_recording_title(protocol["id"], name)
+        aktualisiert.append({
+            "id": protocol["id"],
+            "alt": protocol.get("recording_title") or "",
+            "neu": name,
+        })
+
+    logger.info(
+        "[plaud] Titel nachgezogen: %d von %d aktualisiert, %d ohne Namen in Plaud, %d Fehler",
+        len(aktualisiert), len(kandidaten), unveraendert, len(fehler),
+    )
+    return {
+        "geprueft": len(kandidaten),
+        "aktualisiert": aktualisiert,
+        "in_plaud_ohne_namen": unveraendert,
+        "fehler": fehler,
     }
 
 
@@ -4230,14 +4343,14 @@ def _uebersicht_eintrag(protocol: Dict[str, Any]) -> Dict[str, Any]:
         or protocol.get("meeting_name")
         or "ohne Titel"
     )
-    # Plaud vergibt haeufig nur einen Zeitstempel als Namen ("10-19 09:30").
-    # Solche Eintraege sind ohne Anhoeren nicht zuzuordnen — das muss man
-    # sehen, sonst sucht man den Inhalt im Titel.
-    ohne_namen = bool(re.match(r"^\d{2}-\d{2}[\s:]", str(titel)))
+    # Plaud vergibt haeufig nur einen Zeitstempel als Namen. Solche Eintraege
+    # sind ohne Anhoeren nicht zuzuordnen — das muss man sehen, sonst sucht
+    # man den Inhalt im Titel.
+    sprecher = protocol.get("sprecher_status") or "offen"
     return {
         "id": protocol["id"],
         "titel": titel,
-        "ohne_namen": ohne_namen,
+        "ohne_namen": ist_zeitstempel_titel(titel),
         "termin": protocol.get("meeting_name") or "",
         "datum": (protocol.get("meeting_datetime") or "")[:10],
         "dauer": protocol.get("recording_duration") or "",
@@ -4245,6 +4358,9 @@ def _uebersicht_eintrag(protocol: Dict[str, Any]) -> Dict[str, Any]:
         "alter_tage": _alter_in_tagen(protocol.get("created_at")),
         "erinnerungen": int(protocol.get("reminder_count") or 0),
         "hat_transkript": bool(protocol.get("transcript")),
+        "sprecher_status": sprecher,
+        "sprecher_text": SPRECHER_STATUS_TEXT.get(sprecher, sprecher),
+        "sprecher_geprueft_am": protocol.get("sprecher_geprueft_am"),
         "link": f"/review/{protocol['reviewer_token']}",
         "abgelaufen": _protocols_db.is_expired(protocol),
     }
@@ -4282,8 +4398,10 @@ def protocols_overview(_user: str = Depends(require_angemeldeter_nutzer)):
             "im_review": len(review),
             "aeltestes_tage": max(alter) if alter else 0,
             "ohne_namen": sum(
-                1 for p in offen
-                if re.match(r"^\d{2}-\d{2}[\s:]", str(p.get("recording_title") or ""))
+                1 for p in offen if ist_zeitstempel_titel(p.get("recording_title"))
+            ),
+            "sprecher_offen": sum(
+                1 for p in offen if (p.get("sprecher_status") or "offen") == "offen"
             ),
         },
     }
