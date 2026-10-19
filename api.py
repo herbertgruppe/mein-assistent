@@ -177,6 +177,36 @@ def get_authenticated_user(
     raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+def require_angemeldeter_nutzer(
+    request: Request,
+    x_authentik_username: Optional[str] = Header(None),
+    x_forwarded_email: Optional[str] = Header(None),
+    api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> str:
+    """
+    Wie get_authenticated_user, aber **ohne** den Reviewer-Token.
+
+    Ein reviewer_token weist seinen Inhaber für genau einen Vorgang aus — er
+    steht in jedem Review-Link, der verschickt wird. Für vorgangsbezogene
+    Endpunkte ist das richtig. Eine Liste über *alle* Vorgänge darf er nicht
+    öffnen: sonst gibt ein einzelner weitergegebener Link die Titel sämtlicher
+    Besprechungen preis.
+
+    Für solche Gesamtsichten gilt deshalb: angemeldete Person (Authentik über
+    vertrauenswürdigen Proxy) oder Maschine mit API-Key.
+    """
+    client_ip = request.client.host if request.client else ""
+    from_trusted_proxy = client_ip in _TRUSTED_PROXIES
+
+    if from_trusted_proxy and x_authentik_username:
+        return x_authentik_username
+    if from_trusted_proxy and x_forwarded_email:
+        return x_forwarded_email
+    if api_key and _API_SECRET_KEY and hmac.compare_digest(api_key, _API_SECRET_KEY):
+        return "api-client"
+    raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 # ---------------------------------------------------------------------------
 # Telegram-Bridge (HBE-402, HBE-1421)
 # ---------------------------------------------------------------------------
@@ -4098,7 +4128,7 @@ def _uebersicht_eintrag(protocol: Dict[str, Any]) -> Dict[str, Any]:
 
 # WICHTIG: /overview muss VOR /{draft_id} stehen (Routing-Reihenfolge)
 @app.get("/api/protocols/overview")
-def protocols_overview(_user: str = Depends(get_authenticated_user)):
+def protocols_overview(_user: str = Depends(require_angemeldeter_nutzer)):
     """
     Alles, was im Protokoll-Workflow offen ist — in einer Antwort.
 
