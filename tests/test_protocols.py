@@ -1338,6 +1338,32 @@ class TestUebersichtsSeite:
         resp = api_env["client"].get("/api/protocols/overview")
         assert resp.status_code in (401, 403)
 
+    def test_reviewer_token_oeffnet_die_uebersicht_nicht(self, api_env):
+        """
+        Ein reviewer_token weist seinen Inhaber fuer genau einen Vorgang aus
+        und steht in jedem verschickten Review-Link. Oeffnete er die
+        Gesamtsicht, gaebe ein einzelner weitergegebener Link die Titel
+        saemtlicher Besprechungen preis.
+
+        Genau das war beim ersten Entwurf der Fall: get_authenticated_user
+        akzeptiert ?token= — richtig fuer vorgangsbezogene Endpunkte, falsch
+        fuer eine Liste ueber alles. Auf dem Server liess sich damit die
+        komplette Uebersicht abrufen.
+        """
+        created = _create_assignment(api_env)
+        token = _token_of(api_env, created["draft_id"])
+        resp = api_env["client"].get(f"/api/protocols/overview?token={token}")
+        assert resp.status_code in (401, 403), (
+            "Ein Reviewer-Link darf die Gesamtuebersicht nicht oeffnen"
+        )
+
+    def test_einzelner_vorgang_bleibt_per_token_erreichbar(self, api_env):
+        """Die Verschaerfung darf den Review-Weg nicht mit kaputtmachen."""
+        created = _create_assignment(api_env)
+        token = _token_of(api_env, created["draft_id"])
+        resp = api_env["client"].get(f"/review/{token}")
+        assert resp.status_code == 200
+
     def test_uebersicht_listet_offene_zuordnungen(self, api_env):
         _create_assignment(api_env)
         resp = api_env["client"].get("/api/protocols/overview", headers=KEY_HEADER)
