@@ -525,10 +525,10 @@ def _trigger_assignment_reminders() -> None:
     """
     Stoesst das Nachfassen fuer offene Zuordnungen an.
 
-    Die Faelligkeitspruefung steckt in der API (Schwelle plus Zeitpunkt der
-    letzten Erinnerung), deshalb ist der Aufruf in jedem Zyklus unschaedlich —
+    Die Faelligkeitspruefung steckt in der API (Werktag, Uhrzeit, heute noch
+    nicht verschickt), deshalb ist der Aufruf in jedem Zyklus unschaedlich —
     er ist fast immer ein No-Op. Fehler bleiben folgenlos: eine verpasste
-    Erinnerung wird beim naechsten Zyklus nachgeholt.
+    Meldung wird beim naechsten Zyklus nachgeholt.
     """
     if not MA_API_KEY:
         return
@@ -540,10 +540,10 @@ def _trigger_assignment_reminders() -> None:
         )
         if resp.status_code == 200:
             data = resp.json()
-            if data.get("reminded"):
+            if data.get("gesendet"):
                 logger.info(
-                    "Erinnerungen an offene Zuordnungen verschickt: %d",
-                    len(data["reminded"]),
+                    "Tagesuebersicht ueber %s zugestellt: %d offen, %d im Review",
+                    data.get("weg", "?"), data.get("offen", 0), data.get("review", 0),
                 )
         else:
             logger.warning(

@@ -58,6 +58,12 @@ jobs:
       - name: Run Lena-Mail tests (Auto-Archiv-Kategorie, Forward-Entwuerfe)
         run: python -m pytest tests/test_lena_mail_*.py -v
 
+      # Tagesuebersicht statt 99 Einzelerinnerungen. Besonders die Werktags-
+      # und Einmal-pro-Tag-Logik: faellt sie aus, merkt man es erst, wenn der
+      # Kanal wieder zugespammt ist.
+      - name: Run Protokoll-Uebersicht tests
+        run: python -m pytest tests/test_protokoll_uebersicht.py -v
+
       # Die gesamte Protokoll-Strecke — DB-Layer, Review-Editor, Zuordnungs-Stufe
       # — lief hier nie mit, obwohl sie seit Monaten im Repo liegt. Grund war ein
       # einzelner dauerhaft roter Test: er schickte den Authentik-Header ueber den

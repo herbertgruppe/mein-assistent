@@ -312,6 +312,27 @@ _MARA_AGENT_ID = os.getenv(
 # Freitag nicht schon am Samstag mahnen soll.
 ASSIGNMENT_REMINDER_HOURS = float(os.getenv("ASSIGNMENT_REMINDER_HOURS", "72"))
 
+# Tagesuebersicht statt Einzelerinnerungen. Vorher ging je offener Aufnahme
+# eine eigene Nachricht raus — bei 21 offenen Zuordnungen summierte sich das
+# auf 99 Meldungen, womit der Kanal unbrauchbar und die Erinnerung wirkungslos
+# wurde. Jetzt eine Meldung je Werktag.
+DIGEST_HOUR = int(os.getenv("PROTOKOLL_DIGEST_HOUR", "7"))
+DIGEST_WEEKDAYS_ONLY = os.getenv(
+    "PROTOKOLL_DIGEST_WEEKDAYS_ONLY", "true"
+).strip().lower() in ("1", "true", "yes")
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    DIGEST_TZ = _ZoneInfo(os.getenv("PROTOKOLL_DIGEST_TZ", "Europe/Berlin"))
+except Exception:  # pragma: no cover — ohne tzdata faellt alles auf UTC zurueck
+    DIGEST_TZ = timezone.utc
+
+# Zustellung der Tagesuebersicht in Maras Chat-Thread. Der Publikationsweg
+# verlangt einen User-gebundenen Board-Key; der Service-Agent-Token reicht
+# dafuer nicht ("A board user is required").
+_PC_BOARD_KEY = os.getenv("PAPERCLIP_BOARD_API_KEY", "").strip()
+_MARA_CHAT_ENDPOINT = os.getenv("PAPERCLIP_MARA_CHAT_ENDPOINT_ID", "").strip()
+_MARA_CHAT_CONVERSATION = os.getenv("PAPERCLIP_MARA_CONVERSATION_ID", "").strip()
+
 # ---------------------------------------------------------------------------
 # Backward-compat module-level globals (derived from registry; used by speaker
 # endpoints and tests that patch these names directly).
@@ -3618,69 +3639,179 @@ def attach_protocol_markdown(
     }
 
 
+def _alter_in_tagen(zeitstempel: Optional[str]) -> Optional[int]:
+    """Tage seit einem ISO-Zeitstempel, oder None wenn er unbrauchbar ist."""
+    if not zeitstempel:
+        return None
+    try:
+        ts = datetime.fromisoformat(zeitstempel)
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return max(0, int((datetime.now(timezone.utc) - ts).total_seconds() // 86400))
+
+
+def _digest_faellig(jetzt: datetime, letzte_erinnerung: Optional[str]) -> Tuple[bool, str]:
+    """
+    Entscheidet, ob die Tagesübersicht jetzt rausgeht.
+
+    Drei Bedingungen, alle bewusst stumpf: Werktag, nicht vor der
+    eingestellten Stunde, heute noch nicht verschickt. Der Poller ruft den
+    Endpunkt alle zehn Minuten auf — die Entscheidung muss hier fallen,
+    nicht im Zeitplan des Aufrufers.
+    """
+    if DIGEST_WEEKDAYS_ONLY and jetzt.weekday() >= 5:
+        return False, "Wochenende"
+    if jetzt.hour < DIGEST_HOUR:
+        return False, f"vor {DIGEST_HOUR} Uhr"
+    if letzte_erinnerung:
+        try:
+            letzte = datetime.fromisoformat(letzte_erinnerung)
+            if letzte.tzinfo is None:
+                letzte = letzte.replace(tzinfo=timezone.utc)
+            if letzte.astimezone(DIGEST_TZ).date() >= jetzt.date():
+                return False, "heute bereits verschickt"
+        except (TypeError, ValueError):
+            pass
+    return True, "faellig"
+
+
+def _digest_text(offen: List[Dict[str, Any]], review: List[Dict[str, Any]]) -> str:
+    """
+    Baut die Tagesübersicht.
+
+    Bewusst ohne Sprachmodell: Das sind abgezählte Vorgänge aus der
+    Datenbank. Ein Modell dazwischen kostet einen Lauf je Meldung und kann
+    sich bei Zahlen irren — beides will man hier nicht.
+    """
+    zeilen: List[str] = []
+    if offen:
+        alter = [_alter_in_tagen(p.get("created_at")) or 0 for p in offen]
+        aeltestes = max(alter) if alter else 0
+        kopf = (
+            f"📋 {len(offen)} Aufnahme wartet auf Zuordnung"
+            if len(offen) == 1
+            else f"📋 {len(offen)} Aufnahmen warten auf Zuordnung"
+        )
+        if aeltestes:
+            kopf += f", die aelteste seit {aeltestes} Tagen"
+        zeilen.append(kopf)
+        # Nur die drei aeltesten namentlich — eine vollstaendige Liste von 21
+        # Eintraegen liest niemand, dafuer gibt es die Uebersichtsseite.
+        nach_alter = sorted(offen, key=lambda p: p.get("created_at") or "")
+        for p in nach_alter[:3]:
+            titel = p.get("recording_title") or p.get("meeting_name") or "ohne Titel"
+            tage = _alter_in_tagen(p.get("created_at"))
+            zeilen.append(f"   • {titel}" + (f" ({tage} Tage)" if tage else ""))
+        if len(offen) > 3:
+            zeilen.append(f"   … und {len(offen) - 3} weitere")
+
+    if review:
+        zeilen.append("")
+        zeilen.append(
+            "📝 1 Protokollentwurf wartet auf Freigabe"
+            if len(review) == 1
+            else f"📝 {len(review)} Protokollentwuerfe warten auf Freigabe"
+        )
+
+    zeilen.append("")
+    zeilen.append(f"Alles auf einen Blick: {_PUBLIC_BASE_URL}/protokolle")
+    if offen:
+        zeilen.append("")
+        zeilen.append("Vor dem Zuordnen die Sprecher in Plaud pruefen — danach laesst sich das nicht mehr korrigieren.")
+    return "\n".join(zeilen)
+
+
+def _an_mara_zustellen(text: str, idempotency_key: str) -> Tuple[bool, str]:
+    """
+    Stellt eine Meldung in Maras Chat-Thread zu.
+
+    Erster Weg ist Paperclips Publikations-Endpunkt: die Meldung erscheint im
+    laufenden Gespräch, Svens Antwort darauf erreicht Mara mitsamt Verlauf.
+    Das kostet keinen Agenten-Lauf — der Text steht ja schon fest.
+
+    Scheitert das, geht die Meldung direkt über Maras Bot raus. Eine Störung
+    in Paperclip darf nicht dazu führen, dass Sven gar nichts erfährt.
+    """
+    if _PC_API_URL and _PC_BOARD_KEY and _MARA_CHAT_ENDPOINT and _MARA_CHAT_CONVERSATION:
+        try:
+            resp = _http.post(
+                f"{_PC_API_URL}/api/chat-endpoints/{_MARA_CHAT_ENDPOINT}"
+                f"/conversations/{_MARA_CHAT_CONVERSATION}/publications",
+                json={"body": text, "idempotencyKey": idempotency_key},
+                headers={"Authorization": f"Bearer {_PC_BOARD_KEY}"},
+                timeout=30,
+            )
+            if resp.ok:
+                return True, "paperclip"
+            logger.warning(
+                "[protocols] Publikation an Mara fehlgeschlagen: %s %s",
+                resp.status_code, resp.text[:200],
+            )
+        except Exception as exc:
+            logger.warning("[protocols] Publikation an Mara fehlgeschlagen: %s", exc)
+
+    if _TG_MARA_BOT_TOKEN and _TG_ADMIN_CHAT_ID:
+        if _tg_mara_send_message(_TG_ADMIN_CHAT_ID, text):
+            return True, "telegram_mara"
+    if _TG_BOT_TOKEN and _TG_ADMIN_CHAT_ID:
+        if _tg_send_message(_TG_ADMIN_CHAT_ID, text):
+            return True, "telegram_lena"
+    return False, "kein_weg"
+
+
 @app.post("/api/protocols/assignment-reminders", status_code=200)
 def send_assignment_reminders(
-    older_than_hours: Optional[float] = None,
+    force: bool = False,
     _key: str = Security(verify_api_key),
 ):
     """
-    Erinnert an Aufnahmen, die auf Svens Zuordnung warten.
+    Schickt einmal am Werktag eine Übersicht dessen, was auf Sven wartet.
 
-    Ohne Nachfassen versandet die Zuordnungs-Stufe: eine Aufnahme, die
-    liegenbleibt, wird nie zum Protokoll — und niemand merkt es, weil die
-    ursprüngliche Meldung längst im Telegram-Verlauf nach oben gerutscht ist.
+    Vorher ging je offener Aufnahme eine eigene Nachricht raus. Bei 21
+    offenen Zuordnungen waren das 99 Einzelmeldungen — der Kanal wurde
+    dadurch unbenutzbar und die Meldungen damit wirkungslos. Jetzt eine
+    Meldung je Tag, mit den drei ältesten namentlich und einem Link auf die
+    Übersichtsseite.
 
-    Der Rhythmus ergibt sich aus reminder_sent_at: erinnert wird, wenn die
-    letzte Meldung (ersatzweise die Anlage) länger als die Schwelle zurück
-    liegt. Der Endpoint ist dadurch idempotent und kann beliebig oft
-    aufgerufen werden — der Poller tut das alle zehn Minuten.
+    Der Endpunkt bleibt idempotent: Der Poller ruft ihn alle zehn Minuten
+    auf, gesendet wird nur, wenn Werktag ist, die eingestellte Stunde
+    erreicht ist und heute noch nichts rausging. `force=true` übergeht das
+    für Tests.
     """
-    hours = older_than_hours if older_than_hours is not None else ASSIGNMENT_REMINDER_HOURS
-    due = _protocols_db.list_pending_assignments(older_than_hours=hours)
-    if not due:
-        return {"checked": 0, "reminded": []}
+    offen = _protocols_db.list_pending_assignments()
+    review = _protocols_db.list_awaiting_review()
+    if not offen and not review:
+        return {"gesendet": False, "grund": "nichts offen", "offen": 0, "review": 0}
 
-    if not _TG_BOT_TOKEN or not _TG_ADMIN_CHAT_ID:
-        logger.warning(
-            "[protocols] %d Zuordnungen ueberfaellig, aber Telegram nicht konfiguriert",
-            len(due),
-        )
-        raise HTTPException(status_code=503, detail="Telegram nicht konfiguriert.")
+    jetzt = datetime.now(DIGEST_TZ)
+    if not force:
+        faellig, grund = _digest_faellig(jetzt, _protocols_db.last_reminder_timestamp())
+        if not faellig:
+            return {"gesendet": False, "grund": grund, "offen": len(offen), "review": len(review)}
 
-    reminded: List[str] = []
-    for protocol in due:
-        title = protocol.get("recording_title") or protocol.get("meeting_name") or "Aufnahme"
-        try:
-            created = datetime.fromisoformat(protocol["created_at"])
-            if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
-            days = max(1, int((datetime.now(timezone.utc) - created).total_seconds() // 86400))
-            age = f"seit {days} Tag{'en' if days != 1 else ''}"
-        except (KeyError, TypeError, ValueError):
-            age = "seit laengerem"
+    text = _digest_text(offen, review)
+    schluessel = f"protokoll-digest-{jetzt.date().isoformat()}"
+    erfolg, weg = _an_mara_zustellen(text, schluessel)
 
-        nth = int(protocol.get("reminder_count") or 0) + 1
-        text = (
-            f"⏳ Aufnahme wartet {age} auf Zuordnung\n"
-            f"{title}\n\n"
-            f"Sprecher in Plaud pruefen, dann zuordnen:\n"
-            f"{_PUBLIC_BASE_URL}/review/{protocol['reviewer_token']}\n\n"
-            f"Ohne Zuordnung wird kein Protokoll erstellt."
-            + (f"\n\n({nth}. Erinnerung)" if nth > 1 else "")
-        )
-        if _tg_send_message(_TG_ADMIN_CHAT_ID, text):
-            _protocols_db.mark_reminder_sent(protocol["id"])
-            reminded.append(protocol["id"])
-        else:
-            # Ohne erfolgreichen Versand nicht markieren — sonst gilt die
-            # Erinnerung als zugestellt und der naechste Lauf ueberspringt sie.
-            logger.warning(
-                "[protocols] Erinnerung fuer %s konnte nicht gesendet werden",
-                protocol["id"],
-            )
+    if not erfolg:
+        logger.warning("[protocols] Tagesuebersicht konnte nicht zugestellt werden")
+        raise HTTPException(status_code=503, detail="Kein Zustellweg verfuegbar.")
 
-    logger.info("[protocols] %d von %d Erinnerungen versendet", len(reminded), len(due))
-    return {"checked": len(due), "reminded": reminded}
+    # Erst nach erfolgreicher Zustellung markieren — sonst gilt der Tag als
+    # erledigt, obwohl Sven nichts bekommen hat.
+    for protocol in offen:
+        _protocols_db.mark_reminder_sent(protocol["id"])
+
+    logger.info(
+        "[protocols] Tagesuebersicht ueber %s zugestellt (%d offen, %d im Review)",
+        weg, len(offen), len(review),
+    )
+    return {
+        "gesendet": True, "weg": weg,
+        "offen": len(offen), "review": len(review),
+    }
 
 
 def _plaud_id_kandidaten(recording_id: str) -> List[str]:
@@ -3938,6 +4069,72 @@ def save_protocol_transcript(
     }
 
 
+def _uebersicht_eintrag(protocol: Dict[str, Any]) -> Dict[str, Any]:
+    """Ein Protokoll auf das reduziert, was die Übersicht zeigt."""
+    titel = (
+        protocol.get("recording_title")
+        or protocol.get("meeting_name")
+        or "ohne Titel"
+    )
+    # Plaud vergibt haeufig nur einen Zeitstempel als Namen ("10-19 09:30").
+    # Solche Eintraege sind ohne Anhoeren nicht zuzuordnen — das muss man
+    # sehen, sonst sucht man den Inhalt im Titel.
+    ohne_namen = bool(re.match(r"^\d{2}-\d{2}[\s:]", str(titel)))
+    return {
+        "id": protocol["id"],
+        "titel": titel,
+        "ohne_namen": ohne_namen,
+        "termin": protocol.get("meeting_name") or "",
+        "datum": (protocol.get("meeting_datetime") or "")[:10],
+        "dauer": protocol.get("recording_duration") or "",
+        "status": protocol["status"],
+        "alter_tage": _alter_in_tagen(protocol.get("created_at")),
+        "erinnerungen": int(protocol.get("reminder_count") or 0),
+        "hat_transkript": bool(protocol.get("transcript")),
+        "link": f"/review/{protocol['reviewer_token']}",
+        "abgelaufen": _protocols_db.is_expired(protocol),
+    }
+
+
+# WICHTIG: /overview muss VOR /{draft_id} stehen (Routing-Reihenfolge)
+@app.get("/api/protocols/overview")
+def protocols_overview(_user: str = Depends(get_authenticated_user)):
+    """
+    Alles, was im Protokoll-Workflow offen ist — in einer Antwort.
+
+    Bis hierher gab es nur Einzel-Links per Telegram. Wer wissen wollte, was
+    insgesamt aussteht, musste die Nachrichten durchscrollen; bei 21 offenen
+    Zuordnungen und 99 verschickten Erinnerungen war das aussichtslos.
+    """
+    offen = _protocols_db.list_pending_assignments()
+    review = _protocols_db.list_awaiting_review()
+    fertig = _protocols_db.list_recently_finalized(limit=20)
+
+    alter = [_alter_in_tagen(p.get("created_at")) or 0 for p in offen]
+    return {
+        "zuordnung": [_uebersicht_eintrag(p) for p in offen],
+        "freigabe": [_uebersicht_eintrag(p) for p in review],
+        "fertig": [
+            {
+                "id": p["id"],
+                "titel": p.get("meeting_name") or p.get("recording_title") or "ohne Titel",
+                "datum": (p.get("meeting_datetime") or "")[:10],
+                "asana_url": p.get("asana_task_url") or "",
+            }
+            for p in fertig
+        ],
+        "kennzahlen": {
+            "offen": len(offen),
+            "im_review": len(review),
+            "aeltestes_tage": max(alter) if alter else 0,
+            "ohne_namen": sum(
+                1 for p in offen
+                if re.match(r"^\d{2}-\d{2}[\s:]", str(p.get("recording_title") or ""))
+            ),
+        },
+    }
+
+
 # WICHTIG: /finalized muss VOR /{draft_id} deklariert sein (Routing-Reihenfolge)
 @app.get("/api/protocols/finalized")
 def list_finalized_protocols(
@@ -4186,6 +4383,19 @@ def review_page(
             "recording_id": protocol.get("recording_id") or "",
         },
     )
+
+
+@app.get("/protokolle", response_class=HTMLResponse)
+def protocols_overview_page(request: Request):
+    """
+    Übersichtsseite über den gesamten Protokoll-Workflow.
+
+    Anders als /review/{token} hängt diese Seite an keinem einzelnen Vorgang
+    und kann deshalb nicht über einen Token abgesichert werden. Der Schutz
+    liegt bei nginx (Authentik); die Daten holt die Seite über
+    /api/protocols/overview, das `get_authenticated_user` verlangt.
+    """
+    return templates.TemplateResponse(request, "overview.html", {})
 
 
 @app.get("/review/{token}/success", response_class=HTMLResponse)

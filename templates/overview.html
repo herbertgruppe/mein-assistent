@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <title>Protokolle – Übersicht</title>
+    <link rel="stylesheet" href="/review-static/review.css">
+    <link rel="stylesheet" href="/review-static/overview.css">
+</head>
+<body>
+    <header class="hg-header">
+        <h1>Herbert Gruppe – Protokolle</h1>
+    </header>
+
+    <main class="hg-main">
+        <section class="hg-kpis" id="kpis" hidden>
+            <div class="hg-kpi">
+                <div class="hg-kpi-zahl" id="kpi-offen">–</div>
+                <div class="hg-kpi-text">warten auf Zuordnung</div>
+            </div>
+            <div class="hg-kpi">
+                <div class="hg-kpi-zahl" id="kpi-review">–</div>
+                <div class="hg-kpi-text">warten auf Freigabe</div>
+            </div>
+            <div class="hg-kpi">
+                <div class="hg-kpi-zahl" id="kpi-alt">–</div>
+                <div class="hg-kpi-text">Tage die älteste</div>
+            </div>
+        </section>
+
+        <div class="hg-banner hg-banner-warn" id="hinweis-ohne-namen" hidden></div>
+
+        <nav class="hg-tabs" role="tablist">
+            <button type="button" class="hg-tab is-aktiv" data-ziel="zuordnung" role="tab">
+                Zuordnen <span class="hg-tab-zahl" id="tab-zahl-zuordnung"></span>
+            </button>
+            <button type="button" class="hg-tab" data-ziel="freigabe" role="tab">
+                Freigeben <span class="hg-tab-zahl" id="tab-zahl-freigabe"></span>
+            </button>
+            <button type="button" class="hg-tab" data-ziel="fertig" role="tab">
+                Fertig
+            </button>
+        </nav>
+
+        <section class="hg-panel is-aktiv" id="panel-zuordnung" role="tabpanel">
+            <p class="hg-panel-hilfe">
+                Vor dem Zuordnen die <strong>Sprecher in Plaud prüfen</strong> —
+                danach zieht Mara das Transkript und die Zuordnung lässt sich
+                nicht mehr korrigieren.
+            </p>
+            <div id="liste-zuordnung" class="hg-liste">Wird geladen …</div>
+        </section>
+
+        <section class="hg-panel" id="panel-freigabe" role="tabpanel">
+            <p class="hg-panel-hilfe">
+                Entwürfe, die Mara fertiggestellt hat. Nach der Freigabe entstehen
+                PDF, Outlook-Anhang und die Asana-Aufgaben.
+            </p>
+            <div id="liste-freigabe" class="hg-liste">Wird geladen …</div>
+        </section>
+
+        <section class="hg-panel" id="panel-fertig" role="tabpanel">
+            <p class="hg-panel-hilfe">Die zuletzt fertiggestellten Protokolle.</p>
+            <div id="liste-fertig" class="hg-liste">Wird geladen …</div>
+        </section>
+
+        <div class="hg-fehler" id="fehler" hidden></div>
+    </main>
+
+    <script src="/review-static/overview.js"></script>
+</body>
+</html>

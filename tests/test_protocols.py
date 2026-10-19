@@ -1207,24 +1207,25 @@ class TestDiscardRecording:
 
 class TestAssignmentReminders:
     """
-    Nachfassen bei offenen Zuordnungen.
+    Die Tagesuebersicht ueber offene Zuordnungen.
 
-    Ohne das versandet die Stufe: eine liegengebliebene Aufnahme wird nie zum
-    Protokoll, und die urspruengliche Meldung rutscht im Telegram-Verlauf
-    nach oben.
+    Frueher ging je offener Aufnahme eine eigene Nachricht raus. Bei 21
+    offenen Zuordnungen hatte sich das auf 99 Erinnerungen summiert, eine
+    Aufnahme allein bekam neun — der Kanal wurde unbenutzbar und die
+    Erinnerung damit wirkungslos. Jetzt eine Meldung je Werktag.
     """
 
     @pytest.fixture
-    def tg(self, api_env, monkeypatch):
-        """Faengt Telegram-Nachrichten ab und meldet Erfolg."""
-        sent = []
-        monkeypatch.setattr(api_env["api"], "_TG_BOT_TOKEN", "tok")
-        monkeypatch.setattr(api_env["api"], "_TG_ADMIN_CHAT_ID", "chat-1")
-        monkeypatch.setattr(
-            api_env["api"], "_tg_send_message",
-            lambda chat, text, **kw: sent.append(text) or 4711,
-        )
-        return sent
+    def zugestellt(self, api_env, monkeypatch):
+        """Faengt die Zustellung ab und meldet Erfolg."""
+        meldungen = []
+
+        def fake(text, schluessel):
+            meldungen.append(text)
+            return True, "test"
+
+        monkeypatch.setattr(api_env["api"], "_an_mara_zustellen", fake)
+        return meldungen
 
     def _age(self, api_env, draft_id, hours):
         stamp = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
@@ -1234,60 +1235,50 @@ class TestAssignmentReminders:
             )
             conn.commit()
 
-    def test_fresh_assignment_is_not_nagged(self, api_env, tg):
-        _create_assignment(api_env)
+    def test_offene_zuordnung_wird_gemeldet(self, api_env, zugestellt):
+        created = _create_assignment(api_env)
+        self._age(api_env, created["draft_id"], 80)
+
         resp = api_env["client"].post(
-            "/api/protocols/assignment-reminders", headers=KEY_HEADER
+            "/api/protocols/assignment-reminders?force=true", headers=KEY_HEADER
         )
         assert resp.status_code == 200
-        assert resp.json()["reminded"] == []
-        assert tg == []
+        assert resp.json()["gesendet"] is True
+        assert len(zugestellt) == 1
+        assert "09-18 Abstimmung: TGA-Entwicklung" in zugestellt[0]
+        # Der Weg zur Uebersicht ersetzt die Einzel-Links
+        assert "/protokolle" in zugestellt[0]
 
-    def test_overdue_assignment_is_reminded(self, api_env, tg):
+    def test_mehrere_aufnahmen_ergeben_eine_meldung(self, api_env, zugestellt):
+        """Der Kern der Aenderung."""
+        for i in range(5):
+            created = _create_assignment(api_env, recording_id="of_%032x" % i)
+            self._age(api_env, created["draft_id"], 80)
+
+        api_env["client"].post(
+            "/api/protocols/assignment-reminders?force=true", headers=KEY_HEADER
+        )
+        assert len(zugestellt) == 1
+        assert "5 Aufnahmen warten auf Zuordnung" in zugestellt[0]
+
+    def test_zweiter_lauf_am_selben_tag_schweigt(self, api_env, zugestellt):
+        """Der Poller ruft alle zehn Minuten auf."""
         created = _create_assignment(api_env)
         self._age(api_env, created["draft_id"], 80)
-
+        api_env["client"].post(
+            "/api/protocols/assignment-reminders?force=true", headers=KEY_HEADER
+        )
         resp = api_env["client"].post(
             "/api/protocols/assignment-reminders", headers=KEY_HEADER
         )
-        assert resp.status_code == 200
-        assert resp.json()["reminded"] == [created["draft_id"]]
-        assert len(tg) == 1
-        # Der Link ist der Zweck der Nachricht
-        assert "/review/" in tg[0]
-        assert "09-18 Abstimmung: TGA-Entwicklung" in tg[0]
+        assert resp.json()["gesendet"] is False
+        assert resp.json()["grund"] in ("heute bereits verschickt", "Wochenende",
+                                        "vor %d Uhr" % api_env["api"].DIGEST_HOUR)
+        assert len(zugestellt) == 1
 
-    def test_reminder_not_repeated_immediately(self, api_env, tg):
-        """Zweiter Lauf direkt danach darf nicht erneut melden."""
-        created = _create_assignment(api_env)
-        self._age(api_env, created["draft_id"], 80)
-        api_env["client"].post("/api/protocols/assignment-reminders", headers=KEY_HEADER)
-        resp = api_env["client"].post(
-            "/api/protocols/assignment-reminders", headers=KEY_HEADER
-        )
-        assert resp.json()["reminded"] == []
-        assert len(tg) == 1
-
-    def test_reminder_repeats_after_another_interval(self, api_env, tg):
-        created = _create_assignment(api_env)
-        self._age(api_env, created["draft_id"], 80)
-        api_env["client"].post("/api/protocols/assignment-reminders", headers=KEY_HEADER)
-
-        # Letzte Erinnerung kuenstlich altern lassen
-        stamp = (datetime.now(timezone.utc) - timedelta(hours=80)).isoformat()
-        with api_env["db"]._get_connection() as conn:
-            conn.execute(
-                "UPDATE protocols SET reminder_sent_at = ? WHERE id = ?",
-                (stamp, created["draft_id"]),
-            )
-            conn.commit()
-
-        api_env["client"].post("/api/protocols/assignment-reminders", headers=KEY_HEADER)
-        assert len(tg) == 2
-        assert "(2. Erinnerung)" in tg[1]
-
-    def test_assigned_protocol_is_not_reminded(self, api_env, tg, mara_issues):
-        """Nach der Freigabe gibt es nichts mehr zu erinnern."""
+    def test_freigegebene_aufnahme_zaehlt_nicht_mehr_als_offen(
+        self, api_env, zugestellt, mara_issues
+    ):
         created = _create_assignment(api_env)
         self._age(api_env, created["draft_id"], 80)
         token = _token_of(api_env, created["draft_id"])
@@ -1296,31 +1287,77 @@ class TestAssignmentReminders:
             json={"event_id": "ev", "create_asana_task": False},
         )
         resp = api_env["client"].post(
-            "/api/protocols/assignment-reminders", headers=KEY_HEADER
+            "/api/protocols/assignment-reminders?force=true", headers=KEY_HEADER
         )
-        assert resp.json()["reminded"] == []
-        assert tg == []
+        # Sie taucht jetzt unter "wartet auf Freigabe" auf, nicht mehr als Zuordnung
+        assert resp.json()["offen"] == 0
+        assert resp.json()["review"] == 1
 
-    def test_failed_send_is_not_marked_as_reminded(self, api_env, monkeypatch):
+    def test_ohne_zustellweg_wird_nicht_markiert(self, api_env, monkeypatch):
         """
-        Sonst gilt eine nie zugestellte Erinnerung als erledigt und der
-        naechste Lauf ueberspringt sie fuer weitere drei Tage.
+        Sonst gilt der Tag als erledigt, obwohl Sven nichts bekommen hat —
+        und die naechste Meldung kaeme erst am Folgetag.
         """
-        monkeypatch.setattr(api_env["api"], "_TG_BOT_TOKEN", "tok")
-        monkeypatch.setattr(api_env["api"], "_TG_ADMIN_CHAT_ID", "chat-1")
-        monkeypatch.setattr(api_env["api"], "_tg_send_message", lambda *a, **kw: None)
-
+        monkeypatch.setattr(
+            api_env["api"], "_an_mara_zustellen", lambda *a, **kw: (False, "kein_weg")
+        )
         created = _create_assignment(api_env)
         self._age(api_env, created["draft_id"], 80)
         resp = api_env["client"].post(
-            "/api/protocols/assignment-reminders", headers=KEY_HEADER
+            "/api/protocols/assignment-reminders?force=true", headers=KEY_HEADER
         )
-        assert resp.json()["reminded"] == []
+        assert resp.status_code == 503
         assert api_env["db"].get_by_id(created["draft_id"])["reminder_count"] == 0
+
+    def test_nichts_offen_meldet_nichts(self, api_env, zugestellt):
+        resp = api_env["client"].post(
+            "/api/protocols/assignment-reminders?force=true", headers=KEY_HEADER
+        )
+        assert resp.json()["gesendet"] is False
+        assert zugestellt == []
 
     def test_requires_api_key(self, api_env):
         resp = api_env["client"].post("/api/protocols/assignment-reminders")
         assert resp.status_code in (401, 403)
+
+
+class TestUebersichtsSeite:
+    """
+    Die Uebersicht ueber den ganzen Workflow.
+
+    Bis hierher gab es nur Einzel-Links per Telegram; wer wissen wollte, was
+    insgesamt aussteht, musste den Nachrichtenverlauf durchsuchen.
+    """
+
+    def test_seite_wird_ausgeliefert(self, api_env):
+        resp = api_env["client"].get("/protokolle")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+
+    def test_uebersicht_braucht_authentifizierung(self, api_env):
+        resp = api_env["client"].get("/api/protocols/overview")
+        assert resp.status_code in (401, 403)
+
+    def test_uebersicht_listet_offene_zuordnungen(self, api_env):
+        _create_assignment(api_env)
+        resp = api_env["client"].get("/api/protocols/overview", headers=KEY_HEADER)
+        assert resp.status_code == 200
+        d = resp.json()
+        assert d["kennzahlen"]["offen"] == 1
+        assert len(d["zuordnung"]) == 1
+        assert d["zuordnung"][0]["link"].startswith("/review/")
+
+    def test_uebersicht_trennt_zuordnung_und_freigabe(self, api_env, mara_issues):
+        offen = _create_assignment(api_env, recording_id="of_" + "a" * 32)
+        freigabe = _create_assignment(api_env, recording_id="of_" + "b" * 32)
+        token = _token_of(api_env, freigabe["draft_id"])
+        api_env["client"].post(
+            f"/api/protocols/{freigabe['draft_id']}/assign?token={token}",
+            json={"event_id": "ev", "create_asana_task": False},
+        )
+        d = api_env["client"].get("/api/protocols/overview", headers=KEY_HEADER).json()
+        assert [e["id"] for e in d["zuordnung"]] == [offen["draft_id"]]
+        assert [e["id"] for e in d["freigabe"]] == [freigabe["draft_id"]]
 
 
 class TestBoardVorschlag:
