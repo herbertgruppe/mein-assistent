@@ -70,6 +70,12 @@ jobs:
       - name: Run Rueckkehr-Tests
         run: python -m pytest tests/test_rueckkehr_uebersicht.py -v
 
+      # Maras Weg zum Transkript. Faellt er aus, blockiert sie Auftraege mit
+      # der Fehldiagnose "Token abgelaufen" — so geschehen bei 17 Auftraegen,
+      # waehrend der Token durchgehend gueltig war.
+      - name: Run Transkript-Endpunkt-Tests
+        run: python -m pytest tests/test_transkript_endpunkt.py -v
+
       # Die gesamte Protokoll-Strecke — DB-Layer, Review-Editor, Zuordnungs-Stufe
       # — lief hier nie mit, obwohl sie seit Monaten im Repo liegt. Grund war ein
       # einzelner dauerhaft roter Test: er schickte den Authentik-Header ueber den
