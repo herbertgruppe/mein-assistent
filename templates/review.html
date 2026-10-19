@@ -101,7 +101,12 @@
             token: {{ token | tojson }},
             meetingName: {{ meeting_name | tojson }},
             meetingDatetime: {{ meeting_datetime | tojson }},
-            createAsanaTask: {{ create_asana_task | tojson }}
+            createAsanaTask: {{ create_asana_task | tojson }},
+            // Aus der Zuordnungs-Stufe übernommen, damit dieselbe Wahl nicht
+            // zweimal getroffen werden muss.
+            eventId: {{ event_id | tojson }},
+            asanaBoardGid: {{ asana_board_gid | tojson }},
+            asanaSectionGid: {{ asana_section_gid | tojson }}
         };
     </script>
     <script src="https://cdn.jsdelivr.net/simplemde/latest/simplemde.min.js" integrity="sha384-83rBTICYr+FwAC+A5t0ZYsWjTcPXibCe/NBSFLAgMPkwHBvIi02EcE9OShMsGCi3" crossorigin="anonymous"></script>

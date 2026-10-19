@@ -82,6 +82,11 @@ jobs:
       - name: Run Sprecher-Vermerk-Tests
         run: python -m pytest tests/test_sprecher_vermerk.py -v
 
+      # Uebernahme der Zuordnung in den Editor und der Board-Vorschlag.
+      # Faellt das aus, trifft Sven jede Entscheidung zweimal.
+      - name: Run Zuordnungs-Uebernahme-Tests
+        run: python -m pytest tests/test_zuordnung_uebernahme.py -v
+
       # Die gesamte Protokoll-Strecke — DB-Layer, Review-Editor, Zuordnungs-Stufe
       # — lief hier nie mit, obwohl sie seit Monaten im Repo liegt. Grund war ein
       # einzelner dauerhaft roter Test: er schickte den Authentik-Header ueber den
