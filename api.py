@@ -4698,6 +4698,17 @@ LENA_ACTION_CATEGORIES = {
     "weiterleiten":   "Lena: Weiterleiten",
     "ablegen":        "Lena: Ablegen",
 }
+
+# Mails, die Lena ohne Rueckfrage ins Archiv verschiebt, bekommen eine eigene
+# Kategorie. Sven sieht sie im Posteingang nie — erst im Archiv ist erkennbar,
+# welche Post an ihm vorbeigegangen ist. Die Kategorie macht genau das sichtbar
+# und trennt sie von den Mails, die er selbst zum Ablegen markiert hat.
+LENA_AUTO_ARCHIVE_CATEGORY = "Lena: Automatisch abgelegt"
+
+# Rueckabbildung Kategorie -> Aktion. Die Auto-Archiv-Kategorie ist fachlich
+# ebenfalls ein "ablegen" — sie sagt nur zusaetzlich, dass niemand hingesehen hat.
+LENA_CATEGORY_TO_ACTION = {v: k for k, v in LENA_ACTION_CATEGORIES.items()}
+LENA_CATEGORY_TO_ACTION[LENA_AUTO_ARCHIVE_CATEGORY] = "ablegen"
 # Importance wird jetzt über das Outlook-Priorität-Feld (importance) gesetzt,
 # nicht mehr als Kategorie.
 LENA_IMPORTANCE_MAP = {
@@ -4720,6 +4731,7 @@ LENA_MASTER_CATEGORIES = [
     {"displayName": "Lena: Recherchieren", "color": "preset7"},   # Blue
     {"displayName": "Lena: Weiterleiten",  "color": "preset8"},   # Purple
     {"displayName": "Lena: Ablegen",       "color": "preset12"},  # Grey
+    {"displayName": LENA_AUTO_ARCHIVE_CATEGORY, "color": "preset10"},  # Dark Grey
 ]
 
 
@@ -5397,6 +5409,12 @@ def lena_mail_categorize(
     kept = [c for c in existing_cats if not (c.startswith("Lena: ") or c.startswith("Priorität: "))]
 
     action_cat = LENA_ACTION_CATEGORIES[req.action]
+    # Ein gedecktes "ablegen" verschiebt die Mail sofort — sie taucht im
+    # Posteingang nie auf. Damit im Archiv erkennbar bleibt, was ungesehen
+    # abgelegt wurde, traegt sie eine eigene Kategorie.
+    archiviert_still = req.action == "ablegen" and not req.skip_archive
+    if archiviert_still:
+        action_cat = LENA_AUTO_ARCHIVE_CATEGORY
     new_categories = kept + [action_cat]
 
     patch_resp = _rq.patch(
@@ -5440,6 +5458,19 @@ def lena_mail_categorize(
         except Exception as _exc:
             logger.warning("[categorize] action=ablegen: archive fehlgeschlagen: %s", _exc)
             moved_to_archive = False
+        # Die Mail liegt noch im Posteingang. "Automatisch abgelegt" waere dort
+        # eine Falschauskunft — zurueck auf die normale Ablegen-Kategorie.
+        if archiviert_still and not moved_to_archive:
+            new_categories = kept + [LENA_ACTION_CATEGORIES["ablegen"]]
+            try:
+                _rq.patch(
+                    f"https://graph.microsoft.com/v1.0/me/messages/{req.message_id}",
+                    headers=headers,
+                    json={"categories": new_categories},
+                    timeout=30,
+                )
+            except Exception as _exc:
+                logger.warning("[categorize] Ruecksetzen der Kategorie fehlgeschlagen: %s", _exc)
 
     return LenaCategorizeResponse(
         success=True,
@@ -5799,7 +5830,7 @@ def lena_mail_triage_summary(
         )
 
     # Map Outlook category display names → internal bucket keys
-    action_map = {v: k for k, v in LENA_ACTION_CATEGORIES.items()}
+    action_map = LENA_CATEGORY_TO_ACTION
 
     counts: dict = {
         "antworten": 0, "tun": 0, "warten": 0,
@@ -5881,7 +5912,7 @@ def lena_mail_categorized_overrides(
         raise HTTPException(status_code=503, detail="Outlook nicht authentifiziert.")
 
     headers = {"Authorization": f"Bearer {tool.access_token}"}
-    action_map = {v: k for k, v in LENA_ACTION_CATEGORIES.items()}
+    action_map = LENA_CATEGORY_TO_ACTION
 
     url = (
         "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages"
