@@ -98,6 +98,11 @@ jobs:
       - name: Run Neu-laden-Tests
         run: python -m pytest tests/test_neu_laden.py -v
 
+      # Die Uebersicht muss den Reiter behalten. Sonst landet man nach jeder
+      # Freigabe wieder bei "Zuordnen" — bei 41 Entwuerfen 41 Extraklicks.
+      - name: Run Reiter-Tests
+        run: python -m pytest tests/test_reiter_merken.py -v
+
       # Die gesamte Protokoll-Strecke — DB-Layer, Review-Editor, Zuordnungs-Stufe
       # — lief hier nie mit, obwohl sie seit Monaten im Repo liegt. Grund war ein
       # einzelner dauerhaft roter Test: er schickte den Authentik-Header ueber den

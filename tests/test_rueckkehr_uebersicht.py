@@ -65,9 +65,15 @@ def test_zuordnung_nutzt_den_rueckweg_bei_freigabe_und_verwerfen():
 
 
 def test_zuordnung_bietet_auch_ohne_hinweis_einen_weg():
-    """Wer den Link aus einer Nachricht oeffnet, soll nicht stranden."""
+    """
+    Wer den Link aus einer Nachricht oeffnet, soll nicht stranden.
+
+    Das Ziel steht seit dem Reiter-Merken in einer Variablen: '/protokolle'
+    plus optionalem Reiter-Hash.
+    """
     js = _lies(STATIC / "review_assign.js")
-    assert 'href="/protokolle"' in js
+    assert "var ziel = '/protokolle'" in js
+    assert "'<a href=\"' + ziel + '\">" in js
 
 
 # ── Der Review-Editor ebenso ────────────────────────────────────────────────
