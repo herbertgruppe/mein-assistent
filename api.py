@@ -4173,6 +4173,49 @@ def refresh_recording_titles(
     }
 
 
+_WORT_TRENNER = re.compile(r"[^a-z0-9äöüß]+")
+# Wörter, die in fast jedem Besprechungs- und Boardnamen stehen und deshalb
+# nichts unterscheiden. Ohne sie träfe "BL-Besprechung HRN" auf jedes Board
+# mit "Besprechung" im Namen.
+_FUELLWOERTER = {
+    "besprechung", "abstimmung", "meeting", "termin", "sitzung", "jour", "fixe",
+    "der", "die", "das", "und", "fuer", "für", "mit", "von", "im", "in", "am",
+    "gmbh", "herbert", "gruppe", "protokoll", "protokolle",
+}
+
+
+def _namensteile(text: str) -> set:
+    """
+    Bedeutungstragende Wörter eines Namens, kleingeschrieben.
+
+    Reine Zahlen fliegen raus: Plaud stellt jedem Titel das Datum voran
+    ("09-03 Standardisierungszirkel"), und diese Ziffern würden den
+    Vergleich sonst verwässern, ohne etwas zu bedeuten.
+    """
+    teile = _WORT_TRENNER.split((text or "").lower())
+    return {
+        t for t in teile
+        if len(t) >= 2 and t not in _FUELLWOERTER and not t.isdigit()
+    }
+
+
+def _namensaehnlichkeit(a: str, b: str) -> float:
+    """
+    Wie stark überschneiden sich zwei Namen?
+
+    Jaccard über die bedeutungstragenden Wörter. Bewusst einfach: Sven
+    benennt Besprechungen nach Möglichkeit wie das Board, es geht also um
+    echte Wortgleichheit, nicht um Tippfehlertoleranz.
+    """
+    links, rechts = _namensteile(a), _namensteile(b)
+    if not links or not rechts:
+        return 0.0
+    schnitt = links & rechts
+    if not schnitt:
+        return 0.0
+    return len(schnitt) / len(links | rechts)
+
+
 @app.get("/api/protocols/{draft_id}/board-suggestion")
 def suggest_asana_board(
     draft_id: str,
@@ -4180,30 +4223,76 @@ def suggest_asana_board(
     _user: str = Depends(get_authenticated_user),
 ):
     """
-    Schlägt Asana-Board und -Abschnitt aus der Historie vor.
+    Schlägt Asana-Board und -Abschnitt vor — aus der Historie, ersatzweise
+    über den Namen.
 
-    Serientermine wie „1:1 LK / SH" landen immer auf demselben Board.
-    Statt einer gepflegten Zuordnungstabelle wird geschaut, wohin dasselbe
-    Meeting zuletzt zugeordnet wurde — das lernt von selbst mit und geht
-    nicht veraltet, wenn sich Boards ändern.
+    **Erstens die Historie.** Serientermine wie „1:1 LK / SH" landen immer
+    auf demselben Board. Wohin dasselbe Meeting zuletzt zugeordnet wurde,
+    ist das stärkste Signal: Es ist eine bestätigte Entscheidung, keine
+    Vermutung. Eine gepflegte Zuordnungstabelle bräuchte dagegen Pflege und
+    veraltete still, wenn sich Boards ändern.
 
-    Bevorzugt werden abgeschlossene Protokolle: dort ist die Zuordnung
-    durch die Freigabe bestätigt.
+    **Zweitens der Name.** Sven benennt Besprechungen nach Möglichkeit wie
+    das zugehörige Board. Beim ersten Mal gibt es noch keine Historie — dann
+    hilft der Namensvergleich. Verglichen werden die bedeutungstragenden
+    Wörter; Füllwörter wie „Besprechung" oder „Abstimmung" stehen in fast
+    jedem Namen und würden sonst beliebige Treffer erzeugen.
     """
     protocol = _get_protocol_for_token(draft_id, token)
     treffer = _protocols_db.find_previous_board(
         protocol["meeting_name"], exclude_id=draft_id
     )
-    if not treffer:
+    if treffer:
+        return {
+            "gefunden": True,
+            "grund": "historie",
+            "asana_board_gid": treffer["asana_board_gid"],
+            "asana_section_gid": treffer["asana_section_gid"],
+            "quelle": {
+                "meeting_name": treffer["meeting_name"],
+                "meeting_datetime": treffer["meeting_datetime"],
+                "status": treffer["status"],
+            },
+        }
+
+    # Kein Vorgänger — über den Namen versuchen.
+    suchname = protocol.get("recording_title") or protocol.get("meeting_name") or ""
+    try:
+        agent = _get_asana_agent()
+        if not agent.is_connected():
+            return {"gefunden": False}
+        # Derselbe Cache wie /api/asana/boards — der Namensvergleich soll
+        # keine zusaetzliche Last bei Asana erzeugen.
+        boards = _asana_cached(
+            "boards",
+            lambda: [{"gid": p["gid"], "name": p["name"]} for p in agent.list_projects()],
+        )
+    except Exception as exc:
+        logger.warning("[asana] Boards fuer Namensvergleich nicht abrufbar: %s", exc)
         return {"gefunden": False}
+
+    bester = None
+    bester_wert = 0.0
+    for board in boards or []:
+        wert = max(
+            _namensaehnlichkeit(suchname, board.get("name", "")),
+            _namensaehnlichkeit(protocol.get("meeting_name") or "", board.get("name", "")),
+        )
+        if wert > bester_wert:
+            bester_wert, bester = wert, board
+
+    # Unter einem Drittel Überschneidung ist es Zufall, kein Vorschlag.
+    if not bester or bester_wert < 0.34:
+        return {"gefunden": False}
+
     return {
         "gefunden": True,
-        "asana_board_gid": treffer["asana_board_gid"],
-        "asana_section_gid": treffer["asana_section_gid"],
+        "grund": "name",
+        "asana_board_gid": bester.get("gid"),
+        "asana_section_gid": None,
         "quelle": {
-            "meeting_name": treffer["meeting_name"],
-            "meeting_datetime": treffer["meeting_datetime"],
-            "status": treffer["status"],
+            "board_name": bester.get("name"),
+            "uebereinstimmung": round(bester_wert, 2),
         },
     }
 
@@ -4653,6 +4742,13 @@ def review_page(
             "recording_title": protocol.get("recording_title") or "",
             "recording_duration": protocol.get("recording_duration") or "",
             "recording_id": protocol.get("recording_id") or "",
+            # Was in der Zuordnungs-Stufe schon gewählt wurde, gehört hier
+            # vorbelegt. Sonst steht Sven im Editor vor leeren Feldern und
+            # trifft dieselbe Entscheidung ein zweites Mal — bei 36 offenen
+            # Entwürfen 36 Mal.
+            "event_id": protocol.get("event_id") or "",
+            "asana_board_gid": protocol.get("asana_board_gid") or "",
+            "asana_section_gid": protocol.get("asana_section_gid") or "",
         },
     )
 

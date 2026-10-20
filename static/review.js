@@ -140,6 +140,19 @@
                     };
                 }), '– Termin wählen –');
 
+                // Was in der Zuordnungs-Stufe gewählt wurde, gilt. Es ist eine
+                // getroffene Entscheidung und darf nicht von einem Ratevorgang
+                // überschrieben werden.
+                if (ctx.eventId) {
+                    eventSelect.value = ctx.eventId;
+                    if (eventSelect.value === ctx.eventId) {
+                        updateApproveState();
+                        return;
+                    }
+                    // Termin steht nicht mehr in der Liste (verschoben oder
+                    // abgesagt) — dann unten weiterraten statt leer lassen.
+                }
+
                 // Vorauswahl: bester Titel-Match, sonst zeitlich nächster
                 var meetingTime = new Date(ctx.meetingDatetime).getTime();
                 var best = null;
@@ -176,6 +189,13 @@
                 fillSelect(boardSelect, boards.map(function (b) {
                     return { value: b.gid, label: b.name };
                 }), '– Board wählen –');
+                // Aus der Zuordnungs-Stufe übernehmen, samt Abschnitt.
+                if (ctx.asanaBoardGid) {
+                    boardSelect.value = ctx.asanaBoardGid;
+                    if (boardSelect.value === ctx.asanaBoardGid) {
+                        loadSections(ctx.asanaBoardGid);
+                    }
+                }
                 updateApproveState();
             })
             .catch(function (err) {
@@ -198,6 +218,15 @@
                     return { value: s.gid, label: s.name };
                 }), '– Abschnitt wählen –');
                 sectionSelect.disabled = false;
+
+                // Was in der Zuordnungs-Stufe gewählt wurde, gilt.
+                if (ctx.asanaSectionGid) {
+                    sectionSelect.value = ctx.asanaSectionGid;
+                    if (sectionSelect.value === ctx.asanaSectionGid) {
+                        updateApproveState();
+                        return;
+                    }
+                }
 
                 // Vorauswahl: Abschnitt "Protokolle" falls vorhanden
                 var proto = sections.find(function (s) {
