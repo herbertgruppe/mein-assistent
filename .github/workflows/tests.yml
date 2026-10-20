@@ -64,6 +64,12 @@ jobs:
       - name: Run Protokoll-Uebersicht tests
         run: python -m pytest tests/test_protokoll_uebersicht.py -v
 
+      # Kennzahlen der Uebersicht. Zusammengezaehlt sah unfertige Arbeit wie
+      # erledigte aus, und nachtraeglich angelegte Vorgaenge standen mit
+      # "0 Tage" neben einem Datum von vor Wochen.
+      - name: Run Kennzahlen-Tests
+        run: python -m pytest tests/test_uebersicht_kennzahlen.py -v
+
       # Rueckweg von einem Vorgang zur Liste. Faellt er weg, endet jede
       # Freigabe wieder in einer Sackgasse — bei 21 offenen Vorgaengen
       # 21 Mal derselbe Griff.
