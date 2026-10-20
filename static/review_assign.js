@@ -147,7 +147,7 @@
         var dateStr = (ctx.meetingDatetime || '').slice(0, 10);
         var url = '/api/calendar/events?date=' + encodeURIComponent(dateStr) +
             '&' + tokenParam;
-        fetch(url)
+        return fetch(url)
             .then(function (r) {
                 if (!r.ok) throw new Error('HTTP ' + r.status);
                 return r.json();
@@ -195,8 +195,12 @@
     // ------------------------------------------------------------------
     // Asana-Boards + Abschnitte
     // ------------------------------------------------------------------
-    function loadBoards() {
-        fetch('/api/asana/boards?' + tokenParam)
+    function loadBoards(frisch) {
+        // Die Board-Liste liegt 15 Minuten im Cache. Ein frisch in Asana
+        // angelegtes Board waere sonst so lange unsichtbar, und der einzige
+        // Ausweg war ein Neustart des Dienstes.
+        var gewaehlt = boardSelect.value;
+        return fetch('/api/asana/boards?' + tokenParam + (frisch ? '&refresh=true' : ''))
             .then(function (r) {
                 if (!r.ok) throw new Error('HTTP ' + r.status);
                 return r.json();
@@ -205,7 +209,12 @@
                 fillSelect(boardSelect, boards.map(function (b) {
                     return { value: b.gid, label: b.name };
                 }), '– Board wählen –');
-                wendeVorschlagAn();
+                if (frisch && gewaehlt) {
+                    // Eine getroffene Wahl darf das Neuladen nicht verwerfen.
+                    boardSelect.value = gewaehlt;
+                } else {
+                    wendeVorschlagAn();
+                }
                 updateAssignState();
             })
             .catch(function (err) {
@@ -214,11 +223,11 @@
             });
     }
 
-    function loadSections(boardGid, wunschSection) {
+    function loadSections(boardGid, wunschSection, frisch) {
         sectionSelect.disabled = true;
         fillSelect(sectionSelect, [], 'Lade Abschnitte …');
-        fetch('/api/asana/boards/' + encodeURIComponent(boardGid) +
-              '/sections?' + tokenParam)
+        return fetch('/api/asana/boards/' + encodeURIComponent(boardGid) +
+              '/sections?' + tokenParam + (frisch ? '&refresh=true' : ''))
             .then(function (r) {
                 if (!r.ok) throw new Error('HTTP ' + r.status);
                 return r.json();
@@ -426,6 +435,28 @@
             });
     }
 
+    /**
+     * Gemeinsames Verhalten der „neu laden"-Knöpfe: während des Ladens
+     * gesperrt und beschriftet, danach zurück. Ohne diese Rückmeldung
+     * klickt man zweimal, weil nichts zu passieren scheint.
+     */
+    function mitLadeanzeige(knopf, aufgabe) {
+        if (!knopf || knopf.disabled) { return; }
+        var text = knopf.textContent;
+        knopf.disabled = true;
+        knopf.textContent = 'lädt …';
+        var fertig = function () {
+            knopf.disabled = false;
+            knopf.textContent = text;
+        };
+        var ergebnis = aufgabe();
+        if (ergebnis && typeof ergebnis.then === 'function') {
+            ergebnis.then(fertig, fertig);
+        } else {
+            window.setTimeout(fertig, 600);
+        }
+    }
+
     // ------------------------------------------------------------------
     // Verdrahtung
     // ------------------------------------------------------------------
@@ -447,6 +478,29 @@
     assignBtn.addEventListener('click', assign);
     discardBtn.addEventListener('click', discard);
     speakerReload.addEventListener('click', ladeSprecher);
+
+    var eventReload = document.getElementById('event-reload');
+    var boardReload = document.getElementById('board-reload');
+    if (eventReload) {
+        eventReload.addEventListener('click', function () {
+            // Outlook wird nicht zwischengespeichert — ein erneuter Abruf
+            // genuegt, etwa nach einem nachtraeglich angelegten Termin.
+            mitLadeanzeige(eventReload, loadEvents);
+        });
+    }
+    if (boardReload) {
+        boardReload.addEventListener('click', function () {
+            mitLadeanzeige(boardReload, function () {
+                return loadBoards(true).then(function () {
+                    // Die Abschnitte des gewaehlten Boards ebenfalls frisch —
+                    // ein neues Board hat oft auch neue Abschnitte.
+                    if (boardSelect.value) {
+                        return loadSections(boardSelect.value, sectionSelect.value, true);
+                    }
+                });
+            });
+        });
+    }
 
     updateAsanaFieldState();
     loadEvents();

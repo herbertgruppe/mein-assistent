@@ -57,7 +57,11 @@
         <section class="hg-metadata">
             <h2>Zuordnung</h2>
             <div class="hg-field">
-                <label for="event-select">Outlook-Termin</label>
+                <label for="event-select">
+                    Outlook-Termin
+                    <button type="button" class="hg-btn-link hg-reload" id="event-reload"
+                            title="Termine erneut von Outlook holen">neu laden</button>
+                </label>
                 <select id="event-select">
                     <option value="">Lade Termine …</option>
                 </select>
@@ -70,7 +74,11 @@
                 </label>
             </div>
             <div class="hg-field" id="board-field">
-                <label for="board-select">Asana-Board *</label>
+                <label for="board-select">
+                    Asana-Board *
+                    <button type="button" class="hg-btn-link hg-reload" id="board-reload"
+                            title="Boards erneut von Asana holen — nötig bei einem frisch angelegten Board">neu laden</button>
+                </label>
                 <select id="board-select">
                     <option value="">Lade Boards …</option>
                 </select>
