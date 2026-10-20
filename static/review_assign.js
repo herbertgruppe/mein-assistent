@@ -270,7 +270,18 @@
         var ev = eventsById[eventSelect.value];
         var payload = {
             event_id: eventSelect.value || null,
-            eingeladene: (ev && ev.attendee_names) || [],
+            // Mit Antwortstatus, damit im Protokoll steht, wer zugesagt und
+            // wer abgesagt hat. Fehlen die Einzelangaben, bleibt es bei den
+            // blossen Namen.
+            eingeladene: (ev && ev.attendees && ev.attendees.length)
+                ? ev.attendees.map(function (a) {
+                    return {
+                        name: a.name || a.email || '',
+                        email: a.email || '',
+                        status: a.response || ''
+                    };
+                })
+                : ((ev && ev.attendee_names) || []),
             create_asana_task: asanaCheckbox.checked,
             asana_board_gid: asanaCheckbox.checked ? (boardSelect.value || null) : null,
             asana_section_gid: asanaCheckbox.checked ? (sectionSelect.value || null) : null,
