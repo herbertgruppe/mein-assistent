@@ -87,6 +87,12 @@ jobs:
       - name: Run Zuordnungs-Uebernahme-Tests
         run: python -m pytest tests/test_zuordnung_uebernahme.py -v
 
+      # Zeitzonen: Graph und Plaud liefern UTC ohne Kennzeichnung im
+      # Zeitstempel. Faellt die Umrechnung aus, stehen im Sommer alle Termine
+      # zwei Stunden zu frueh da — und nach der Umstellung eine.
+      - name: Run Zeitzonen-Tests
+        run: python -m pytest tests/test_zeitzone.py -v
+
       # Die gesamte Protokoll-Strecke — DB-Layer, Review-Editor, Zuordnungs-Stufe
       # — lief hier nie mit, obwohl sie seit Monaten im Repo liegt. Grund war ein
       # einzelner dauerhaft roter Test: er schickte den Authentik-Header ueber den

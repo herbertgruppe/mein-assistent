@@ -64,6 +64,26 @@
         }
     }
 
+    /**
+     * Zeit eines Outlook-Termins in Ortszeit.
+     *
+     * Microsoft Graph liefert UTC, kennzeichnet das aber nur im separaten
+     * Feld `timeZone` — der Zeitstempel selbst trägt keinen Offset
+     * ("2026-10-19T07:00:00.0000000"). JavaScript liest einen solchen Wert
+     * als Ortszeit und zeigt im Sommer zwei Stunden zu früh an.
+     *
+     * Die Sekundenbruchteile werden abgeschnitten: Sieben Nachkommastellen
+     * sind nicht ISO-8601, manche Browser lehnen den Wert ab.
+     */
+    function ortszeit(utcIso) {
+        var roh = utcIso || '';
+        var d = new Date(roh.slice(0, 19) + 'Z');
+        if (isNaN(d.getTime())) {
+            return roh.slice(11, 16);   // besser die Rohzeit als gar nichts
+        }
+        return d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+    }
+
     function fillSelect(select, items, placeholder) {
         select.innerHTML = '';
         var opt = document.createElement('option');
@@ -137,7 +157,7 @@
                 events.forEach(function (ev) { eventsById[ev.id] = ev; });
 
                 fillSelect(eventSelect, events.map(function (ev) {
-                    var time = (ev.start || '').slice(11, 16);
+                    var time = ortszeit(ev.start);
                     return {
                         value: ev.id,
                         label: (time ? time + ' Uhr – ' : '') + ev.title,

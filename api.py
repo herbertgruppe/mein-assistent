@@ -3674,6 +3674,32 @@ def attach_protocol_markdown(
     }
 
 
+def _als_ortszeit(zeitstempel: Optional[str]) -> str:
+    """
+    Formatiert einen UTC-Zeitstempel als deutsche Ortszeit.
+
+    Plaud und Microsoft Graph liefern beide UTC, kennzeichnen es im
+    Zeitstempel selbst aber nicht. Wer ihn unbesehen anzeigt, ist im Sommer
+    zwei Stunden zu früh — eine Aufnahme von 09:00 stand als 07:00 da.
+
+    Ohne Zeitzonendaten (minimale Container-Images bringen keine mit) bleibt
+    es bei UTC. Das ist falsch, aber gleichbleibend falsch und damit besser
+    als ein Absturz; die Abweichung fällt sofort auf.
+    """
+    roh = zeitstempel or ""
+    try:
+        ts = datetime.fromisoformat(roh.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return roh
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    try:
+        ts = ts.astimezone(DIGEST_TZ)
+    except Exception:  # pragma: no cover — ohne tzdata
+        pass
+    return ts.strftime("%d.%m.%Y %H:%M")
+
+
 def _alter_in_tagen(zeitstempel: Optional[str]) -> Optional[int]:
     """Tage seit einem ISO-Zeitstempel, oder None wenn er unbrauchbar ist."""
     if not zeitstempel:
@@ -4706,15 +4732,7 @@ def review_page(
 
     assignment_only = protocol["status"] in ASSIGNMENT_STATUSES
 
-    meeting_dt_fmt = protocol["meeting_datetime"]
-    try:
-        from datetime import datetime as _dt
-
-        meeting_dt_fmt = _dt.fromisoformat(
-            protocol["meeting_datetime"].replace("Z", "+00:00")
-        ).strftime("%d.%m.%Y %H:%M")
-    except (ValueError, AttributeError):
-        pass
+    meeting_dt_fmt = _als_ortszeit(protocol["meeting_datetime"])
 
     return templates.TemplateResponse(
         request,
