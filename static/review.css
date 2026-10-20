@@ -142,6 +142,20 @@ body {
     align-items: baseline;
     margin-bottom: 6px;
 }
+/* „neu laden" neben einer Feldbeschriftung: rechtsbündig, unaufdringlich.
+   Es ist eine Ausweichmöglichkeit, kein Arbeitsschritt. */
+.hg-reload {
+    float: right;
+    font-weight: 400;
+    font-size: 12px;
+}
+
+.hg-reload:disabled {
+    color: #8a97a5;
+    text-decoration: none;
+    cursor: default;
+}
+
 .hg-btn-link {
     background: none;
     border: none;

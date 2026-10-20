@@ -93,6 +93,11 @@ jobs:
       - name: Run Zeitzonen-Tests
         run: python -m pytest tests/test_zeitzone.py -v
 
+      # Die Neu-laden-Knoepfe. Faellt der refresh-Schalter weg, ist ein neu
+      # angelegtes Asana-Board bis zu 15 Minuten unsichtbar.
+      - name: Run Neu-laden-Tests
+        run: python -m pytest tests/test_neu_laden.py -v
+
       # Die gesamte Protokoll-Strecke — DB-Layer, Review-Editor, Zuordnungs-Stufe
       # — lief hier nie mit, obwohl sie seit Monaten im Repo liegt. Grund war ein
       # einzelner dauerhaft roter Test: er schickte den Authentik-Header ueber den

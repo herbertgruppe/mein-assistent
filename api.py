@@ -3107,14 +3107,22 @@ def _get_asana_agent():
     return _asana_agent
 
 
-def _asana_cached(cache_key: str, loader):
-    """15-Minuten-TTL-Cache für Asana-Dropdown-Daten (Rate-Limit schonen)."""
+def _asana_cached(cache_key: str, loader, refresh: bool = False):
+    """
+    15-Minuten-TTL-Cache für Asana-Dropdown-Daten (Rate-Limit schonen).
+
+    `refresh=True` umgeht den Cache und schreibt das Ergebnis neu. Nötig,
+    weil ein frisch in Asana angelegtes Board sonst bis zu eine Viertelstunde
+    unsichtbar bleibt — und der einzige Ausweg bisher ein Neustart des
+    Dienstes war.
+    """
     import time
 
     now = time.time()
-    hit = _asana_cache.get(cache_key)
-    if hit and now - hit[0] < _ASANA_CACHE_TTL_SECONDS:
-        return hit[1]
+    if not refresh:
+        hit = _asana_cache.get(cache_key)
+        if hit and now - hit[0] < _ASANA_CACHE_TTL_SECONDS:
+            return hit[1]
     value = loader()
     _asana_cache[cache_key] = (now, value)
     return value
@@ -4668,8 +4676,16 @@ def reject_protocol(
 # Endpoints — Asana-Dropdown-Daten (15 Minuten gecacht)
 # ---------------------------------------------------------------------------
 @app.get("/api/asana/boards")
-def get_asana_boards(_user: str = Depends(get_authenticated_user)):
-    """Alle Asana-Projekte des Workspace. Auth: Authentik/X-API-Key/Token."""
+def get_asana_boards(
+    refresh: bool = False,
+    _user: str = Depends(get_authenticated_user),
+):
+    """
+    Alle Asana-Projekte des Workspace. Auth: Authentik/X-API-Key/Token.
+
+    `refresh=true` umgeht den 15-Minuten-Cache. Ein frisch angelegtes Board
+    ist sonst bis zu eine Viertelstunde unsichtbar.
+    """
 
     def load():
         agent = _get_asana_agent()
@@ -4679,12 +4695,14 @@ def get_asana_boards(_user: str = Depends(get_authenticated_user)):
             {"gid": p["gid"], "name": p["name"]} for p in agent.list_projects()
         ]
 
-    return _asana_cached("boards", load)
+    return _asana_cached("boards", load, refresh=refresh)
 
 
 @app.get("/api/asana/boards/{board_gid}/sections")
 def get_asana_board_sections(
-    board_gid: str, _user: str = Depends(get_authenticated_user)
+    board_gid: str,
+    refresh: bool = False,
+    _user: str = Depends(get_authenticated_user),
 ):
     """Sections eines Asana-Boards. Auth: Authentik/X-API-Key/Token."""
 
@@ -4697,7 +4715,7 @@ def get_asana_board_sections(
             for s in agent.get_project_sections(board_gid)
         ]
 
-    return _asana_cached(f"sections:{board_gid}", load)
+    return _asana_cached(f"sections:{board_gid}", load, refresh=refresh)
 
 
 # ---------------------------------------------------------------------------
