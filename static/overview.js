@@ -86,7 +86,7 @@
        Prüfvermerk braucht Schaltflächen, und die lösen in einem Link die
        Navigation aus. Der Hauptteil bleibt ein echtes <a>, damit Mittelklick
        und "in neuem Tab öffnen" weiter funktionieren. */
-    function eintrag(e, zeigeAlter) {
+    function eintrag(e, zeigeAlter, reiter) {
         var wrap = node("div", "hg-eintrag" + (zeigeAlter ? altersKlasse(e.alter_tage) : ""));
 
         var a = document.createElement("a");
@@ -94,7 +94,11 @@
         // Der Hinweis sorgt dafuer, dass der Vorgang nach dem Absenden hierher
         // zurueckkehrt — beim Abarbeiten mehrerer Aufnahmen am Stueck ist die
         // Sackgasse danach sonst das groesste Aergernis.
-        a.href = e.link + (e.link.indexOf("?") === -1 ? "?" : "&") + "weiter=uebersicht";
+        //
+        // Der Reiter kommt mit, sonst landet man nach dem Freigeben wieder bei
+        // "Zuordnen" und braucht jedes Mal einen Klick zurueck.
+        a.href = e.link + (e.link.indexOf("?") === -1 ? "?" : "&") +
+            "weiter=uebersicht" + (reiter ? "&reiter=" + reiter : "");
 
         var haupt = node("div", "hg-eintrag-haupt");
         var titel = node("div", "hg-eintrag-titel");
@@ -175,7 +179,10 @@
         n.hidden = wert === 0;
     }
 
-    function reiterWechsel(ziel) {
+    var REITER = ["zuordnung", "freigabe", "fertig"];
+
+    function reiterWechsel(ziel, merken) {
+        if (REITER.indexOf(ziel) === -1) { return; }
         var tabs = document.querySelectorAll(".hg-tab");
         var i;
         for (i = 0; i < tabs.length; i++) {
@@ -185,6 +192,27 @@
         for (i = 0; i < panels.length; i++) {
             panels[i].classList.toggle("is-aktiv", panels[i].id === "panel-" + ziel);
         }
+        // Im Adressfeld festhalten, damit ein Neuladen hier bleibt.
+        // replaceState statt pushState: Das Umschalten soll den Zurück-Knopf
+        // nicht mit Zwischenschritten fuellen.
+        if (merken !== false && window.history && window.history.replaceState) {
+            window.history.replaceState(null, "", "#" + ziel);
+        }
+    }
+
+    /**
+     * Welcher Reiter soll offen sein?
+     *
+     * Nach dem Absenden kehrt der Vorgang mit `?reiter=…` hierher zurück —
+     * sonst landet man beim Freigeben jedes Mal wieder bei "Zuordnen" und
+     * braucht einen Klick zurück. Bei 41 Entwürfen sind das 41 Klicks.
+     */
+    function gewuenschterReiter() {
+        var ausUrl = new URLSearchParams(window.location.search).get("reiter");
+        if (REITER.indexOf(ausUrl) !== -1) { return ausUrl; }
+        var ausHash = (window.location.hash || "").replace("#", "");
+        if (REITER.indexOf(ausHash) !== -1) { return ausHash; }
+        return null;
     }
 
     function fehler(meldung) {
@@ -225,13 +253,24 @@
                 reiterZahl("tab-zahl-freigabe", (d.freigabe || []).length);
 
                 fuellen("liste-zuordnung", d.zuordnung || [],
-                    function (e) { return eintrag(e, true); },
+                    function (e) { return eintrag(e, true, "zuordnung"); },
                     "Nichts offen — alle Aufnahmen sind zugeordnet.");
                 fuellen("liste-freigabe", d.freigabe || [],
-                    function (e) { return eintrag(e, true); },
+                    function (e) { return eintrag(e, true, "freigabe"); },
                     "Kein Entwurf wartet auf Freigabe.");
                 fuellen("liste-fertig", d.fertig || [], fertigEintrag,
                     "Noch kein Protokoll fertiggestellt.");
+
+                // Erst nach dem Befüllen umschalten — vorher sind die Listen
+                // leer und der Wechsel sähe wie ein leerer Reiter aus.
+                var ziel = gewuenschterReiter();
+                if (ziel) {
+                    reiterWechsel(ziel);
+                } else if (!(d.zuordnung || []).length && (d.freigabe || []).length) {
+                    // Nichts mehr zuzuordnen, aber Entwürfe offen: dann ist
+                    // der erste Reiter nur eine leere Seite.
+                    reiterWechsel("freigabe");
+                }
             })
             .catch(function (e) { fehler(e.message); });
     }

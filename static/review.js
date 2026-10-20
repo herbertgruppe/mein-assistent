@@ -343,10 +343,15 @@
                 }
                 dirty = false;
                 // Wer die Freigaben am Stueck abarbeitet, will zurueck zur
-                // Liste statt auf eine Sackgassen-Seite. Die Erfolgsseite
+                // Liste statt auf eine Sackgassen-Seite — und zwar in den
+                // Reiter, aus dem er kam. Ohne den Reiter landet man nach
+                // jeder Freigabe wieder bei "Zuordnen". Die Erfolgsseite
                 // bleibt fuer alle anderen Wege erhalten.
-                if (new URLSearchParams(window.location.search).get('weiter') === 'uebersicht') {
-                    window.location.href = '/protokolle';
+                var parameter = new URLSearchParams(window.location.search);
+                if (parameter.get('weiter') === 'uebersicht') {
+                    var reiter = parameter.get('reiter');
+                    window.location.href = '/protokolle' +
+                        (reiter ? '#' + encodeURIComponent(reiter) : '');
                 } else {
                     window.location.href = '/review/' +
                         encodeURIComponent(ctx.token) + '/success';

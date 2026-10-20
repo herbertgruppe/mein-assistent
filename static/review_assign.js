@@ -46,7 +46,12 @@
      * Die kurze Pause ist Absicht — ohne sie bliebe unklar, ob es geklappt hat.
      */
     function fertigMelden(titel, text) {
-        var zurueck = new URLSearchParams(window.location.search).get('weiter') === 'uebersicht';
+        var parameter = new URLSearchParams(window.location.search);
+        var zurueck = parameter.get('weiter') === 'uebersicht';
+        // Den Reiter mitnehmen, aus dem der Vorgang geöffnet wurde — sonst
+        // landet man wieder beim ersten und braucht einen Klick zurück.
+        var reiter = parameter.get('reiter');
+        var ziel = '/protokolle' + (reiter ? '#' + encodeURIComponent(reiter) : '');
         document.querySelector('.hg-main').innerHTML =
             '<section class="hg-recording-card">' +
             '<div class="hg-recording-title">' + titel + '</div>' +
@@ -55,11 +60,11 @@
             '</div>' +
             (zurueck ? '' :
                 '<div class="hg-recording-meta" style="margin-top:14px">' +
-                '<a href="/protokolle">Zur Übersicht aller Protokolle</a></div>') +
+                '<a href="' + ziel + '">Zur Übersicht aller Protokolle</a></div>') +
             '</section>';
         if (zurueck) {
             window.setTimeout(function () {
-                window.location.href = '/protokolle';
+                window.location.href = ziel;
             }, 1200);
         }
     }
