@@ -42,7 +42,7 @@ from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import requests as _http
 from dotenv import load_dotenv
@@ -3031,11 +3031,13 @@ class ProtocolAssignRequest(BaseModel):
     """
 
     event_id: Optional[str] = Field(None, description="Outlook-Event-ID")
-    eingeladene: List[str] = Field(
+    eingeladene: List[Union[str, Dict[str, Any]]] = Field(
         default_factory=list,
         description=(
-            "Eingeladene laut Outlook-Termin. Gegenprobe für Mara, KEINE "
-            "Teilnehmerliste — eingeladen ist nicht anwesend."
+            "Eingeladene laut Outlook-Termin, je Eintrag {name, email, status}. "
+            "Gegenprobe für Mara, KEINE Teilnehmerliste — eingeladen ist nicht "
+            "anwesend. Reine Namen (alte Schreibweise) werden weiterhin "
+            "angenommen."
         ),
     )
     asana_board_gid: Optional[str] = None
@@ -3407,12 +3409,7 @@ def _create_mara_issue(protocol: Dict[str, Any]) -> Optional[str]:
         logger.warning("[protocols] PAPERCLIP_API_KEY_MA nicht gesetzt — kein Mara-Issue")
         return None
 
-    eingeladene = protocol.get("eingeladene") or []
-    eingeladene_block = (
-        "\n".join(f"- {name}" for name in eingeladene)
-        if eingeladene
-        else "_Kein Termin zugeordnet — es gibt keine Gegenprobe._"
-    )
+    eingeladene_block = _eingeladene_block(protocol.get("eingeladene"))
     recording_id = protocol.get("recording_id") or "?"
 
     description = (
@@ -3437,6 +3434,11 @@ def _create_mara_issue(protocol: Dict[str, Any]) -> Optional[str]:
         f"5. Bleibt jemand unklar, vermerke das als offene Frage im Protokoll, "
         f"statt zu raten.\n\n"
         f"### Eingeladene laut Outlook (Gegenprobe)\n{eingeladene_block}\n\n"
+        f"Diese Liste gehoert **mit Status** in den Teilnehmer-Abschnitt des "
+        f"Protokolls, deutlich getrennt von den tatsaechlich Anwesenden und "
+        f"ausdruecklich als Outlook-Angabe gekennzeichnet. Eine Zusage ist "
+        f"keine Anwesenheit — wer zugesagt hat und dann nicht kam, steht in "
+        f"keinem Transkript.\n\n"
         f"### Ablauf\n"
         f"1. Transkript und Zusammenfassung zur Recording-ID holen\n"
         f"2. Teilnehmer nach obiger Reihenfolge ermitteln\n"
@@ -3680,6 +3682,70 @@ def attach_protocol_markdown(
         "draft_id": draft_id,
         "reviewer_url": f"{_PUBLIC_BASE_URL}/review/{protocol['reviewer_token']}",
     }
+
+
+# Wie Microsoft Graph den Antwortstatus nennt — und was davon im Protokoll
+# steht. Geprüft am 20.10.2026 auch für zurückliegende Termine: Die Werte
+# sind dort brauchbar, anders als früher angenommen.
+_ANTWORT_TEXT = {
+    "accepted": "zugesagt",
+    "tentativelyAccepted": "mit Vorbehalt zugesagt",
+    "declined": "abgesagt",
+    "notResponded": "ohne Antwort",
+    "none": "ohne Antwort",
+    "organizer": "Organisator",
+}
+
+# Besprechungsräume stehen in Outlook als Teilnehmer. Im Protokoll haben sie
+# nichts zu suchen — ein Raum hat nicht mitdiskutiert.
+_RAUM_MERKMALE = ("besprechung ", "raum ", "konferenz", "meetingraum", "-raum")
+
+
+def _ist_raum(name: str, email: str = "") -> bool:
+    """Erkennt Besprechungsräume unter den Outlook-Eingeladenen."""
+    n = (name or "").lower()
+    m = (email or "").lower()
+    if m.startswith(("raum", "room", "besprechung")):
+        return True
+    return any(merkmal in n for merkmal in _RAUM_MERKMALE)
+
+
+def _eingeladene_block(eingeladene: Optional[List[Any]]) -> str:
+    """
+    Formatiert die Outlook-Eingeladenen mit ihrem Antwortstatus.
+
+    Sven wollte diese Angaben im Protokoll sehen — **ausdrücklich getrennt**
+    von den tatsächlichen Teilnehmern. Eine Zusage ist keine Anwesenheit:
+    Wer zugesagt hat und dann nicht kam, taucht in keinem Transkript auf.
+
+    Reine Namen aus der alten Schreibweise werden weiterhin angenommen; sie
+    erscheinen dann ohne Status.
+    """
+    if not eingeladene:
+        return "_Kein Termin zugeordnet — es gibt keine Gegenprobe._"
+
+    zeilen: List[str] = []
+    raeume: List[str] = []
+    for eintrag in eingeladene:
+        if isinstance(eintrag, dict):
+            name = (eintrag.get("name") or eintrag.get("email") or "").strip()
+            email = (eintrag.get("email") or "").strip()
+            status = _ANTWORT_TEXT.get(eintrag.get("status") or "", "")
+        else:
+            name, email, status = str(eintrag).strip(), "", ""
+        if not name:
+            continue
+        if _ist_raum(name, email):
+            raeume.append(name)
+            continue
+        zeilen.append(f"- {name}" + (f" — {status}" if status else ""))
+
+    if not zeilen:
+        return "_Keine Personen im Termin hinterlegt._"
+    block = "\n".join(zeilen)
+    if raeume:
+        block += f"\n\n_Nicht aufgeführt, weil Raum und nicht Person: {', '.join(raeume)}._"
+    return block
 
 
 def _als_ortszeit(zeitstempel: Optional[str]) -> str:

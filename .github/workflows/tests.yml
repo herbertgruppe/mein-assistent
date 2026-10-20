@@ -103,6 +103,12 @@ jobs:
       - name: Run Reiter-Tests
         run: python -m pytest tests/test_reiter_merken.py -v
 
+      # Outlook-Eingeladene mit Antwortstatus. Die Trennung von den
+      # tatsaechlich Anwesenden war jahrelang die haeufigste Fehlerquelle
+      # bei den Teilnehmerlisten.
+      - name: Run Eingeladene-Tests
+        run: python -m pytest tests/test_eingeladene_status.py -v
+
       # Die gesamte Protokoll-Strecke — DB-Layer, Review-Editor, Zuordnungs-Stufe
       # — lief hier nie mit, obwohl sie seit Monaten im Repo liegt. Grund war ein
       # einzelner dauerhaft roter Test: er schickte den Authentik-Header ueber den
