@@ -76,6 +76,12 @@ jobs:
       - name: Run Transkript-Endpunkt-Tests
         run: python -m pytest tests/test_transkript_endpunkt.py -v
 
+      # Jede Aufnahme braucht einen eigenen Auftrag. Bei gleichem Titel gibt
+      # Paperclip das bestehende Issue zurueck — der zweite Vorgang wartete
+      # dann still, einer davon vier Wochen.
+      - name: Run Auftrags-Tests
+        run: python -m pytest tests/test_auftrag_je_aufnahme.py -v
+
       # Svens Pruefvermerk zur Sprecherzuordnung und die Titelpflege.
       # Plaud bietet fuer beides kein Feld — faellt es hier aus, ist nicht
       # mehr nachvollziehbar, welche Aufnahme schon angesehen wurde.
