@@ -80,6 +80,47 @@
 }
 
 /* Einträge */
+/* Reiter „Mitschreiben" — erklärt den Start auf dem eigenen Rechner.
+   Bewusst ohne Zustandsanzeige: Die Seite kann nicht prüfen, ob das
+   Programm läuft (https -> http://127.0.0.1 gilt je nach Browser als
+   Mixed Content). Ein Link dorthin funktioniert, ein fetch nicht. */
+.hg-mitschrift-start {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin: 4px 0 24px;
+}
+.hg-btn-gross {
+    display: inline-block;
+    background: var(--hg-blue);
+    color: #fff;
+    text-decoration: none;
+    font-size: 17px;
+    font-weight: 600;
+    padding: 11px 22px;
+    border-radius: 6px;
+}
+.hg-btn-gross:hover { background: #173c5e; }
+.hg-mitschrift-hinweis { font-size: 14px; color: var(--hg-grau, #5a6b7d); }
+.hg-abschnitt {
+    font-size: 15px;
+    margin: 26px 0 8px;
+    color: var(--hg-blue);
+}
+.hg-schritte {
+    margin: 0 0 6px;
+    padding-left: 22px;
+    font-size: 15px;
+    line-height: 1.8;
+}
+.hg-schritte code {
+    background: #eef3fa;
+    border-radius: 3px;
+    padding: 1px 6px;
+    font-size: 14px;
+}
+
 .hg-liste { display: flex; flex-direction: column; gap: 8px; }
 
 .hg-eintrag {
