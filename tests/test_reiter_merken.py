@@ -51,9 +51,16 @@ def test_unbekannter_reiter_wird_abgewiesen():
     """
     Ein Wert aus der Adresszeile darf nicht ungeprueft in einen Selektor
     wandern.
+
+    Geprueft wird die Absicht, nicht der Wortlaut der Liste: Es gibt eine
+    Positivliste, die Bestandsreiter stehen darin, und jeder Wert wird
+    dagegen geprueft. Haengt hier die Liste woertlich drin, schlaegt der
+    Test bei jedem neuen Reiter fehl, ohne dass etwas kaputt ist.
     """
     js = _js("overview.js")
-    assert 'REITER = ["zuordnung", "freigabe", "fertig"]' in js
+    zeile = next(z for z in js.splitlines() if "var REITER" in z)
+    for bekannt in ("zuordnung", "freigabe", "fertig"):
+        assert bekannt in zeile, f"{bekannt} fehlt in der Positivliste"
     assert "REITER.indexOf(ziel) === -1" in js
 
 

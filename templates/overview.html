@@ -45,6 +45,9 @@
             <button type="button" class="hg-tab" data-ziel="fertig" role="tab">
                 Fertig
             </button>
+            <button type="button" class="hg-tab" data-ziel="mitschreiben" role="tab">
+                Mitschreiben
+            </button>
         </nav>
 
         <section class="hg-panel is-aktiv" id="panel-zuordnung" role="tabpanel">
@@ -68,6 +71,59 @@
         <section class="hg-panel" id="panel-fertig" role="tabpanel">
             <p class="hg-panel-hilfe">Die zuletzt fertiggestellten Protokolle.</p>
             <div id="liste-fertig" class="hg-liste">Wird geladen …</div>
+        </section>
+
+        <!--
+            Mitschreiben: Die Live-Mitschrift laeuft bewusst auf dem Rechner
+            im Besprechungsraum, nicht hier. Die Spracherkennung braucht eine
+            Grafikkarte (auf dem Server 1,9x Echtzeit, auf einem Notebook mit
+            RTX 10x), und so verlaesst keine Aufnahme das Geraet.
+
+            Diese Seite kann deshalb nicht pruefen, ob das Programm laeuft:
+            Ein fetch von https:// auf http://127.0.0.1 wird je nach Browser
+            als Mixed Content blockiert. Ein normaler Link dorthin funktioniert.
+        -->
+        <section class="hg-panel" id="panel-mitschreiben" role="tabpanel">
+            <p class="hg-panel-hilfe">
+                Die Mitschrift läuft auf dem <strong>Rechner im Besprechungsraum</strong>,
+                nicht auf dem Server. Ton und Transkript bleiben dort.
+            </p>
+
+            <div class="hg-mitschrift-start">
+                <a class="hg-btn-gross" href="http://127.0.0.1:8700/" target="_blank" rel="noopener">
+                    Mitschrift öffnen
+                </a>
+                <span class="hg-mitschrift-hinweis">
+                    Funktioniert nur, wenn das Programm auf diesem Rechner bereits läuft.
+                </span>
+            </div>
+
+            <h3 class="hg-abschnitt">So startest du sie</h3>
+            <ol class="hg-schritte">
+                <li>Im Ordner <code>live-mitschrift</code> auf
+                    <strong>Besprechung starten</strong> doppelklicken.</li>
+                <li>Etwa eine halbe Minute warten — das Spracherkennungsmodell wird geladen.</li>
+                <li>Der Browser öffnet sich von allein. Sonst der Knopf oben.</li>
+            </ol>
+            <p class="hg-panel-hilfe">
+                Das Fenster zeigt beim Start, welches Mikrofon verwendet wird —
+                ein Blick darauf lohnt sich, bevor die Besprechung losgeht.
+                Am Ende übergibt ein Knopf das Ergebnis an diese Seite; es
+                erscheint dann unter <strong>Freigeben</strong>.
+            </p>
+
+            <h3 class="hg-abschnitt">Programm und Modell</h3>
+            <p class="hg-panel-hilfe">
+                Zum Herunterladen für weitere Rechner — kommt, sobald die
+                Mitschrift sich in echten Besprechungen bewährt hat. Bis dahin
+                läuft sie nur auf Svens Notebook.
+            </p>
+            <p class="hg-panel-hilfe">
+                <strong>Vor einer Ausweitung</strong> über Svens eigene Termine
+                hinaus sind Mitarbeitervertretung und Datenschutz einzubeziehen.
+                Eine live mithörende Aufnahme ist etwas anderes als ein still
+                laufender Recorder.
+            </p>
         </section>
 
         <div class="hg-fehler" id="fehler" hidden></div>

@@ -103,6 +103,11 @@ jobs:
       - name: Run Reiter-Tests
         run: python -m pytest tests/test_reiter_merken.py -v
 
+      # Der Reiter, ueber den die Live-Mitschrift gestartet wird. Faellt er
+      # aus REITER heraus, laesst er sich nicht mehr oeffnen — ohne Fehlermeldung.
+      - name: Run Mitschrift-Reiter-Tests
+        run: python -m pytest tests/test_mitschrift_reiter.py -v
+
       # Outlook-Eingeladene mit Antwortstatus. Die Trennung von den
       # tatsaechlich Anwesenden war jahrelang die haeufigste Fehlerquelle
       # bei den Teilnehmerlisten.

@@ -179,7 +179,9 @@
         n.hidden = wert === 0;
     }
 
-    var REITER = ["zuordnung", "freigabe", "fertig"];
+    // "mitschreiben" ist ein statischer Reiter ohne Daten — er erklaert,
+    // wie die Live-Mitschrift auf dem eigenen Rechner gestartet wird.
+    var REITER = ["zuordnung", "freigabe", "fertig", "mitschreiben"];
 
     function reiterWechsel(ziel, merken) {
         if (REITER.indexOf(ziel) === -1) { return; }
