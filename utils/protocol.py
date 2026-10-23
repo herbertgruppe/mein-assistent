@@ -98,11 +98,23 @@ _BRACKET_DATE_RE = re.compile(r"\s*\[([^\]]+)\]\s*$")
 _ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 _DE_DATE_RE = re.compile(r"^(\d{1,2})\.(\d{1,2})\.(\d{2,4})$")
 
-# Placeholder strings the LLM may emit instead of a real name — must not become an assignee.
+# Platzhalter statt eines echten Namens — duerfen nicht als Verantwortliche
+# in Asana landen.
+#
+# Wichtig ist der Unterschied zwischen "kein Name" und "Zeile weglassen":
+# Eine Bullet-Zeile OHNE Doppelpunkt erkennt der Parser gar nicht, die
+# Aufgabe faellt dann ersatzlos weg. Deshalb schreiben Mara und die
+# Live-Mitschrift auch bei unbekanntem Verantwortlichen einen Platzhalter
+# ("Offen:", "(unklar):") — die Aufgabe kommt an, der Platzhalter wird
+# hier verworfen. Faellt ein Platzhalter aus dieser Liste, entsteht in
+# Asana eine Person namens "Offen", der dann Aufgaben zugewiesen sind.
 _NAME_BLACKLIST = {
     "", "?", "[?]", "tbd", "todo", "n/a", "na",
     "alle", "team", "person", "[name]", "name",
     "datum", "ort", "zeit", "wer",
+    # Deutsche Platzhalter, die Mara und die Live-Mitschrift verwenden
+    "offen", "noch offen", "unklar", "(unklar)", "[unklar]",
+    "unbekannt", "niemand", "keiner", "n.n.", "nn",
 }
 
 
