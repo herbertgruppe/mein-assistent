@@ -109,6 +109,13 @@ jobs:
       - name: Run Eingeladene-Tests
         run: python -m pytest tests/test_eingeladene_status.py -v
 
+      # Aufgaben ohne benannten Verantwortlichen tragen einen Platzhalter
+      # ("Offen:"), damit sie der Parser ueberhaupt findet. Faellt der
+      # Platzhalter aus der Sperrliste, entsteht in Asana eine Person
+      # namens "Offen", der Aufgaben zugewiesen sind.
+      - name: Run Platzhalter-Tests
+        run: python -m pytest tests/test_platzhalter_verantwortlicher.py -v
+
       # Die gesamte Protokoll-Strecke — DB-Layer, Review-Editor, Zuordnungs-Stufe
       # — lief hier nie mit, obwohl sie seit Monaten im Repo liegt. Grund war ein
       # einzelner dauerhaft roter Test: er schickte den Authentik-Header ueber den
