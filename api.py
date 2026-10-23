@@ -3380,19 +3380,27 @@ def create_protocol_assignment(
     )
 
 
-def _kurzdatum(iso: Optional[str]) -> str:
+def _kurzdatum(iso: Optional[str], mit_uhrzeit: bool = False) -> str:
     """
     TT.MM.JJJJ aus einem ISO-Zeitstempel, für Issue-Titel.
 
     Macht Auftragstitel bei Serienterminen unterscheidbar — ohne das teilen
     sich alle "1:1 KNE/SH" ein Issue.
+
+    `mit_uhrzeit` ergänzt die Uhrzeit. Nötig, weil das Datum allein nicht
+    reicht: Zu einem Termin gibt es mitunter zwei Aufnahmen — etwa wenn der
+    Recorder zwischendurch gestoppt wurde. Beide hatten denselben Titel,
+    Paperclip gab beim zweiten das bestehende Issue zurück, und der zweite
+    Vorgang blieb ohne Auftrag liegen. Am 20.10.2026 betraf das drei
+    Vorgänge, einer davon vier Wochen lang.
     """
     if not iso:
         return "ohne Datum"
     try:
-        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).strftime("%d.%m.%Y")
+        ts = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return str(iso)[:10]
+    return ts.strftime("%d.%m.%Y, %H:%M") if mit_uhrzeit else ts.strftime("%d.%m.%Y")
 
 
 def _create_mara_issue(protocol: Dict[str, Any]) -> Optional[str]:
@@ -3453,10 +3461,12 @@ def _create_mara_issue(protocol: Dict[str, Any]) -> Optional[str]:
             f"{_PC_API_URL}/api/companies/{_PC_COMPANY_ID}/issues",
             headers={"Authorization": f"Bearer {_PC_API_KEY}", "Content-Type": "application/json"},
             json={
-                # Datum im Titel — siehe Begruendung in _create_mara_rewrite_issue
+                # Datum UND Uhrzeit im Titel. Paperclip gibt bei gleichem
+                # Titel das bestehende Issue zurueck — zwei Aufnahmen zu
+                # einem Termin blieben so ohne eigenen Auftrag liegen.
                 "title": (
                     f"📄 Protokoll erstellen: {protocol.get('meeting_name')} "
-                    f"({_kurzdatum(protocol.get('meeting_datetime'))})"
+                    f"({_kurzdatum(protocol.get('meeting_datetime'), mit_uhrzeit=True)})"
                 ),
                 "description": description,
                 "assigneeAgentId": _MARA_AGENT_ID,
@@ -3470,7 +3480,24 @@ def _create_mara_issue(protocol: Dict[str, Any]) -> Optional[str]:
                 resp.status_code, resp.text[:200],
             )
             return None
-        identifier = str(resp.json().get("identifier") or "?")
+        antwort = resp.json()
+        identifier = str(antwort.get("identifier") or "?")
+
+        # Gegenprobe: Gehört das Issue wirklich zu diesem Vorgang?
+        #
+        # Paperclip gibt bei gleichem Titel das bestehende Issue zurück —
+        # mit gültiger Nummer und HTTP 200, also wie ein Erfolg. Der Vorgang
+        # steht danach auf `assigned`, ohne dass jemand beauftragt wurde, und
+        # wartet still. Genau so sind am 20.10.2026 drei Vorgänge liegen
+        # geblieben, einer davon vier Wochen.
+        if protocol["id"] not in str(antwort.get("description") or ""):
+            logger.error(
+                "[protocols] Mara-Issue %s gehoert NICHT zu draft=%s — vermutlich "
+                "ein bestehendes Issue mit gleichem Titel. Kein Auftrag erteilt.",
+                identifier, protocol["id"],
+            )
+            return None
+
         logger.info("[protocols] Mara beauftragt: %s (draft=%s)", identifier, protocol["id"])
         return identifier
     except Exception as exc:
@@ -3594,6 +3621,26 @@ def assign_protocol(
 
     # Ein zweiter Klick darf Mara nicht ein zweites Mal beauftragen.
     issue = None if already_assigned else _create_mara_issue(_protocols_db.get_by_id(draft_id))
+
+    # Ohne Auftrag wartet der Vorgang auf niemanden. Vorher fiel das nicht
+    # auf: Er stand auf `assigned`, trug in der Übersicht „bei Mara" — und
+    # blieb still liegen. Am 20.10.2026 waren drei Vorgänge betroffen, einer
+    # davon vier Wochen lang.
+    if not already_assigned and not issue:
+        logger.error(
+            "[protocols] Beauftragung fehlgeschlagen fuer draft=%s — Vorgang "
+            "bleibt in der Zuordnungs-Stufe statt still zu warten.",
+            draft_id,
+        )
+        _protocols_db.set_status(draft_id, "pending_assignment")
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Mara konnte nicht beauftragt werden. Der Vorgang bleibt offen "
+                "— bitte erneut freigeben. Wiederholt sich der Fehler, steckt "
+                "er in Paperclip."
+            ),
+        )
 
     return {
         "status": "assigned",
@@ -4544,7 +4591,14 @@ def _uebersicht_eintrag(protocol: Dict[str, Any]) -> Dict[str, Any]:
         "datum": (protocol.get("meeting_datetime") or "")[:10],
         "dauer": protocol.get("recording_duration") or "",
         "status": protocol["status"],
+        # Wie lange der Vorgang schon wartet …
         "alter_tage": _alter_in_tagen(protocol.get("created_at")),
+        # … und wie lange die Besprechung zurückliegt. Beides fällt
+        # auseinander, seit die Altweg-Vorgänge nachträglich angelegt wurden:
+        # Eine Besprechung vom 03.09. stand als „0 Tage" in der Liste, weil
+        # der Vorgang erst heute entstand. Beim Freigeben zählt das
+        # Besprechungsdatum — es steht ja daneben.
+        "alter_besprechung_tage": _alter_in_tagen(protocol.get("meeting_datetime")),
         "erinnerungen": int(protocol.get("reminder_count") or 0),
         "hat_transkript": bool(protocol.get("transcript")),
         "sprecher_status": sprecher,
@@ -4585,7 +4639,22 @@ def protocols_overview(_user: str = Depends(require_angemeldeter_nutzer)):
         "kennzahlen": {
             "offen": len(offen),
             "im_review": len(review),
+            # „wartet auf Freigabe" und „liegt noch bei Mara" sind zwei
+            # verschiedene Dinge. Zusammengezählt sahen acht unfertige
+            # Aufträge wie neun fertige Entwürfe aus.
+            "bei_mara": sum(1 for p in review if p["status"] == "assigned"),
+            "zur_freigabe": sum(
+                1 for p in review if p["status"] in ("draft", "in_review")
+            ),
             "aeltestes_tage": max(alter) if alter else 0,
+            # Das Alter der ältesten Besprechung, die noch nicht fertig ist —
+            # unabhängig davon, in welchem Schritt sie steckt.
+            "aelteste_besprechung_tage": max(
+                [
+                    _alter_in_tagen(p.get("meeting_datetime")) or 0
+                    for p in (offen + review)
+                ] or [0]
+            ),
             "ohne_namen": sum(
                 1 for p in offen if ist_zeitstempel_titel(p.get("recording_title"))
             ),
