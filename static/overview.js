@@ -87,7 +87,11 @@
        Navigation aus. Der Hauptteil bleibt ein echtes <a>, damit Mittelklick
        und "in neuem Tab öffnen" weiter funktionieren. */
     function eintrag(e, zeigeAlter, reiter) {
-        var wrap = node("div", "hg-eintrag" + (zeigeAlter ? altersKlasse(e.alter_tage) : ""));
+        var massgeblich = (reiter === "freigabe" && e.alter_besprechung_tage !== undefined
+                           && e.alter_besprechung_tage !== null)
+            ? e.alter_besprechung_tage
+            : e.alter_tage;
+        var wrap = node("div", "hg-eintrag" + (zeigeAlter ? altersKlasse(massgeblich) : ""));
 
         var a = document.createElement("a");
         a.className = "hg-eintrag-link";
@@ -128,10 +132,15 @@
         }
         a.appendChild(haupt);
 
-        if (zeigeAlter && e.alter_tage !== null && e.alter_tage !== undefined) {
+        // Beim Zuordnen zaehlt, wie lange der Vorgang wartet. Beim Freigeben
+        // zaehlt, wie lange die Besprechung zurueckliegt — das Datum steht ja
+        // daneben, und nachtraeglich angelegte Vorgaenge standen sonst mit
+        // "0 Tage" neben einem Datum von vor sechs Wochen.
+        var tage = massgeblich;
+        if (zeigeAlter && tage !== null && tage !== undefined) {
             var rechts = node("div", "hg-eintrag-alter");
-            rechts.appendChild(node("strong", null, e.alter_tage));
-            rechts.appendChild(text(e.alter_tage === 1 ? "Tag" : "Tage"));
+            rechts.appendChild(node("strong", null, tage));
+            rechts.appendChild(text(tage === 1 ? "Tag" : "Tage"));
             a.appendChild(rechts);
         }
         wrap.appendChild(a);
@@ -233,8 +242,21 @@
             .then(function (d) {
                 var k = d.kennzahlen || {};
                 el("kpi-offen").textContent = k.offen;
-                el("kpi-review").textContent = k.im_review;
-                el("kpi-alt").textContent = k.aeltestes_tage;
+                // Nur echte Entwuerfe. Was noch bei Mara liegt, steht daneben
+                // — zusammengezaehlt sahen unfertige Auftraege wie fertige
+                // Entwuerfe aus.
+                el("kpi-review").textContent =
+                    k.zur_freigabe !== undefined ? k.zur_freigabe : k.im_review;
+                if (el("kpi-mara")) {
+                    el("kpi-mara").textContent = k.bei_mara !== undefined ? k.bei_mara : "–";
+                }
+                // Das Alter der aeltesten offenen Besprechung, nicht des
+                // aeltesten Datensatzes: Nachtraeglich angelegte Vorgaenge
+                // standen sonst mit "0 Tage" da.
+                el("kpi-alt").textContent =
+                    k.aelteste_besprechung_tage !== undefined
+                        ? k.aelteste_besprechung_tage
+                        : k.aeltestes_tage;
                 el("kpis").hidden = false;
 
                 if (k.sprecher_offen !== undefined) {

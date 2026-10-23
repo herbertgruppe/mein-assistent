@@ -4591,7 +4591,14 @@ def _uebersicht_eintrag(protocol: Dict[str, Any]) -> Dict[str, Any]:
         "datum": (protocol.get("meeting_datetime") or "")[:10],
         "dauer": protocol.get("recording_duration") or "",
         "status": protocol["status"],
+        # Wie lange der Vorgang schon wartet …
         "alter_tage": _alter_in_tagen(protocol.get("created_at")),
+        # … und wie lange die Besprechung zurückliegt. Beides fällt
+        # auseinander, seit die Altweg-Vorgänge nachträglich angelegt wurden:
+        # Eine Besprechung vom 03.09. stand als „0 Tage" in der Liste, weil
+        # der Vorgang erst heute entstand. Beim Freigeben zählt das
+        # Besprechungsdatum — es steht ja daneben.
+        "alter_besprechung_tage": _alter_in_tagen(protocol.get("meeting_datetime")),
         "erinnerungen": int(protocol.get("reminder_count") or 0),
         "hat_transkript": bool(protocol.get("transcript")),
         "sprecher_status": sprecher,
@@ -4632,7 +4639,22 @@ def protocols_overview(_user: str = Depends(require_angemeldeter_nutzer)):
         "kennzahlen": {
             "offen": len(offen),
             "im_review": len(review),
+            # „wartet auf Freigabe" und „liegt noch bei Mara" sind zwei
+            # verschiedene Dinge. Zusammengezählt sahen acht unfertige
+            # Aufträge wie neun fertige Entwürfe aus.
+            "bei_mara": sum(1 for p in review if p["status"] == "assigned"),
+            "zur_freigabe": sum(
+                1 for p in review if p["status"] in ("draft", "in_review")
+            ),
             "aeltestes_tage": max(alter) if alter else 0,
+            # Das Alter der ältesten Besprechung, die noch nicht fertig ist —
+            # unabhängig davon, in welchem Schritt sie steckt.
+            "aelteste_besprechung_tage": max(
+                [
+                    _alter_in_tagen(p.get("meeting_datetime")) or 0
+                    for p in (offen + review)
+                ] or [0]
+            ),
             "ohne_namen": sum(
                 1 for p in offen if ist_zeitstempel_titel(p.get("recording_title"))
             ),
