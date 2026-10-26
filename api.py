@@ -3969,7 +3969,11 @@ def send_assignment_reminders(
 
     jetzt = datetime.now(DIGEST_TZ)
     if not force:
-        faellig, grund = _digest_faellig(jetzt, _protocols_db.last_reminder_timestamp())
+        letzte = (
+            _protocols_db.last_digest_timestamp()
+            or _protocols_db.last_reminder_timestamp()
+        )
+        faellig, grund = _digest_faellig(jetzt, letzte)
         if not faellig:
             return {"gesendet": False, "grund": grund, "offen": len(offen), "review": len(review)}
 
@@ -3982,7 +3986,10 @@ def send_assignment_reminders(
         raise HTTPException(status_code=503, detail="Kein Zustellweg verfuegbar.")
 
     # Erst nach erfolgreicher Zustellung markieren — sonst gilt der Tag als
-    # erledigt, obwohl Sven nichts bekommen hat.
+    # erledigt, obwohl Sven nichts bekommen hat. Der Tagesmarker hängt an
+    # keinem Vorgang — sonst fehlte er, sobald keine Zuordnung offen ist und
+    # nur Entwürfe gemeldet werden.
+    _protocols_db.mark_digest_sent()
     for protocol in offen:
         _protocols_db.mark_reminder_sent(protocol["id"])
 

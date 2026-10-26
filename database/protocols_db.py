@@ -220,6 +220,13 @@ class ProtocolsDB:
             except sqlite3.OperationalError:
                 pass  # Spalte existiert bereits
 
+        # Kleiner Schlüssel-Wert-Speicher für Zustand, der an keinem Vorgang
+        # hängt — derzeit nur: wann ging die Tagesübersicht zuletzt raus?
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS meta ("
+            " key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -662,6 +669,32 @@ class ProtocolsDB:
             )
             row = cursor.fetchone()
         return row["letzte"] if row and row["letzte"] else None
+
+    def last_digest_timestamp(self) -> Optional[str]:
+        """
+        Wann ging die Tagesübersicht zuletzt raus?
+
+        Eigener Marker statt Ableitung aus den Vorgängen: Die Übersicht
+        besteht aus zwei Teilen (offene Zuordnungen, Entwürfe zur Freigabe).
+        Ist keine Zuordnung offen, gibt es keinen Vorgang, an dem ein
+        Zeitstempel hängen könnte — der „heute schon verschickt"-Test lief
+        dann ins Leere und die Meldung ging alle zehn Minuten raus.
+        """
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = 'digest_last_sent'"
+            ).fetchone()
+        return row["value"] if row else None
+
+    def mark_digest_sent(self) -> None:
+        """Vermerkt, dass die Tagesübersicht jetzt zugestellt wurde."""
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('digest_last_sent', ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_utcnow_iso(),),
+            )
+            conn.commit()
 
     # ------------------------------------------------------------------
     # Update
