@@ -1276,6 +1276,39 @@ class TestAssignmentReminders:
                                         "vor %d Uhr" % api_env["api"].DIGEST_HOUR)
         assert len(zugestellt) == 1
 
+    def test_nur_entwuerfe_ohne_offene_zuordnung_gehen_nur_einmal_raus(
+        self, api_env, zugestellt, mara_issues, monkeypatch
+    ):
+        """
+        Regression 26.10.2026: Ohne offene Zuordnung hing der Tagesmarker an
+        keinem Vorgang — die Meldung ueber fertige Entwuerfe ging alle zehn
+        Minuten raus. Wochentag und Uhrzeit werden festgelegt, damit der Test
+        nicht am Wochenende oder frueh am Morgen trivial besteht.
+        """
+        monkeypatch.setattr(api_env["api"], "DIGEST_WEEKDAYS_ONLY", False)
+        monkeypatch.setattr(api_env["api"], "DIGEST_HOUR", 0)
+
+        created = _create_assignment(api_env)
+        token = _token_of(api_env, created["draft_id"])
+        api_env["client"].post(
+            f"/api/protocols/{created['draft_id']}/assign?token={token}",
+            json={"event_id": "ev", "create_asana_task": False},
+        )
+
+        erste = api_env["client"].post(
+            "/api/protocols/assignment-reminders", headers=KEY_HEADER
+        ).json()
+        assert erste["gesendet"] is True
+        assert erste["offen"] == 0 and erste["review"] == 1
+
+        for _ in range(3):
+            weitere = api_env["client"].post(
+                "/api/protocols/assignment-reminders", headers=KEY_HEADER
+            ).json()
+            assert weitere["gesendet"] is False
+            assert weitere["grund"] == "heute bereits verschickt"
+        assert len(zugestellt) == 1
+
     def test_freigegebene_aufnahme_zaehlt_nicht_mehr_als_offen(
         self, api_env, zugestellt, mara_issues
     ):
