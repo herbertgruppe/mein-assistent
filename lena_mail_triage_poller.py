@@ -1054,6 +1054,18 @@ THREAD_GROUPING = os.getenv("LENA_MAIL_TRIAGE_THREAD_GROUPING", "1").strip() == 
 # Standardmaessig AUS. Erst nach einem beobachteten Lauf scharfschalten.
 AKTIONEN_AKTIV = os.getenv("LENA_MAIL_TRIAGE_AKTIONEN", "0").strip() == "1"
 
+# 2026-10-27: Nur "Ablegen" bleibt scharf. Sven musste bei Antworten und
+# Ablegen jedes Mal erst im Weiterleiten-Stapel nachsehen, ob dort etwas liegt,
+# das eigentlich anders behandelt werden muss — das Etikett kostete mehr, als es
+# sparte. Mit diesem Schalter wird nur noch kategorisiert, was abgelegt wird
+# (auch als Vorschlag). Alles andere bleibt UNBERUEHRT im Posteingang: keine
+# Kategorie, kein Entwurf, keine Asana-Aufgabe. Die Mail gilt als gesehen und
+# wird nicht in jedem Zyklus neu bewertet. Der Rest haengt an einem neuen
+# Arbeitsablauf, der noch entworfen wird.
+#
+# Rueckweg: LENA_MAIL_TRIAGE_NUR_ABLEGEN=0 (oder Drop-in nur-ablegen.conf loeschen).
+NUR_ABLEGEN = os.getenv("LENA_MAIL_TRIAGE_NUR_ABLEGEN", "0").strip() == "1"
+
 # HBE-3052: Svens Kategorie-Aenderungen erkennen, darauf reagieren und daraus
 # lernen. Standardmaessig an — der Pass ist billig (ein Inbox-Abruf je Zyklus)
 # und ohne ihn bleibt eine Korrektur in Outlook folgenlos.
@@ -1997,6 +2009,11 @@ def vorgang_merken(state: Dict[str, Any], conv_id: str, ergebnis: Dict[str, Any]
             del merker[alt]
 
 
+def nur_ablegen_ueberspringt(action: str) -> bool:
+    """True, wenn der Nur-Ablegen-Modus diese Entscheidung nicht umsetzen darf."""
+    return NUR_ABLEGEN and action != "ablegen"
+
+
 def konsequenz_ausfuehren(mail: Dict[str, Any], schritt: int,
                           empfaenger: Optional[str] = None,
                           state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2012,6 +2029,12 @@ def konsequenz_ausfuehren(mail: Dict[str, Any], schritt: int,
     """
     ergebnis: Dict[str, Any] = {"art": None, "id": None, "stufe": None, "hinweis": None}
     if not AKTIONEN_AKTIV or schritt not in (3, 4, 5):
+        return ergebnis
+    # Gilt fuer ALLE Wege, die hier landen: neue Mails, Korrekturen und von Sven
+    # von Hand gesetzte Kategorien. Ohne diese Sperre loeste eine manuell
+    # gesetzte "Lena: Tun" weiterhin eine Aufgabe aus.
+    if NUR_ABLEGEN:
+        ergebnis["hinweis"] = "Nur-Ablegen-Modus: keine Entwuerfe, keine Aufgaben"
         return ergebnis
 
     conv = (mail.get("conversation_id") or "") if state is not None else ""
@@ -2294,6 +2317,8 @@ def regeln_rueckwirkend(state: Dict[str, Any]) -> Dict[str, int]:
             continue
         mid = m.get("message_id") or ""
         aktion = regel["aktion"]
+        if nur_ablegen_ueberspringt(aktion):
+            continue          # Nur-Ablegen-Modus: Regeln mit anderer Aktion ruhen
         vorher = _lena_kategorie(m.get("categories") or [])
         if vorher == AKTION_ZU_KATEGORIE.get(aktion):
             continue          # steht schon richtig
@@ -2692,6 +2717,8 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
         "anweisungen_uebergangen": 0, # zu alt, nur gemeldet
         # HBE-3061
         "regel_rueckwirkend": 0,      # neue Regel auf vorhandene Mails angewendet
+        # Nur-Ablegen-Modus
+        "nicht_ablegen_uebersprungen": 0,  # bewusst unberuehrt im Posteingang gelassen
     }
 
     # Save before the pass — used as `since` for override detection below
@@ -2770,6 +2797,14 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
             }, ensure_ascii=False))
             # Im Trockenlauf nichts schreiben — auch nicht in processed_message_ids,
             # damit der Scharflauf dieselben Mails erneut sieht.
+            continue
+
+        if nur_ablegen_ueberspringt(action):
+            # Weder Kategorie noch Wichtigkeit noch Entwurf: die Mail bleibt so
+            # im Posteingang, wie sie eingegangen ist. Als gesehen vermerken,
+            # sonst bezahlt jeder Zyklus dieselbe Sprachmodell-Bewertung erneut.
+            counters["nicht_ablegen_uebersprungen"] += 1
+            new_processed.append(mid)
             continue
 
         ok = _categorize_mail(mid, action, skip_archive=skip_archive)
@@ -2973,6 +3008,13 @@ def main() -> None:
     else:
         logger.info(
             "Konsequenzen inaktiv (LENA_MAIL_TRIAGE_AKTIONEN=0) — es entstehen "
+            "keine Entwuerfe und keine Aufgaben."
+        )
+
+    if NUR_ABLEGEN:
+        logger.info(
+            "NUR-ABLEGEN-MODUS: Es wird nur noch abgelegt (auch als Vorschlag). "
+            "Alle anderen Mails bleiben unkategorisiert im Posteingang, es entstehen "
             "keine Entwuerfe und keine Aufgaben."
         )
 
