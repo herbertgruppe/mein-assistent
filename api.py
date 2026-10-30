@@ -5453,6 +5453,11 @@ LENA_ACTION_CATEGORIES = {
     "recherchieren":  "Lena: Recherchieren",
     "weiterleiten":   "Lena: Weiterleiten",
     "ablegen":        "Lena: Ablegen",
+    # Keine Aktion, sondern die Frage an Sven: Der Mail-Triage-Poller setzt sie
+    # im Modus "SH entscheiden" auf alles, worueber das Sprachmodell entschieden
+    # hat und was nicht sicher abgelegt werden kann. Sven setzt dann die
+    # eigentliche Kategorie, und Lena fuehrt die Aktion aus.
+    "entscheiden":    "Lena: SH entscheiden",
 }
 
 # Mails, die Lena ohne Rueckfrage ins Archiv verschiebt, bekommen eine eigene
@@ -5488,6 +5493,7 @@ LENA_MASTER_CATEGORIES = [
     {"displayName": "Lena: Weiterleiten",  "color": "preset8"},   # Purple
     {"displayName": "Lena: Ablegen",       "color": "preset12"},  # Grey
     {"displayName": LENA_AUTO_ARCHIVE_CATEGORY, "color": "preset10"},  # Dark Grey
+    {"displayName": "Lena: SH entscheiden", "color": "preset9"},  # Cranberry — fällt auf
 ]
 
 
@@ -5585,6 +5591,7 @@ class LenaTriageSummaryResponse(BaseModel):
     recherchieren: int
     weiterleiten: int
     ablegen: int
+    entscheiden: int = 0     # "Lena: SH entscheiden" — wartet auf Svens Entscheidung
     # Priorität-Buckets
     hoch: int
     mittel: int
@@ -6590,7 +6597,7 @@ def lena_mail_triage_summary(
 
     counts: dict = {
         "antworten": 0, "tun": 0, "warten": 0,
-        "recherchieren": 0, "weiterleiten": 0, "ablegen": 0,
+        "recherchieren": 0, "weiterleiten": 0, "ablegen": 0, "entscheiden": 0,
         "hoch": 0, "mittel": 0, "niedrig": 0,
     }
     total = 0
@@ -6615,6 +6622,7 @@ def lena_mail_triage_summary(
         recherchieren=counts["recherchieren"],
         weiterleiten=counts["weiterleiten"],
         ablegen=counts["ablegen"],
+        entscheiden=counts["entscheiden"],
         hoch=counts["hoch"],
         mittel=counts["mittel"],
         niedrig=counts["niedrig"],

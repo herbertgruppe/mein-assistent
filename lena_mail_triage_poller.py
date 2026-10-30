@@ -1066,6 +1066,41 @@ AKTIONEN_AKTIV = os.getenv("LENA_MAIL_TRIAGE_AKTIONEN", "0").strip() == "1"
 # Rueckweg: LENA_MAIL_TRIAGE_NUR_ABLEGEN=0 (oder Drop-in nur-ablegen.conf loeschen).
 NUR_ABLEGEN = os.getenv("LENA_MAIL_TRIAGE_NUR_ABLEGEN", "0").strip() == "1"
 
+# 2026-10-30: Der neue Arbeitsablauf "SH entscheiden" — Nachfolger des
+# Nur-Ablegen-Modus. Anlass: Lenas Mail-Triage hatte 79 Asana-Aufgaben aus Mails
+# angelegt, ueber 20 davon reine Information (Personalverwaltung) und viele
+# bereits ueberholt. Aufgaben, die niemand entschieden hat, sind zu grosszuegig.
+#
+# Mit ENTSCHEIDEN=1 gilt:
+#   * Was sicher abgelegt werden kann (Regeln, Systemabsender, Newsletter,
+#     Kalender) laeuft wie bisher, samt "Ablegen"-Vorschlag.
+#   * Jede andere Mail, ueber die das SPRACHMODELL entschieden hat, bekommt die
+#     Kategorie "Lena: SH entscheiden" — ohne Wichtigkeit, ohne Vorschlag, ohne
+#     Entwurf, ohne Aufgabe, ohne Telegram-Alarm.
+#   * Setzt Sven eine andere Lena-Kategorie (Antworten, Weiterleiten, Tun,
+#     Warten, Recherchieren, Ablegen), ist das eine Anweisung: Lena fuehrt die
+#     Aktion aus (Entwurf bzw. Aufgabe). Die 7-Tage-Grenze fuer Anweisungen gilt
+#     fuer Mails, die auf Svens Entscheidung warten, NICHT.
+#   * Aufgaben aus Mails landen im Abschnitt "Eingang" des Cockpits, damit sie im
+#     Wochenreview gezielt eingeordnet werden.
+#
+# Hat Vorrang vor NUR_ABLEGEN. Standard AUS: ein vergessener Schalter darf das
+# Verhalten nicht still aendern. Rueckweg: LENA_MAIL_TRIAGE_ENTSCHEIDEN=0 (bzw.
+# Drop-in entscheiden.conf loeschen). Bereits gesetzte Kategorien bleiben stehen.
+ENTSCHEIDEN = os.getenv("LENA_MAIL_TRIAGE_ENTSCHEIDEN", "0").strip() == "1"
+KATEGORIE_ENTSCHEIDEN = "Lena: SH entscheiden"
+MAX_ENTSCHEIDEN_MERKER = 2000
+
+# Wie viele Mails der Korrektur-Durchlauf im Posteingang ansieht. Mit "SH
+# entscheiden" sammeln sich Mails an, die Sven spaeter kategorisiert — sie liegen
+# dann weiter hinten als die 80 neuesten und wuerden sonst nie bemerkt.
+KORREKTUR_LIMIT = int(os.getenv("LENA_MAIL_TRIAGE_KORREKTUR_LIMIT",
+                                "300" if ENTSCHEIDEN else "80"))
+
+# Rule-IDs, hinter denen eine deterministische Regel steht (kein Sprachmodell).
+# Dieselbe Liste benutzt may_auto_archive.
+REGEL_PRAEFIXE = ("sven_regel", "system_sender", "newsletter_sender", "calendar_subject")
+
 # HBE-3052: Svens Kategorie-Aenderungen erkennen, darauf reagieren und daraus
 # lernen. Standardmaessig an — der Pass ist billig (ein Inbox-Abruf je Zyklus)
 # und ohne ihn bleibt eine Korrektur in Outlook folgenlos.
@@ -1100,7 +1135,7 @@ ASANA_API = "https://app.asana.com/api/1.0"
 # neue Aufgaben in die ERSTE Section ein — bei Sven ist das "🔴 Heute". Die drei
 # bisher entstandenen Mail-Aufgaben landeten dadurch ausgerechnet im
 # dringendsten Bereich.
-ASANA_SECTION_NAME = os.getenv("LENA_MAIL_TRIAGE_ASANA_SECTION", "📬 Aus Mails")
+ASANA_SECTION_NAME = os.getenv("LENA_MAIL_TRIAGE_ASANA_SECTION", "📥 Eingang")
 # Empfaenger der erzeugten Aufgaben. Ohne Zuweisung erscheinen sie
 # nicht in Asanas "Meine Aufgaben" — nur im Board selbst. Default ist Sven
 # (s.herbert@herbert.de), weil das Board sein persoenliches ist. Leer setzen
@@ -2010,8 +2045,29 @@ def vorgang_merken(state: Dict[str, Any], conv_id: str, ergebnis: Dict[str, Any]
 
 
 def nur_ablegen_ueberspringt(action: str) -> bool:
-    """True, wenn der Nur-Ablegen-Modus diese Entscheidung nicht umsetzen darf."""
-    return NUR_ABLEGEN and action != "ablegen"
+    """True, wenn der Nur-Ablegen-Modus diese Entscheidung nicht umsetzen darf.
+
+    Der Modus "SH entscheiden" loest ihn ab: Dort ruht nichts mehr pauschal, die
+    Sprachmodell-Entscheidungen gehen an Sven (zur_entscheidung_vorlegen), und
+    Svens eigene Regeln und Anweisungen laufen wieder.
+    """
+    return NUR_ABLEGEN and not ENTSCHEIDEN and action != "ablegen"
+
+
+def ist_regel_entscheidung(rule_id: str) -> bool:
+    """True, wenn eine deterministische Regel entschieden hat, nicht das Modell."""
+    kern = rule_id[len("thread:"):] if rule_id.startswith("thread:") else rule_id
+    return kern.startswith(REGEL_PRAEFIXE)
+
+
+def zur_entscheidung_vorlegen(action: str, rule_id: str) -> bool:
+    """True, wenn diese Mail die Kategorie "SH entscheiden" bekommt.
+
+    Nur Entscheidungen des Sprachmodells, und nur solche, die nicht "ablegen"
+    lauten. Ablegen bleibt scharf; Svens eigene Regeln und Systemabsender
+    bleiben deterministisch (z. B. Anthropic-Belege an Laura weiterleiten).
+    """
+    return ENTSCHEIDEN and action != "ablegen" and not ist_regel_entscheidung(rule_id)
 
 
 def konsequenz_ausfuehren(mail: Dict[str, Any], schritt: int,
@@ -2033,7 +2089,7 @@ def konsequenz_ausfuehren(mail: Dict[str, Any], schritt: int,
     # Gilt fuer ALLE Wege, die hier landen: neue Mails, Korrekturen und von Sven
     # von Hand gesetzte Kategorien. Ohne diese Sperre loeste eine manuell
     # gesetzte "Lena: Tun" weiterhin eine Aufgabe aus.
-    if NUR_ABLEGEN:
+    if NUR_ABLEGEN and not ENTSCHEIDEN:
         ergebnis["hinweis"] = "Nur-Ablegen-Modus: keine Entwuerfe, keine Aufgaben"
         return ergebnis
 
@@ -2163,10 +2219,25 @@ KATEGORIE_ZU_AKTION[KATEGORIE_AUTO_ABGELEGT] = "ablegen"
 MAX_KORREKTUR_MERKER = 300
 
 
+def _entscheiden_merken(state: Dict[str, Any], mid: str) -> None:
+    """Merkt eine Mail, die auf Svens Entscheidung wartet (Kategorie "SH entscheiden")."""
+    offen = state.setdefault("entscheiden_offen", {})
+    offen[mid] = datetime.now(timezone.utc).isoformat()
+    if len(offen) > MAX_ENTSCHEIDEN_MERKER:
+        for alt in list(offen.keys())[:len(offen) - MAX_ENTSCHEIDEN_MERKER]:
+            del offen[alt]
+
+
 def _lena_kategorie(categories: List[str],
                     eigene_aktion: Optional[str] = None) -> Optional[str]:
     """
     Findet die massgebliche Lena-Kategorie auf einer Mail.
+
+    "Lena: SH entscheiden" zaehlt hier bewusst NICHT: Sie ist keine Aktion, sondern
+    die Frage an Sven. Sie steht nicht in KATEGORIE_ZU_AKTION. Liegt sie neben
+    einer Aktions-Kategorie auf der Mail (Sven hat eine hinzugefuegt, ohne die
+    alte abzuwaehlen), gilt die Aktions-Kategorie. Liegt sie allein da, gibt es
+    keine Kategorie, auf die zu reagieren waere.
 
     HBE-3056: Liegen ZWEI Lena-Kategorien auf der Mail, gilt die, die NICHT von
     Lena selbst stammt. Damit genuegt es, eine Kategorie hinzuzufuegen — das
@@ -2377,7 +2448,15 @@ def _anweisung_ausfuehren(m: Dict[str, Any], mid: str, kategorie: str,
     absender = m.get("from_email", "") or ""
     empfangen = m.get("received_at", "") or ""
 
-    if _ist_zu_alt_fuer_anweisung(empfangen):
+    # Eine Mail, die auf Svens Entscheidung wartet, wird nicht als Altbestand
+    # uebergangen: Sie kann Wochen liegen, bevor er sie sich vornimmt, und er hat
+    # sie ausdruecklich selbst kategorisiert. Die 7-Tage-Grenze schuetzt vor dem
+    # Schwall beim ersten Lauf, nicht vor Svens eigener Arbeit.
+    wartete = mid in (state.get("entscheiden_offen") or {})
+    if wartete:
+        state["entscheiden_offen"].pop(mid, None)
+
+    if not wartete and _ist_zu_alt_fuer_anweisung(empfangen):
         # Einmal melden, dann Ruhe. Altbestand wird nicht rueckwirkend
         # abgearbeitet — sonst legt der erste Lauf einen Schwall Aufgaben an.
         gemeldet = state.setdefault("anweisungen_uebergangen", [])
@@ -2443,7 +2522,7 @@ def korrekturen_verarbeiten(state: Dict[str, Any]) -> Dict[str, int]:
     try:
         resp = requests.get(f"{API_URL.rstrip('/')}/api/lena/mail/inbox",
                             headers={"X-API-Key": API_KEY},
-                            params={"limit": 80, "unread_only": "false"}, timeout=60)
+                            params={"limit": KORREKTUR_LIMIT, "unread_only": "false"}, timeout=60)
         if resp.status_code != 200:
             logger.warning("Korrektur-Pass: inbox HTTP %d", resp.status_code)
             return z
@@ -2719,6 +2798,8 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
         "regel_rueckwirkend": 0,      # neue Regel auf vorhandene Mails angewendet
         # Nur-Ablegen-Modus
         "nicht_ablegen_uebersprungen": 0,  # bewusst unberuehrt im Posteingang gelassen
+        # Modus "SH entscheiden"
+        "zur_entscheidung": 0,             # Kategorie "Lena: SH entscheiden" gesetzt
     }
 
     # Save before the pass — used as `since` for override detection below
@@ -2805,6 +2886,27 @@ def _poll_once(state: Dict[str, Any]) -> Dict[str, int]:
             # sonst bezahlt jeder Zyklus dieselbe Sprachmodell-Bewertung erneut.
             counters["nicht_ablegen_uebersprungen"] += 1
             new_processed.append(mid)
+            continue
+
+        if zur_entscheidung_vorlegen(action, rule_id):
+            # "SH entscheiden": nur die Kategorie. Keine Wichtigkeit, kein
+            # Entwurf, keine Aufgabe, kein Alarm — und bewusst KEIN Eintrag in
+            # triage_results: Setzt Sven spaeter eine Kategorie, ist das eine
+            # Anweisung und keine Korrektur einer Lena-Entscheidung, aus der
+            # etwas zu lernen waere.
+            if not _categorize_mail(mid, "entscheiden"):
+                counters["failed"] += 1
+                continue
+            counters["zur_entscheidung"] += 1
+            new_processed.append(mid)
+            _entscheiden_merken(state, mid)
+            logger.info(json.dumps({
+                "event":      "mail_zur_entscheidung",
+                "message_id": mid,
+                "subject":    (m.get("subject", "") or "")[:120],
+                "sender":     sender_for_rule,
+                "rule":       rule_id,
+            }, ensure_ascii=False))
             continue
 
         ok = _categorize_mail(mid, action, skip_archive=skip_archive)
@@ -3011,7 +3113,14 @@ def main() -> None:
             "keine Entwuerfe und keine Aufgaben."
         )
 
-    if NUR_ABLEGEN:
+    if ENTSCHEIDEN:
+        logger.info(
+            "MODUS SH-ENTSCHEIDEN: Abgelegt wird nur, was sicher ablegbar ist. "
+            "Jede andere Mail, ueber die das Sprachmodell entschieden hat, bekommt "
+            "'%s'. Entwuerfe und Aufgaben entstehen erst, wenn Sven eine Kategorie setzt.",
+            KATEGORIE_ENTSCHEIDEN,
+        )
+    elif NUR_ABLEGEN:
         logger.info(
             "NUR-ABLEGEN-MODUS: Es wird nur noch abgelegt (auch als Vorschlag). "
             "Alle anderen Mails bleiben unkategorisiert im Posteingang, es entstehen "
